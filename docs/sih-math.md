@@ -258,6 +258,16 @@ Since heights are quantised to 1 cm anyway, accumulate in **int32 fixed-point**.
 
 **Quantisation error budget.** Uniform quantisation with step `q` has variance `q²/12`. For `q = 1 cm`: `σ_quant = 2.9 mm`. Compare to (12): σ_z ≈ 8 mm at 5 m, 87 mm at 50 m. Quantisation is **≤ 1/3 of sensor noise at the closest range and negligible beyond**, and a 12 cm kerb resolves into 12 levels. int16 at 1 cm spans ±327 m. **1 cm is justified, not a default.**
 
+> **Implementation note, 29 Aug — Aakash. The height-variance codec, which §3 needs and no section defines.** *`cell.height_variance` is a uint8 marked "log-quantised" with no scheme attached, so nothing in §3 could be built until one existed. Written as `src/grid/quantise.py`; three decisions worth ratifying because each changes behaviour.*
+>
+> ***Code 0 is MAXIMUM variance, not minimum.*** *`allocate()` zeros every field and the ego-motion shift zeros each newly exposed strip, so 0 is the state of every cell never looked at and every cell that just scrolled into view. If 0 decoded to the smallest variance the map would boot claiming millimetre certainty about ground it has never seen — and worse, the first Kalman gain would be ≈ 0, so the cell would never recover. Zeroed memory now means "I know nothing", the same convention as `OCC_UNKNOWN = 0`.*
+>
+> ***The floor is q²/12 = 0.083 cm², the paragraph above.*** *σ² below the storage step is a claim the storage cannot express, and a filter allowed to reach zero locks — the same argument as §3.3's process noise, from the storage side.* ***The ceiling is (8 m)²***, *the vertical extent.*
+>
+> ***Rounding is toward the larger variance*** *(floor in code space), so a stored value is always ≥ the true one and a decreasing variance can never round back up. That is what keeps this section's monotonicity test true through the codec rather than in spite of it.*
+>
+> *Resolution: 255 codes over a range of 7.7×10⁶, so one code is a factor of **1.064** — 6.4% in variance, 3.2% in σ. ⚑ Consequence for §5: Theorem 1's strict inflation is only* observable *in the stored map when the slope term clears 6.4%. Measured, for a cell settled to σ = 3 cm on a 20% slope: ring 1 (10→5 cm) +2.1%, invisible; ring 2 (20→10 cm) +8.3%, visible; ring 3 (40→20 cm) +33%, visible. The theorem is untouched — what is quantised is the evidence for it — but a demo that shows variance rising on refinement must not be built on ring 1.*
+
 **Unit test.** Run the same sequence twice; assert byte-identical map hashes. Assert `σ²` decreases monotonically under repeated consistent measurements and increases under process noise alone.
 
 ---
@@ -598,6 +608,10 @@ state = UNKNOWN   if n < n_min
 
 **Unknown is decided by observation count, not by log-odds.** "I looked and it's empty" and "I couldn't see" are different facts; a log-odds value near zero conflates them. Clamping prevents saturation — an unclamped cell that has seen 500 free observations needs 500 occupied ones to change its mind, which is why unclamped maps fail to register newly-appeared obstacles.
 
+> **Note, 29 Aug — Aakash. `l_occ` had no value anywhere.** *The state rule above is the only place it appears, and `configs/thresholds.yaml` never defined it, so `occupancy_state()` had nothing to compare against. Added as `occupancy.log_odds_occupied: 0` — the neutral reading, "more hits than misses" — and frozen with the rest of that file. Flagged rather than quietly chosen because it is a threshold, and thresholds are frozen before schedules are compared (flaw E6).*
+>
+> *Two further points the section leaves implicit, both now in code. `fuse()` applies* hits *only: a return is evidence of occupancy, but the* absence *of a return is not evidence of free space — at the 1–2% single-frame fill rate of §1.3 it is mostly just the sampling. Free-space evidence comes from beams that passed through, i.e. §10.4. And `FLAG_BLIND` short-circuits to UNKNOWN whatever the log-odds say, so a blind-cone cell cannot be argued into FREE by a later frame's geometry.*
+
 ### 10.2 Class fusion in one byte — Boyer–Moore majority ⚑
 
 A Dirichlet count vector over K classes needs K bytes; the cell budget allows one. Boyer–Moore streaming majority solves this in constant memory:
@@ -610,6 +624,12 @@ on observing class y:
 ```
 
 Packed as 4-bit candidate + 4-bit counter = 1 byte. **Guaranteed to return the true majority class whenever one exists** (>50% of observations), and the counter doubles as a confidence readout. Never average softmax vectors across frames — the mean of two confident, contradictory distributions is a confident-looking lie.
+
+> **⚑ Conflict, 29 Aug — Aakash. 19 classes do not fit in 4 bits, and three files currently assume three different class ranges.** *A 4-bit candidate holds 16. The project uses pretrained FRNet with **19** classes (CLAUDE.md, and the `moving-*` labels come from the raw `.label` files on top of that), while `gpu/kernels.py` packs its class key assuming ids `< 32`. Nothing has failed yet only because no real labels have reached the map.*
+>
+> *`boyer_moore_update()` rejects an id above 15 rather than wrapping: a silent `% 16` would relabel class 16 as 0, and 0 is `unlabeled`, so a chunk of the map would quietly become unlabelled ground — plausible-looking, and undetectable without the reference map. Loud failure at the seam is the safer of the two until the room decides.*
+>
+> *Cheapest fix that keeps the byte: **5-bit candidate + 3-bit counter**. That holds all 19 and caps the counter at 7 instead of 15; Boyer–Moore's majority guarantee does not depend on where the counter saturates, only the confidence readout gets coarser. The alternative — remapping 19 classes onto ≤16 — is a semantic decision with a report consequence, since `drivable_classes` is quoted by name in `configs/thresholds.yaml`. Either way it changes a frozen struct's semantics, so it is a whole-team call. Pinned in `test_nineteen_classes_do_not_fit`.*
 
 ### 10.3 Reflectivity normalisation
 

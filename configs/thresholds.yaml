@@ -27,6 +27,19 @@ occupancy:
   log_odds_hit: 4
   log_odds_miss: -2
   log_odds_clamp: [-64, 63]
+  log_odds_occupied: 0     # l_occ of §10.1. The section names it in the state
+                           # rule and never gives it a value; this file never
+                           # had one either, so occupancy_state() had nothing
+                           # to compare against. 0 = "more hits than misses",
+                           # the neutral reading. Frozen with the rest.
+
+# --- fusion (math §3.3) ------------------------------------------------------
+fusion:
+  process_noise_m2_per_s: 1.0e-4   # q. Without it sigma^2 collapses toward
+                                   # zero, K goes to 0 and the cell stops
+                                   # responding to new evidence -- the classic
+                                   # filter-lock failure. §3.3.
+  frame_dt_s: 0.1                  # 10 Hz
 
 # --- split / merge variance model (math §5.2 eq. 17) ------------------------
 # sigma2_child = sigma2_parent + kappa ||grad z||^2 (c_p^2 - c_c^2) + alpha

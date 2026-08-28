@@ -74,12 +74,10 @@ own buffer. `CellValue.derived_from` is that cell, at value level.
 """
 
 from dataclasses import dataclass
-from pathlib import Path
 
 import numpy as np
-import yaml
 from vrgrid.cell import FLAG_BLIND, FLAG_DERIVED, FLAG_DYNAMIC, FLAG_REFINED
-from vrgrid.grid.schedule import CONFIG_DIR
+from vrgrid.grid.schedule import load_thresholds
 
 # The kappa that §5.2's own offset geometry gives, once (17)'s (c_p^2 - c_c^2)
 # normalisation is accounted for. NOT the default -- see the module docstring.
@@ -105,11 +103,9 @@ def load_params(path=None) -> SplitParams:
     Cached: this is startup configuration, not a per-cell lookup, and the
     frame loop must not touch the filesystem.
     """
-    p = Path(path) if path is not None else CONFIG_DIR / "thresholds.yaml"
-    key = str(p.resolve())
+    key = str(path) if path is not None else "<default>"
     if key not in _PARAMS_CACHE:
-        with open(p) as f:
-            raw = yaml.safe_load(f) or {}
+        raw = load_thresholds(path)
         _PARAMS_CACHE[key] = SplitParams(**raw.get("split_merge", {}))
     return _PARAMS_CACHE[key]
 
@@ -120,15 +116,17 @@ class CellValue:
 
     The stored form is `include/vrgrid/cell.py`: int16 centimetres and a
     log-quantised uint8 variance. This module works in float64 metres on
-    purpose -- §4–5 are statements about the mathematics, and the storage
-    codec is not defined anywhere yet.
+    purpose -- §4–5 are statements about the mathematics, and the theorems are
+    statements about reals.
 
-    ⚑ That codec is a real gap and it lands on this module. Theorem 1 says
-      sigma2_child > sigma2_parent *strictly*, and a shallow enough slope
-      inflates the variance by less than one uint8 log bucket, so the two
-      stored values come out equal. Nobody has written quantise()/
-      dequantise() and nobody should invent the scheme alone: it decides how
-      much of §5 is observable in the map at all. Raised, not fixed here.
+    ⚑ The codec now exists (`grid/quantise.py`, written for §3.3) and it puts
+      a number on the gap this note used to describe: one code is a factor of
+      1.064, so Theorem 1's strict inflation is only OBSERVABLE in the stored
+      map when the slope term clears 6.4% of the parent variance. On a 20 cm
+      ring at ||grad z|| = 0.2 it does not, and the two stored values come out
+      equal. The theorem is untouched; what is quantised is the evidence for
+      it. `test_theorem_1_is_not_always_visible_through_the_codec` measures
+      exactly where the line falls.
 
     Frozen on purpose. `derived_from` is only sound if a child cannot be
     mutated behind the flag's back: the only way to change a value is to build
