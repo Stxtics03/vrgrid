@@ -48,6 +48,23 @@
   out of view: that slot belongs to a live cell now.
 - **745,000 is the LOGICAL cell count** and the only number report ratios use.
   910,000 is what we allocate. Never conflate them on a slide.
+- **A baseline that does not fault its pages in is not a baseline.** `np.zeros`
+  gets copy-on-write zero pages: `np.zeros(2_560_000_000, np.uint8)` moves RSS
+  by **0.0 MB**. Built the obvious way, the dense-3D baseline would show 0 MB
+  beside our counter and we would be claiming 286x over something visibly
+  free, on stage. `baseline.commit()` touches one byte per page; 2.56 GB costs
+  0.23 s once. `allocate()` commits ours for the same reason, plus a second
+  one: pages faulted in at startup are pages not faulted in during frame 1,
+  where the spike would land in the p99 the 10 Hz claim rests on.
+- **Show RESIDENT next to CLAIMED, never claimed alone.** Claimed is the slide;
+  resident is what the machine gave up. Measured: ours 27.86 claimed / 27.98
+  resident, uniform 192.00 / 192.03, dense 2.56 GB / 2.56 GB.
+- **Two ratios, and know which one is being asked for.** Against our *map*
+  memory (8.94 MB): 21.5x uniform, 286x dense — these are the report's, and
+  they are pure cell-count ratios. Against our *total preallocated* footprint
+  (27.86 MB, scratch included): 6.9x and 91.9x. The dashboard counter shows
+  the total, so be ready for the second pair; quoting the first while the
+  screen shows the second is how a good claim gets called cherry-picking.
 - **No OptiX / RT cores.** Unsupported on Jetson; visibility cleanup is already
   O(1) per cell by range-image comparison. Future-work line only.
 

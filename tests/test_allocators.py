@@ -216,3 +216,25 @@ def test_frame_loop_does_not_allocate(alloc):
     after = tracemalloc.get_traced_memory()[0]
     tracemalloc.stop()
     assert after - before < 4096, f"frame loop allocated {after - before} bytes"
+
+
+def test_our_own_allocation_is_resident_not_just_promised(alloc):
+    """The baselines are committed page by page so their counters are honest.
+    If ours were not, we would be comparing a real 2.56 GB against a promise,
+    and the comparison would flatter us on the one number the demo shows.
+
+    It is also a latency claim: pages faulted in at startup are pages not
+    faulted in during frame 1, and that spike would land in the p99 the 10 Hz
+    figure rests on -- during the demo, not during a benchmark.
+    """
+    assert alloc.resident_delta > 0.9 * alloc.total_bytes(), (
+        f"claimed {alloc.total_bytes():,} B, resident {alloc.resident_delta:,} B")
+
+
+def test_commit_can_be_declined(thresholds):
+    """Committing costs a moment at startup and is not always wanted -- a unit
+    test allocating a hundred grids does not need them all faulted in."""
+    schedule = load("5/10/20/40")
+    lazy = allocate(schedule, thresholds, commit_pages=False)
+    assert lazy.total_bytes() == allocate(schedule, thresholds).total_bytes()
+    assert lazy.resident_delta < 0.5 * lazy.total_bytes()

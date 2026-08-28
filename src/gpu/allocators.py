@@ -28,6 +28,7 @@ This file owns storage, not lattice semantics: `annulus_index()` takes cell
 coordinates that are already on ring L's integer lattice (math §2, Aakash).
 """
 
+import os
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -37,6 +38,67 @@ from vrgrid.gpu.kernels import (
     new_sorted_scratch,
     scatter_scratch_bytes,
 )
+
+# --- how much memory we are ACTUALLY costing the machine -----------------------
+#
+# `np.zeros` does not allocate memory. It asks for a mapping and the kernel
+# hands back copy-on-write zero pages that cost nothing until written to:
+# measured, `np.zeros(2_560_000_000, np.uint8)` moves RSS by 0.0 MB. Two
+# consequences, and both matter more than they look.
+#
+# The demo one: a dense-3D baseline built the obvious way would show 0 MB on
+# screen beside our counter, and we would be claiming a 286x reduction over
+# something visibly free, in front of judges. See gpu/baseline.py.
+#
+# The one that is ours: if our own grid is never faulted in either, the first
+# frames pay the page faults instead -- which is a latency spike in exactly
+# the p99 the 10 Hz claim rests on, and it lands during the demo rather than
+# during a benchmark. So `allocate()` commits what it allocates, and the
+# preallocation is real rather than promised.
+
+PAGE_BYTES = os.sysconf("SC_PAGE_SIZE")
+
+# Refuse to allocate past this share of what the OS says is available. An OOM
+# kill halfway through the demo is a worse outcome than a baseline that
+# declines to run and says why.
+SAFETY_FRACTION = 0.6
+
+
+def resident_bytes() -> int:
+    """This process's resident set size, from the OS rather than from us.
+
+    The counter on the dashboard should read this, not `nbytes`. `nbytes` is
+    what we asked for; this is what we are actually costing the machine, and
+    the difference between them is the entire subject of this file.
+    """
+    with open("/proc/self/statm") as f:
+        return int(f.read().split()[1]) * PAGE_BYTES
+
+
+def available_bytes() -> int:
+    """MemAvailable, the kernel's own estimate of what can be had without
+    swapping. Deliberately not MemFree, which excludes reclaimable cache and
+    would refuse allocations that would have been fine."""
+    with open("/proc/meminfo") as f:
+        for line in f:
+            if line.startswith("MemAvailable:"):
+                return int(line.split()[1]) * 1024
+    raise RuntimeError("MemAvailable missing from /proc/meminfo")
+
+
+def commit(array: np.ndarray) -> np.ndarray:
+    """Fault in every page so the allocation is real and the counter is honest.
+
+    Any *store* to a copy-on-write zero page faults it in, so an OR with zero
+    commits the page while leaving the byte exactly as it was. Assigning zero
+    would commit it just as well and would quietly blank one byte per page of
+    whatever it was handed -- harmless on the fresh `np.zeros` this is called
+    on today, and a corruption bug the first time someone reuses it.
+    """
+    flat = array.reshape(-1).view(np.uint8)
+    flat[::PAGE_BYTES] |= 0
+    return array
+
 
 # The transient layer shares the foveated grid geometry (master v4 §3.7) but
 # not the full 12-byte cell: a dynamic-obstacle hit needs a height, an
@@ -180,6 +242,7 @@ class Allocation:
     max_tracks: int
     device: str = "cpu"
     _budget: dict = field(default_factory=dict)
+    _resident_delta: int = 0
 
     def ring(self, index: int) -> RingLayout:
         return self.rings[index]
@@ -206,7 +269,14 @@ class Allocation:
         return dict(self._budget)
 
     def total_bytes(self) -> int:
+        """What we claim. Compare against `resident_delta` -- the gap between
+        the two is the difference between a bound asserted and a bound paid."""
         return sum(self._budget.values())
+
+    @property
+    def resident_delta(self) -> int:
+        """What allocating this actually cost the machine, per the OS."""
+        return self._resident_delta
 
     def report(self) -> str:
         header = (f"schedule {self.schedule_name}, device {self.device}, "
@@ -216,12 +286,15 @@ class Allocation:
             lines.append(f"  {k:<34} {v / 1e6:>8.2f} MB")
         lines.append(f"  {'-' * 34} {'-' * 8}")
         lines.append(f"  {'TOTAL (preallocated, fixed)':<34} {self.total_bytes() / 1e6:>8.2f} MB")
+        if self._resident_delta:
+            lines.append(f"  {'  of which resident, per the OS':<34} "
+                         f"{self._resident_delta / 1e6:>8.2f} MB")
         return "\n".join(lines)
 
 
 def allocate(schedule, thresholds: dict | None = None, device: str = "cpu",
              transient_rings: int | None = None, max_tracks: int = 256,
-             storage: str = "toroidal") -> Allocation:
+             storage: str = "toroidal", commit_pages: bool = True) -> Allocation:
     """Preallocate the grid, the transient layer, the refinement pool and the
     tracked-object list. Called once at startup.
 
@@ -247,6 +320,8 @@ def allocate(schedule, thresholds: dict | None = None, device: str = "cpu",
 
     n_transient = n_cells if transient_rings is None else _size(rings[:transient_rings])
 
+    resident_before = resident_bytes() if device == "cpu" else 0
+
     grid = {name: xp.zeros(n_cells, dtype=dt) for name, dt in CELL_FIELDS}
     transient = {name: xp.zeros(n_transient, dtype=dt) for name, dt in TRANSIENT_FIELDS}
     pool = {name: xp.zeros(blocks * cells_per_block, dtype=dt) for name, dt in CELL_FIELDS}
@@ -254,12 +329,21 @@ def allocate(schedule, thresholds: dict | None = None, device: str = "cpu",
     scratch = (new_sorted_scratch(max_points, n_cells) if scatter_mode == "sorted"
                else new_dense_scratch(n_cells))
 
+    # Fault every page in now rather than during frame 1. Only meaningful on
+    # host memory; a cupy allocation is device-side and this does not apply.
+    if commit_pages and device == "cpu":
+        for group in (grid, transient, pool, scratch):
+            for arr in group.values():
+                commit(arr)
+        commit(tracks)
+
     alloc = Allocation(
         schedule_name=schedule.name, rings=rings, grid=grid, transient=transient,
         pool=pool, tracks=tracks, scratch=scratch, scatter_mode=scatter_mode,
         storage=storage, pool_blocks=blocks,
         pool_cells_per_block=cells_per_block, max_tracks=max_tracks, device=device,
     )
+    alloc._resident_delta = (resident_bytes() - resident_before) if device == "cpu" else 0
     alloc._budget = {
         f"grid ({n_logical:,} logical cells x {CELL_BYTES} B)": n_logical * CELL_BYTES,
         f"toroidal padding ({n_cells - n_logical:,} slots)":

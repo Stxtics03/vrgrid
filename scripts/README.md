@@ -8,6 +8,7 @@ is not produced by something in this directory, it does not go on a slide.
 | `memory_table.py` | The memory comparison table — reads `CELL_BYTES` from the frozen struct, so the report cannot drift from the code |
 | `sampling_table.py` | `s_az` / `s_rad` tables, single-frame fill rates, blind cone, pothole range limit, pedestrian crossover |
 | `bench_scatter.py` | Scatter p50/p99 and scratch cost for both paths, and the hash proving they agree |
+| `baseline_demo.py` | Our map beside the uniform 2.5D and dense 3D baselines, all three counters resident and ticking. `--dense` allocates the full 2.56 GB |
 
 To add: `ablation_table.py` (schedule comparison, thresholds frozen first),
 `regret_plot.py`, `timing_table.py`, `ghost_removal_figure.py`.
