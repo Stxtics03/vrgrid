@@ -233,6 +233,76 @@ def test_cleanup_with_scratch_allocates_little_per_frame():
     assert peak < 4 * n, f"{peak:,} B per frame for {n:,} cells"
 
 
+def test_a_float32_range_image_is_gathered_not_copied():
+    """A range image is normally float32, and this file was built and measured
+    against float64 -- which worked only because the dev numpy was 2.5. Before
+    2.5, `np.take` wraps `out` in the SOURCE dtype, so the float32 image into
+    the float64 gather buffer is not a widening, it is a TypeError. Sizing the
+    scratch to the image is the fix; a per-frame astype() would copy 0.9 MB of
+    image on the frame path and pass this test's first half while failing its
+    second.
+    """
+    import tracemalloc
+
+    rng = np.random.default_rng(7)
+    n = 20_000
+    x, y, z = (rng.uniform(-60, 60, n), rng.uniform(-60, 60, n),
+               rng.uniform(-1.0, 3.0, n))
+    img64 = empty_image()
+    img32 = img64.astype(np.float32)
+
+    wide = visibility_cleanup(x, y, z, img64, sensor=SENSOR,
+                              scratch=new_visibility_scratch(n))
+    scratch32 = new_visibility_scratch(n, np.float32)
+    narrow = visibility_cleanup(x, y, z, img32, sensor=SENSOR, scratch=scratch32)
+
+    assert scratch32["observed"].dtype == np.float32
+    # The wall is 40 m beyond the cells, so no comparison here is close enough
+    # for float32 rounding to decide it. The two masks are the same mask.
+    assert np.array_equal(narrow.see_through, wide.see_through)
+    assert (narrow.cleared, narrow.out_of_view) == (wide.cleared, wide.out_of_view)
+
+    def frame():
+        visibility_cleanup(x, y, z, img32, sensor=SENSOR, scratch=scratch32)
+
+    frame()
+    tracemalloc.start()
+    tracemalloc.reset_peak()
+    base = tracemalloc.get_traced_memory()[0]
+    for _ in range(3):
+        frame()
+    peak = tracemalloc.get_traced_memory()[1] - base
+    tracemalloc.stop()
+    assert peak < 4 * n, f"{peak:,} B per frame for {n:,} cells"
+
+
+def test_no_scratch_means_the_image_chooses_the_width():
+    """The convenience path has nothing to disagree with, so any float image
+    works out of the box -- it is only the preallocated path that has to be
+    told once."""
+    x, y, z = cells_at([20.0, 21.0], [0.0, 2.0])
+    for dt in (np.float32, np.float64):
+        r = visibility_cleanup(x, y, z, empty_image().astype(dt), sensor=SENSOR)
+        assert r.cleared == 2, f"{dt} image cleared {r.cleared}"
+
+
+def test_an_image_that_does_not_match_the_scratch_is_refused_readably():
+    """Not with numpy's TypeError, which names two dtypes in the opposite order
+    to the mistake and depends on the numpy version to fire at all."""
+    x, y, z = cells_at([20.0, 21.0], [0.0, 2.0])
+    with pytest.raises(ValueError, match="new_visibility_scratch"):
+        visibility_cleanup(x, y, z, empty_image().astype(np.float32),
+                           sensor=SENSOR, scratch=new_visibility_scratch(4))
+
+
+def test_an_integer_range_image_has_no_way_to_say_no_return():
+    """A uint16 millimetre image is a real format and a real trap: NO_RETURN is
+    np.inf and eq (32) reads it back with np.isfinite, so an integer image
+    would silently make every no-return pixel a clearing one."""
+    with pytest.raises(ValueError, match="NO_RETURN"):
+        new_visibility_scratch(4, np.uint16)
+
+
 def test_more_candidates_than_scratch_is_refused():
     scratch = new_visibility_scratch(10)
     x, y, z = cells_at(np.full(20, 20.0), np.zeros(20))

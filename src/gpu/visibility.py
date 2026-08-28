@@ -189,13 +189,33 @@ class CleanupResult:
         return self.protected / would_clear if would_clear else 0.0
 
 
-def new_visibility_scratch(max_cells: int) -> dict:
+def new_visibility_scratch(max_cells: int, range_dtype=np.float64) -> dict:
     """Preallocated working set, sized by candidate cells. Same contract as the
-    scatter scratch: pass it every frame, never grow it inside the loop."""
-    f64 = ("dz", "r", "t1", "t2", "observed", "delta")
+    scatter scratch: pass it every frame, never grow it inside the loop.
+
+    `range_dtype` is the dtype of the range image this scratch will gather out
+    of, and it has to MATCH: `np.take` does not widen into `out`, and before
+    numpy 2.5 it refuses outright rather than widening -- a float32 image
+    gathered into a float64 buffer raises "cannot cast float64 to float32 under
+    rule 'safe'". Converting the image per frame instead would copy the whole
+    image -- 0.9 MB at 64x1800 -- which is precisely the allocation the gather
+    below is written to avoid. So the width is chosen once, at startup, like
+    every other size in this file.
+
+    float32 is what a range image normally is; float64 is the default only
+    because that is what this file was built and measured against.
+    """
+    dt = np.dtype(range_dtype)
+    if dt.kind != "f":
+        raise ValueError(
+            f"range_dtype must be a float dtype, not {dt}: NO_RETURN is np.inf "
+            "and eq (32) reads it back through np.isfinite, so an integer "
+            "image cannot express 'the beam came back from nothing'")
+    f64 = ("dz", "r", "t1", "t2", "delta")
     i32 = ("u", "v")
     b = ("in_view", "mask", "see_through", "guard")
     s = {name: np.zeros(max_cells, np.float64) for name in f64}
+    s["observed"] = np.zeros(max_cells, dt)
     s.update({name: np.zeros(max_cells, np.int32) for name in i32})
     # `flat` is intp, not int32, and the gather below asks for mode="clip".
     # Measured at 200,000 cells: intp + clip allocates 1 KB a frame, intp +
@@ -222,8 +242,19 @@ def visibility_cleanup(x_m, y_m, z_m, range_image, has_return_now=None,
     """
     sensor = sensor or HDL64E
     n = len(np.asarray(x_m))
+
+    # The image width is part of the scratch's shape, not something to convert
+    # per frame -- see new_visibility_scratch. Without a scratch there is
+    # nothing to disagree with, so the private one is sized to the image.
+    range_image = np.asarray(range_image)
     if scratch is None:
-        scratch = new_visibility_scratch(max(n, 1))
+        scratch = new_visibility_scratch(max(n, 1), range_image.dtype)
+    elif range_image.dtype != scratch["observed"].dtype:
+        raise ValueError(
+            f"range image is {range_image.dtype} but this scratch gathers into "
+            f"{scratch['observed'].dtype}; build it with "
+            f"new_visibility_scratch(n, np.{range_image.dtype}) -- converting "
+            "the image here would copy it every frame")
     cap = len(scratch["u"])
     if n > cap:
         raise ValueError(f"{n:,} candidate cells exceeds the visibility scratch "
@@ -287,12 +318,14 @@ def apply_miss(log_odds: np.ndarray, cells: np.ndarray, see_through: np.ndarray,
     return int(hit.size)
 
 
-def visibility_scratch_bytes(max_cells: int) -> int:
+def visibility_scratch_bytes(max_cells: int, range_dtype=np.float64) -> int:
     """What `new_visibility_scratch` costs, for the memory bound.
 
     Not folded into `allocate()` yet: doing so means fixing a cap on candidate
     cells per frame, which moves the headline total. That is a team decision of
     the same kind as the transient-layer line, not one to make quietly inside
-    src/gpu. 68 B per candidate cell -- 13.6 MB at 200,000.
+    src/gpu. 68 B per candidate cell -- 13.6 MB at 200,000; 64 B and 12.8 MB
+    against a float32 range image, since the gather buffer follows the image.
     """
-    return sum(a.nbytes for a in new_visibility_scratch(max_cells).values())
+    return sum(a.nbytes
+               for a in new_visibility_scratch(max_cells, range_dtype).values())
