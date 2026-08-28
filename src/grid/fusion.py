@@ -331,7 +331,10 @@ def scatter(gm, points_m, class_id, is_ground, reflectivity=None,
     that is the rule the lattice file exists to enforce.
 
     Returns the CellAggregate, so a caller can fuse it, hash it, or throw it
-    away without this function deciding.
+    away without this function deciding. ⚑ Its arrays are VIEWS into the
+    allocation's scatter scratch and are valid only until the next scatter on
+    the same scratch -- `fuse()` consumes it inside the frame, and anything
+    that must outlive the frame has to copy it.
     """
     from vrgrid.gpu.kernels import (
         measurement_variance_cm2,
@@ -375,12 +378,16 @@ def scatter(gm, points_m, class_id, is_ground, reflectivity=None,
     refl = (np.zeros(pts.shape[0], dtype=np.int32) if reflectivity is None
             else np.asarray(reflectivity, dtype=np.int32))
 
-    kernel = scatter_sorted if gm.scatter_mode == "sorted" else scatter_atomic
+    # The scratch from allocate(), not a private one. Omitting it is legal and
+    # allocates per call -- fine in a test, and 19 MB a frame in the loop,
+    # which is more than the whole grid. See gpu/CLAUDE.md.
+    scratch = getattr(getattr(gm, "allocation", None), "scratch", None)
     args = (slots, quantise_height(z), w_q, refl,
             np.asarray(class_id, dtype=np.uint8), np.asarray(is_ground, dtype=bool))
-    if kernel is scatter_atomic:
-        return kernel(*args, n_cells=gm.soa["ground_height"].size)
-    return kernel(*args)
+    if gm.scatter_mode == "sorted":
+        return scatter_sorted(*args, scratch=scratch)
+    return scatter_atomic(*args, n_cells=gm.soa["ground_height"].size,
+                          scratch=scratch)
 
 
 def visibility_cleanup(soa, range_image, thresholds) -> None:
