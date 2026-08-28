@@ -28,6 +28,23 @@ occupancy:
   log_odds_miss: -2
   log_odds_clamp: [-64, 63]
 
+# --- split / merge variance model (math §5.2 eq. 17) ------------------------
+# sigma2_child = sigma2_parent + kappa ||grad z||^2 (c_p^2 - c_c^2) + alpha
+split_merge:
+  kappa: 0.0625            # 1/16, §5.2 as written.
+                           # ⚑ §5.2 derives this from "d^2 = c_p^2/16", but
+                           # (17) multiplies it by (c_p^2 - c_c^2), not c_p^2.
+                           # The stated geometry actually gives 1/12, at every
+                           # refinement ratio m. 1/16 under-inflates by 25%.
+                           # Kept as documented; the room decides, not me.
+                           # Pinned in tests/test_splitmerge.py.
+  alpha_m2: 0.0            # sub-cell roughness. UNCALIBRATED: §5.2 calibrates
+                           # it against the reference map (§9), which is
+                           # blocked on the download. 0 is also the only value
+                           # consistent with §5.3's "splitting flat ground
+                           # costs nothing" and §5.4's unit test (c) -- raising
+                           # alpha means restating both, in the same commit.
+
 # --- sensor (HDL-64E on KITTI) ----------------------------------------------
 sensor:
   height_m: 1.73
