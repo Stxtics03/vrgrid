@@ -9,7 +9,9 @@ import pytest
 from vrgrid.gpu.kernels import (
     CEILING_NONE,
     CLASS_RADIX,
+    SORTED_SCRATCH_POINT_FIELDS,
     WEIGHT_MAX,
+    Z_MAX_CM,
     grid_bytes,
     measurement_variance_cm2,
     new_sorted_scratch,
@@ -155,6 +157,69 @@ def test_mismatched_input_lengths_are_rejected():
         scatter_sorted(np.array([0, 1]), np.array([0], np.int16), np.array([1, 1], np.int32),
                        np.array([0, 0], np.uint8), np.array([0, 0], np.uint8),
                        np.array([True, True]))
+
+
+# --- the gather contract -----------------------------------------------------
+#
+# These two exist because the kernel was written against numpy 2.5 and CI runs
+# 2.4, where the difference is not a warning but 30 red tests. Before 2.5,
+# `np.take`/`np.compress` wrap `out` in the SOURCE dtype, so gathering an int32
+# column into an int64 buffer is refused outright: "cannot cast int64 to int32
+# under rule 'safe'". Widening has to happen after the gather, not through it.
+
+
+@pytest.mark.parametrize("column, dtype", [
+    ("z_cm", np.int16), ("w_q", np.int32), ("refl", np.int32),
+    ("is_ground", np.bool_),
+])
+def test_gather_buffers_match_the_width_of_the_column_they_gather(column, dtype):
+    """Every payload buffer is exactly as wide as the input column named in
+    `fusion.scatter()`. A buffer wider than its source is a gather np.take
+    cannot perform; narrower, and it truncates silently."""
+    widths = dict(SORTED_SCRATCH_POINT_FIELDS)
+    assert np.dtype(widths[column]) == np.dtype(dtype)
+
+
+def test_the_weight_height_product_is_accumulated_in_64_bits():
+    """`w_q` gathers at int32 now, so nothing about the buffer widths forces
+    w*z to 64 bits any more -- only the explicit `dtype=` on the multiply does.
+
+    `quantise_height()` clamps to Z_MAX_CM and at that clamp the int32 product
+    still fits, with the 3x margin the weight scale was chosen for. The kernel
+    does not take a clamped column though, it takes an int16 one, and a height
+    an order of magnitude past the clamp wraps the product NEGATIVE -- which
+    fuses into a map that looks entirely plausible. 64 bits or the clamp has to
+    move into the kernel; a 3x margin held by a caller is not a guarantee.
+    """
+    n = 64
+    z_cm = 20_000                                   # 200 m: absurd, and int16
+    assert WEIGHT_MAX * z_cm > np.iinfo(np.int32).max
+    agg = scatter_sorted(
+        idx=np.zeros(n, np.int64),
+        z_cm=np.full(n, z_cm, np.int16), w_q=np.full(n, WEIGHT_MAX, np.int32),
+        refl=np.zeros(n, np.int32), class_id=np.zeros(n, np.uint8),
+        is_ground=np.ones(n, bool),
+    )
+    assert agg.wz_sum.dtype == np.int64
+    assert int(agg.wz_sum[0]) == n * WEIGHT_MAX * z_cm      # exact, in python ints
+    assert agg.mean_height_cm()[0] == z_cm
+
+    # The clamp the production caller does observe, for contrast: this one fits
+    # int32 either way, which is exactly why the bug above is invisible here.
+    assert WEIGHT_MAX * Z_MAX_CM < np.iinfo(np.int32).max
+
+
+def test_a_column_in_the_wrong_width_is_converted_not_refused():
+    """The contract is int32 reflectivity, but a uint8 column is a reasonable
+    thing for a caller to hold and must not crash the kernel -- it costs one
+    copy, which is why `fusion.scatter()` does the conversion at the boundary
+    instead."""
+    agg = scatter_sorted(
+        idx=np.array([4, 4]), z_cm=np.array([10, 20], np.int16),
+        w_q=np.ones(2, np.int32), refl=np.array([200, 250], np.uint8),
+        class_id=np.zeros(2, np.uint8), is_ground=np.ones(2, bool),
+    )
+    assert agg.refl_sum.tolist() == [450]     # not wrapped at 255
 
 
 # --- the two paths must be the same map -------------------------------------

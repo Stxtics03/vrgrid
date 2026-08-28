@@ -191,6 +191,16 @@ def scatter_sorted(idx, z_cm, w_q, refl, class_id, is_ground, point_id=None,
         return _empty_aggregate()
 
     idx = np.asarray(idx)
+    # The gathers below need each payload column to arrive in exactly the width
+    # its scratch buffer declares -- `np.take` refuses a wider `out`. These are
+    # free views when the caller already speaks the contract, which
+    # `fusion.scatter()` does; a caller that does not pays one copy per column
+    # per frame, which is why the boundary coercion lives there and not here.
+    z_cm = np.asarray(z_cm, dtype=np.int16)
+    w_q = np.asarray(w_q, dtype=np.int32)
+    refl = np.asarray(refl, dtype=np.int32)
+    is_ground = np.asarray(is_ground, dtype=np.bool_)
+    class_id = np.asarray(class_id, dtype=np.uint8)
     pid = scratch["iota"][:n] if point_id is None else np.asarray(point_id)
     if int(pid.max()) >= POINT_RADIX or int(pid.min()) < 0:
         raise ValueError(f"point ids must lie in [0, {POINT_RADIX}) to pack into the sort key")
@@ -227,14 +237,31 @@ def scatter_sorted(idx, z_cm, w_q, refl, class_id, is_ground, point_id=None,
     np.not_equal(cell[1:], cell[:-1], out=bnd[1:])
     k = int(np.count_nonzero(bnd))
     seg = scratch["seg"][:k]
-    np.compress(bnd, scratch["iota"][:m], out=seg)
+    # `np.compress(bnd, iota, out=seg)` is the natural spelling and is a
+    # numpy >= 2.5 spelling only: before that, take/compress wrap `out` in the
+    # SOURCE dtype, so a wider `out` is rejected outright -- int32 `iota` into
+    # an intp `seg` raises "cannot cast int64 to int32 under rule 'safe'". This
+    # builds the same single index temporary compress builds internally (8 bytes
+    # per touched cell, the residual the Day-2 gate accounts for) and writes it
+    # straight into the scratch, on every numpy we support.
+    np.copyto(seg, np.flatnonzero(bnd))
 
+    # Cell id per segment, taken from `key` rather than from `cell`: both carry
+    # the same number, but `key` is int64 like `cells` is, and take demands the
+    # two match. `key` is dead after this -- `cell` and `order` are already out
+    # of it -- so reusing it costs nothing.
     cells = scratch["cells"][:k]
-    np.take(cell, seg, out=cells, mode="clip")
+    np.take(key, seg, out=cells, mode="clip")
+    np.floor_divide(cells, POINT_RADIX * POINT_RADIX, out=cells)
 
-    # Gather the payloads into sorted order. `np.take` widens into the output
-    # dtype, and `reduceat` accumulates at the output's width, so an int32
-    # weight column sums into int64 with no overflow and no intermediate copy.
+    # Gather the payloads into sorted order. `np.take` does NOT widen into the
+    # output dtype -- before numpy 2.5 it wraps `out` in the SOURCE dtype, so a
+    # wider `out` is refused outright -- which is why every gather below lands
+    # in a buffer of exactly the column's own width and the widening is done
+    # afterwards, where it can be written down. `reduceat` DOES accumulate at
+    # the output's width, so the int32 weight column sums into int64 with no
+    # overflow and no intermediate copy; `np.multiply` does not, hence the
+    # explicit `dtype` on the one product that needs it.
     # mode="clip" throughout: `order` and `seg` are constructed in range, and
     # the default "raise" pays for a bounds check by copying the index array.
     z = scratch["z_cm"][:m]
@@ -246,7 +273,10 @@ def scatter_sorted(idx, z_cm, w_q, refl, class_id, is_ground, point_id=None,
     np.take(w_q, order, out=w, mode="clip")
     np.take(refl, order, out=r, mode="clip")
     np.take(is_ground, order, out=g, mode="clip")
-    np.multiply(w, z, out=wz)
+    # w peaks at 2^20 and z at 600 cm: the product needs 64 bits and the int32
+    # inputs would silently wrap without `dtype`, which is the overflow that
+    # would look like a plausible map. Buffered per chunk, so no temporary.
+    np.multiply(w, z, out=wz, dtype=np.int64)
 
     wz_sum, w_sum = scratch["wz_sum"][:k], scratch["w_sum"][:k]
     refl_sum, ceiling = scratch["refl_sum"][:k], scratch["ceiling_cm"][:k]
@@ -343,11 +373,15 @@ def _empty_aggregate() -> CellAggregate:
 # widen it -- measured 1.6 MB a frame at 200,000 elements, which is the
 # allocation this whole path exists to avoid. Trading 0.6 MB of declared
 # scratch for 1.6 MB of per-frame garbage is a bad trade twice over.
-# `w_q` stays 64-bit -- w*z peaks at 2^20 * 600, which fits int32 with only 3x
-# margin, and a silent overflow there would look like a plausible map.
+# The payload columns carry the width of the INPUT column they gather, not the
+# width the reduction wants: `np.take` will not widen into `out`. `w_q` is
+# therefore int32 like `quantise_weight` returns, and `wz` is the int64 buffer
+# that the product is widened into -- w*z peaks at 2^20 * 600, which fits int32
+# with only 3x margin, and a silent overflow there would look like a plausible
+# map.
 SORTED_SCRATCH_POINT_FIELDS = (
     ("key", np.int64), ("cell", np.int32), ("order", np.intp), ("iota", np.int32),
-    ("drop", np.bool_), ("bnd", np.bool_), ("z_cm", np.int16), ("w_q", np.int64),
+    ("drop", np.bool_), ("bnd", np.bool_), ("z_cm", np.int16), ("w_q", np.int32),
     ("wz", np.int64), ("refl", np.int32), ("is_ground", np.bool_),
 )
 
