@@ -28,7 +28,8 @@ This file owns storage, not lattice semantics: `annulus_index()` takes cell
 coordinates that are already on ring L's integer lattice (math §2, Aakash).
 """
 
-import os
+import mmap
+import sys
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -56,7 +57,11 @@ from vrgrid.gpu.kernels import (
 # during a benchmark. So `allocate()` commits what it allocates, and the
 # preallocation is real rather than promised.
 
-PAGE_BYTES = os.sysconf("SC_PAGE_SIZE")
+# `os.sysconf` and /proc are POSIX; two of the three devs are on Windows and
+# CI is ubuntu, so a Linux-only import here is invisible in CI and fatal
+# locally. `mmap.PAGESIZE` is the same number from the stdlib on every
+# platform. -- portability fix, Aakash
+PAGE_BYTES = mmap.PAGESIZE
 
 # Refuse to allocate past this share of what the OS says is available. An OOM
 # kill halfway through the demo is a worse outcome than a baseline that
@@ -71,19 +76,90 @@ def resident_bytes() -> int:
     what we asked for; this is what we are actually costing the machine, and
     the difference between them is the entire subject of this file.
     """
-    with open("/proc/self/statm") as f:
-        return int(f.read().split()[1]) * PAGE_BYTES
+    if sys.platform != "win32":
+        with open("/proc/self/statm") as f:
+            return int(f.read().split()[1]) * PAGE_BYTES
+    return _windows_working_set()
 
 
 def available_bytes() -> int:
     """MemAvailable, the kernel's own estimate of what can be had without
     swapping. Deliberately not MemFree, which excludes reclaimable cache and
     would refuse allocations that would have been fine."""
-    with open("/proc/meminfo") as f:
-        for line in f:
-            if line.startswith("MemAvailable:"):
-                return int(line.split()[1]) * 1024
-    raise RuntimeError("MemAvailable missing from /proc/meminfo")
+    if sys.platform != "win32":
+        with open("/proc/meminfo") as f:
+            for line in f:
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) * 1024
+        raise RuntimeError("MemAvailable missing from /proc/meminfo")
+    return _windows_available()
+
+
+# --- Windows equivalents of the two /proc reads above ------------------------
+# Same quantities, from the Win32 API. Kept together and out of the way so the
+# Linux path above still reads as the primary one -- the Jetson is the target
+# and these exist so the thing can be developed on the machines we have.
+
+
+def _windows_working_set() -> int:
+    """WorkingSetSize from GetProcessMemoryInfo -- the Windows name for RSS."""
+    import ctypes
+
+    class _Counters(ctypes.Structure):
+        _fields_ = [("cb", ctypes.c_ulong), ("PageFaultCount", ctypes.c_ulong),
+                    ("PeakWorkingSetSize", ctypes.c_size_t),
+                    ("WorkingSetSize", ctypes.c_size_t),
+                    ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+                    ("QuotaPagedPoolUsage", ctypes.c_size_t),
+                    ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+                    ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+                    ("PagefileUsage", ctypes.c_size_t),
+                    ("PeakPagefileUsage", ctypes.c_size_t)]
+
+    # argtypes are not optional here: a HANDLE is 64-bit and ctypes defaults
+    # to c_int, so the pseudo-handle is truncated and the call just fails.
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    psapi = ctypes.WinDLL("psapi", use_last_error=True)
+    kernel32.GetCurrentProcess.restype = ctypes.c_void_p
+    psapi.GetProcessMemoryInfo.argtypes = [ctypes.c_void_p,
+                                           ctypes.POINTER(_Counters),
+                                           ctypes.c_ulong]
+    psapi.GetProcessMemoryInfo.restype = ctypes.c_int
+
+    counters = _Counters()
+    counters.cb = ctypes.sizeof(counters)
+    if not psapi.GetProcessMemoryInfo(kernel32.GetCurrentProcess(),
+                                      ctypes.byref(counters), counters.cb):
+        raise OSError(ctypes.get_last_error(), "GetProcessMemoryInfo failed")
+    return int(counters.WorkingSetSize)
+
+
+def _windows_available() -> int:
+    """ullAvailPhys from GlobalMemoryStatusEx. Not the same estimate as
+    MemAvailable -- it does not count reclaimable cache -- so it is the more
+    conservative of the two, which is the right direction for a check whose
+    job is to refuse an allocation that would OOM mid-demo."""
+    import ctypes
+
+    class _Status(ctypes.Structure):
+        _fields_ = [("dwLength", ctypes.c_ulong), ("dwMemoryLoad", ctypes.c_ulong),
+                    ("ullTotalPhys", ctypes.c_ulonglong),
+                    ("ullAvailPhys", ctypes.c_ulonglong),
+                    ("ullTotalPageFile", ctypes.c_ulonglong),
+                    ("ullAvailPageFile", ctypes.c_ulonglong),
+                    ("ullTotalVirtual", ctypes.c_ulonglong),
+                    ("ullAvailVirtual", ctypes.c_ulonglong),
+                    ("ullAvailExtendedVirtual", ctypes.c_ulonglong)]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.GlobalMemoryStatusEx.argtypes = [ctypes.POINTER(_Status)]
+    kernel32.GlobalMemoryStatusEx.restype = ctypes.c_int
+
+    status = _Status()
+    status.dwLength = ctypes.sizeof(status)
+    if not kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+        raise OSError(ctypes.get_last_error(), "GlobalMemoryStatusEx failed")
+    return int(status.ullAvailPhys)
 
 
 def commit(array: np.ndarray) -> np.ndarray:
