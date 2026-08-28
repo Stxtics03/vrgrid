@@ -237,6 +237,12 @@ Flaw E2 was correct: "compile-time bounded" was false. Three things to prealloca
 
 - **Grid:** fixed arrays per ring, allocated once. ✓ already bounded
 - **Refinement pool:** 512 blocks × 16 cells × 12 B = **98 KB**, fixed. Eviction by priority = closeness × dynamism × time-to-collision.
+
+  > ⚑ **Note, 29 Aug — Aakash. 16 cells per block does not hold one level of the ablation, and the priority formula is inverted from its own names.**
+  >
+  > *A 16-cell block holds a 4×4 subdivision — two levels at ratio 2, which is every boundary of 5/10/20/40. **5/10/50 refines 5× between rings 1 and 2, so one level there is 25 children, larger than an entire block.** `acquire()` refuses rather than truncating a 5×5 into 16 cells and leaving nine children reading as whatever the block held before. Fixes, all cheap, none mine to pick: 32 cells per block (196 KB, still trivial), refine the ablation's ring 2 in two steps through ring 1, or state that semantic refinement is unavailable on the ablation. Only bites if a semantic gate fires on the ablation — a Day-3 question — but the number is wrong now.*
+  >
+  > *And **`closeness × dynamism × time-to-collision` taken literally is backwards**: range, a dynamism flag and TTC all get larger for things that matter less, so a static kerb 90 m away with no collision in sight outranks a pedestrian stepping off the pavement. Each factor is inverted in the implementation, and "no collision course" floors rather than zeroes the urgency term — otherwise the product collapses and the pool refuses to refine anything not about to be hit, which is almost the whole map.*
 - **Transient layer:** preallocate as a fixed grid, *not* scaled to dynamic point count.
 - **Tracked object list:** cap at N tracks with the same priority eviction.
 

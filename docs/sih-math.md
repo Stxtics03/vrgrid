@@ -460,7 +460,15 @@ Gradient by central differences over the four neighbours, scaled by the cell siz
 ∂z/∂x ≈ (z_{i+1,j} − z_{i−1,j}) / (2 c_L)                           (22)
 ```
 
-⚑ **Geometry decides, semantics filters.** A road with a 40 cm pothole has class `road` and is not drivable; a packed grass verge has class `vegetation` and often is. Class is one bit among six, not the decision. This is what the problem statement's Requirement 1 actually asks for, and it is also *evidence for* the grid: slope and step are finite differences over neighbours, which are trivial on a grid and effectively impossible on a raw point cloud without first building one.
+⚑ **Geometry decides, semantics filters.** A road with a 40 cm pothole has class `road` and is not drivable; a packed grass verge has class `vegetation` and often is. Class is one bit among six, not the decision.
+
+> **Note, 29 Aug — Aakash. Two things (22) needs that the section does not give it, plus a class that does not fit.**
+>
+> ***Neighbours stop at the ring window.*** *A central difference needs both neighbours. Rings are stored as `side × side` toroidal squares, so rolling the array wraps the far edge of the map onto the near one — a cell on the north edge would take its gradient against ground 100 m south. The border ring of cells therefore carries **bit 5 (confidence)** rather than a fabricated gradient: fail safe is already the rule for "not enough evidence", and an invented slope at the map edge is exactly the kind of plausible number that survives review.*
+>
+> ***Cross-ring neighbours are not computed.*** *A cell on the inner edge of ring 2 has neighbours in ring 1, at half the cell size. Resolving it means resampling across a ring boundary for a two-cell strip and interacts with both rings' toroidal offsets. Not done; the strip is caught by the border rule above, which is conservative in the right direction. **The ring seams are the one place the traversability layer is coarser than the map** — say so in the report rather than leaving it to be found.*
+>
+> ⚑ ***`terrain` is drivable and does not fit the cell.*** *`configs/thresholds.yaml` lists five drivable classes; `terrain` is learning id **17** and the cell's class nibble is 4 bits, holding 0–15. So one of the five classes this predicate consults on every cell cannot be stored in the map at all. This is the §10.2 class-width conflict arriving somewhere it cannot be deferred.* This is what the problem statement's Requirement 1 actually asks for, and it is also *evidence for* the grid: slope and step are finite differences over neighbours, which are trivial on a grid and effectively impossible on a raw point cloud without first building one.
 
 ### 7.2 The conservative pyramid
 
@@ -579,6 +587,12 @@ by the standard bias–variance decomposition. `spread` is the **intrinsic** sub
 - `ρ ≫ 1` — your estimate is biased beyond the terrain's own roughness. The schedule is too aggressive, or fusion is wrong.
 
 Report `ρ` per ring. It is the entire argument compressed to one dimensionless number, and it separates *what the representation costs* from *what the algorithm costs* — which nobody in the adaptive-mapping literature reports.
+
+> **Note, 29 Aug — Aakash. `ρ` per ring is a ratio of aggregates, and it has a floor.** *(27) and (28) define IL and spread per cell and the section asks for ρ per ring, which leaves the aggregation unstated. The two readings are not close.*
+>
+> ***Mean of per-cell ratios is dominated by nearly-flat footprints***, *where `spread → 0` and any error at all gives an enormous ratio. Measured on the synthetic scene with every ring cell written the* exact *mean of its footprint — bias identically zero, so ρ must be 1 by construction — the mean of ratios reports **4.8** and the ratio of aggregates `rms(IL)/rms(spread)` reports **1.0**. Implemented as the ratio of aggregates.*
+>
+> ***And ρ cannot beat the storage.*** *Heights are stored to 1 cm, so IL can never fall below the quantisation noise `q/√12 = 0.29 cm` however good the estimate. Where the terrain's own spread is finer than that — smooth asphalt — ρ is bounded below by roughly `0.29/spread` and is measuring the representation's own quantisation rather than the coarsening. **Read ρ on rough ground; on glass-smooth ground read RMSE.** Worth a line in the report before a reviewer notices it first.*
 
 ### 9.4 Dynamic removal — both directions
 
