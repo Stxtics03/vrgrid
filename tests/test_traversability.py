@@ -186,3 +186,37 @@ def test_terrain_is_drivable_and_does_not_fit_the_cell():
 
     fits = [n for n in th["traversability"]["drivable_classes"] if CLASS_IDS[n] <= 15]
     assert len(fits) == 4, "the class table changed -- recheck the 4-bit conflict"
+
+
+def test_geometry_is_not_fabricated_against_unobserved_neighbours():
+    """⚑ An unobserved cell holds ground_height 0 -- a default, not a
+    measurement at the datum. Differencing against it invents obstacles.
+
+    On a 30 cm rise, an observed cell beside an unobserved one reads as a
+    30 cm step, sets bit 2 and becomes IMPASSABLE. At ring 0's 11.6%
+    single-frame fill rate (§1.3) that is most of the map, so the far field
+    comes out walled off by cells nobody ever looked at -- and it looks like
+    terrain rather than like a bug. Found by plan regret: the map under test
+    blocked 15% of a planning window where the reference blocked 4.5%, and no
+    path existed at all.
+
+    The cell is still untraversable either way. The difference is whether it
+    says "there is a step here" or "I have not looked", and only one of those
+    is true -- and only one lets a planner tell an obstacle from a hole in
+    the data.
+    """
+    soa = _flat_grid(ground_cm=30)          # a patch of ground 30 cm up
+    soa["obs_count"][:] = 9
+    hole = SIDE * 4 + 4
+    soa["obs_count"][hole] = 0              # one neighbour never observed
+    soa["ground_height"][hole] = 0          # ... so it still holds the default
+
+    bits = _bits(soa)
+    neighbour = SIDE * 4 + 3
+    assert not bits[neighbour] & TRAV_STEP, "invented a 30 cm step out of a hole"
+    assert not bits[neighbour] & TRAV_SLOPE
+    assert bits[hole] & TRAV_CONFIDENCE, "the hole must still fail safe"
+
+    # and a real step, between two observed cells, still fires
+    soa["obs_count"][hole] = 9
+    assert _bits(soa)[neighbour] & TRAV_STEP

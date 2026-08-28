@@ -82,6 +82,28 @@ scatter:
   max_points_per_frame: 150000
   weight_scale: 1024
 
+# --- plan regret (math §8) ---------------------------------------------------
+# w of eq. (23)'s cost functional, J = sum over path cells of w(c)*dl.
+# §8.1 says "w derived from the traversability bitfield" and stops there, so
+# the derivation lives in src/eval/plan_regret.py and the numbers live here.
+plan:
+  cell_m: 0.25             # the PLANNER's resolution, not the map's. A vehicle
+                           # plans in vehicle-sized steps; the map is finer
+                           # than this wherever it matters, which is the point.
+  w_base: 1.0
+  w_roughness: 2.0         # drivable and undesirable -- a weight, not a wall
+  w_class: 3.0             # ditto: geometry decides, semantics filters (§7.1)
+  w_unknown: 4.0           # ⚑ unknown is PASSABLE here, unlike everywhere else
+                           # in this project. At P_fill < 2% per frame (§1.3)
+                           # most of the far field is unobserved, so with
+                           # unknown impassable no path exists and R(S) is
+                           # undefined for every schedule. Read the regret
+                           # together with PlanResult.unknown_fraction: zero
+                           # regret along a mostly-unknown path means the
+                           # sequence was too short, not that coarsening was free.
+  corridor_tau: 5.0        # tau of eq. (25), in cost units. Sets the refinement
+                           # budget and maps onto the pool size.
+
 # --- visibility cleanup (math §10.4) ----------------------------------------
 visibility:
   # Never clear a cell that has a return in the current scan. Without this

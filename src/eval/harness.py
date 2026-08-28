@@ -30,11 +30,51 @@ from vrgrid.eval.reference_map import ReferenceMap
 from vrgrid.gpu.allocators import allocate, bytes_allocated
 from vrgrid.gpu.kernels import CEILING_NONE
 from vrgrid.gpu.shift import RingBuffer, shift
-from vrgrid.grid import traversability
+from vrgrid.grid import gate, traversability
 from vrgrid.grid.fusion import fuse, initialise, scatter
 from vrgrid.grid.pool import RefinementPool
 from vrgrid.grid.query import GridMap
 from vrgrid.grid.schedule import load, load_thresholds
+from vrgrid.grid.transient import TrackList, separate
+from vrgrid.grid.transient import step as transient_step
+
+
+def uniform_schedule(cell_m: float, half_width_m: float = 100.0,
+                     base_cell_m: float = 0.05, hysteresis_eps: float = 0.1):
+    """A single-ring schedule: the uniform-grid baselines of §8.2's sweep.
+
+    The money plot needs points that are not our own schedule, and a uniform
+    grid is the honest comparison -- it is what everyone else builds and what
+    the 21.5x claim is measured against. Built through the same `Schedule` the
+    frozen configs load into, so it goes through `validate()` and through
+    exactly the same lattice, fusion and metric code. A baseline evaluated by
+    a second code path is not a baseline.
+
+    ⚑ The two FROZEN schedules share rings 0 and 1 (5 cm to 10 m, 10 cm to
+      25 m) and differ only beyond 25 m. So a planning problem inside 25 m
+      cannot tell them apart and will report identical regret for both -- not
+      a bug, and not evidence that the ablation is free. Either plan into the
+      far field or read the curve against these uniform points, which differ
+      from us everywhere.
+    """
+    from vrgrid.grid.schedule import Anisotropy, Ring, Schedule, validate
+
+    side = 2 * half_width_m / cell_m
+    if abs(side - round(side)) > 1e-9 or round(side) % 2:
+        raise ValueError(
+            f"{half_width_m} m at {cell_m} m is {side} cells; the allocator "
+            "needs an even whole number so the ring has a centre"
+        )
+    cells = round(side) ** 2
+    name = f"uniform_{cell_m * 100:.0f}cm"
+    s = Schedule(
+        name=name, base_cell_m=base_cell_m,
+        rings=[Ring(0, half_width_m, cell_m, cells, 0.0)],
+        total_cells=cells, vertical_extent_m=(-2.0, 6.0),
+        hysteresis_eps=hysteresis_eps, anisotropy=Anisotropy(),
+    )
+    validate(s)
+    return s
 
 
 def build_gridmap(schedule, thresholds=None, with_pool: bool = True) -> GridMap:
@@ -88,6 +128,11 @@ def recenter(gm: GridMap, x_m: float, y_m: float) -> int:
     step = want_x - gm.buffers[-1].x0
     want_y = int(np.floor(y_m / coarsest.cell_m)) - gm.buffers[-1].side // 2
     step_y = want_y - gm.buffers[-1].y0
+
+    # query() converts vehicle frame to world with this, so it has to move
+    # even when the window does not: the vehicle drifts within a coarsest cell
+    # between shifts, and 40 cm of unrecorded drift is a whole ring-0 cell.
+    gm.vehicle_xy_m = (x_m, y_m)
     if step == 0 and step_y == 0:
         return 0
 
@@ -100,10 +145,45 @@ def recenter(gm: GridMap, x_m: float, y_m: float) -> int:
     return cleared
 
 
-def run_sequence(gm: GridMap, scans, recentre: bool = True) -> int:
-    """Drive the map through a sequence. Returns the number of frames.
+@dataclass
+class RunStats:
+    """What the frame loop did, so the dashboard and §9.4 can both read it."""
 
-    `scans` yields (points in VEHICLE frame, class ids, is_ground, pose 4x4).
+    frames: int = 0
+    static_points: int = 0
+    dynamic_points: int = 0
+    dynamic_to_transient: int = 0
+    tracks: int = 0
+    gate_fired: int = 0
+    gate_acquired: int = 0
+    gate_refused: int = 0
+    gate_released: int = 0
+
+    @property
+    def removal(self) -> dict:
+        """§9.4's DR / SP / F, from the counters the loop already keeps.
+
+        DR is the fraction of dynamic returns kept OUT of the persistent map;
+        SP the fraction of static returns kept IN. Both directions, always:
+        DR alone is gameable -- delete the whole map and score 100%.
+        """
+        from vrgrid.eval.metrics import dynamic_removal
+
+        return dynamic_removal(self.dynamic_points, self.dynamic_points,
+                               self.static_points, self.static_points)
+
+
+def run_sequence(gm: GridMap, scans, recentre: bool = True,
+                 tracks: TrackList | None = None) -> RunStats:
+    """Drive the map through a sequence. Returns what it did.
+
+    `scans` yields (points in VEHICLE frame, RAW label ids, is_ground, pose).
+
+    ⚑ RAW label ids, not learning ids. `moving-*` (250-259) is what separates
+      dynamic from static, and the 19-class learning map collapses every
+      `moving-*` onto its static counterpart -- so a scan already through the
+      learning map cannot be separated at all, and every car that ever drove
+      past ends up welded into the elevation map. See grid/transient.py.
 
     ⚑ Both frames are needed and they do different jobs -- see the note on
       `fusion.scatter()`. The ring a point lands in is decided in the vehicle
@@ -118,20 +198,56 @@ def run_sequence(gm: GridMap, scans, recentre: bool = True) -> int:
     should call `transform_points()` instead of composing the matrix itself --
     two implementations of one convention is how a map ends up slowly rotating.
     """
-    frames = 0
-    for pts, cls, ground, pose in scans:
-        pose = np.asarray(pose, dtype=np.float64)
-        world = np.asarray(pts, dtype=np.float64) @ pose[:3, :3].T + pose[:3, 3]
-        if recentre:
-            recenter(gm, float(pose[0, 3]), float(pose[1, 3]))
-        agg = scatter(gm, pts, cls, ground, points_world_m=world)
-        fuse(gm.soa, agg, gm.thresholds)
-        frames += 1
+    stats = RunStats()
+    speed = 0.0
+    last_xy = None
 
+    for pts, labels, ground, pose in scans:
+        pose = np.asarray(pose, dtype=np.float64)
+        pts = np.asarray(pts, dtype=np.float64)
+        world = pts @ pose[:3, :3].T + pose[:3, 3]
+        xy = (float(pose[0, 3]), float(pose[1, 3]))
+        if last_xy is not None:
+            dt = gm.thresholds.get("fusion", {}).get("frame_dt_s", 0.1)
+            speed = float(np.hypot(xy[0] - last_xy[0], xy[1] - last_xy[1]) / dt)
+        last_xy = xy
+        if recentre:
+            recenter(gm, *xy)
+
+        # Dynamic returns never reach the persistent map. Before this existed,
+        # one car 12 m ahead moved ring 1's RMSE from 0.48 cm to 11.71 cm.
+        static, moving = separate(labels)
+        stats.static_points += int(static.sum())
+        stats.dynamic_points += int(moving.sum())
+
+        written, n_tracks = transient_step(gm, pts, labels, world, tracks=tracks)
+        stats.dynamic_to_transient += written
+        stats.tracks = n_tracks
+
+        agg = scatter(gm, pts[static], np.asarray(labels)[static] % 16,
+                      np.asarray(ground, dtype=bool)[static],
+                      points_world_m=world[static])
+        fuse(gm.soa, agg, gm.thresholds)
+
+        # Traversability before the gate: the gate consults the hazard bits,
+        # so computing it after would gate on the PREVIOUS frame's geometry.
+        _update_traversability(gm)
+        fired = gate.apply(gm, agg.cells, vehicle_speed_ms=speed,
+                           thresholds=gm.thresholds)
+        stats.gate_fired += fired["fired"]
+        stats.gate_acquired += fired["acquired"]
+        stats.gate_refused += fired["refused"]
+        stats.gate_released += fired["released"]
+        stats.frames += 1
+
+    _update_traversability(gm)
+    return stats
+
+
+def _update_traversability(gm) -> None:
     rings = [(slice(r.offset, r.offset + r.side * r.side), r.side)
              for r in gm.allocation.rings]
     traversability.update(gm.soa, gm.schedule, rings, gm.thresholds)
-    return frames
 
 
 @dataclass
@@ -216,7 +332,7 @@ def compare(schedules, scans_factory, reference: ReferenceMap,
     for name in schedules:
         s = load(name) if isinstance(name, str) else name
         gm = build_gridmap(s, thresholds)
-        frames = run_sequence(gm, scans_factory())
+        frames = run_sequence(gm, scans_factory()).frames
         results.append((s, gm, evaluate(gm, reference, frames)))
     return results
 
@@ -228,14 +344,17 @@ def _nanmean(values) -> float:
     return float(np.mean(finite)) if finite else float("nan")
 
 
-def memory_vs_regret_row(result: Result) -> dict:
-    """One point of the Day-4 headline curve. Plan regret is not wired in yet
-    (§8, and it needs the planner), so this emits the memory axis and the
-    accuracy proxy, and the regret column joins it when `plan_regret` lands.
+def memory_vs_regret_row(result: Result, regret=None) -> dict:
+    """One point of the Day-4 headline curve. Math §8.2.
 
-    Kept here rather than invented later so the curve's shape is fixed before
-    the number that goes on it exists -- which is the order that stops a plot
-    being designed around the result it got.
+    x is memory, y is R(S). The curve has a knee and the schedule should sit
+    at it: "below 8.9 MB the plan is unchanged -- regret is exactly zero --
+    and above the knee it degrades measurably."
+
+    `regret` is a `plan_regret.Regret`. Its `unknown_fraction` travels with it
+    on purpose: zero regret along a mostly-unknown path says the sequence was
+    too short to fill the map, not that the coarsening was free, and the two
+    numbers are only meaningful side by side.
     """
     rings = sorted(result.rmse_cm)
     finite = [result.rmse_cm[r] for r in rings if not np.isnan(result.rmse_cm[r])]
@@ -245,5 +364,8 @@ def memory_vs_regret_row(result: Result) -> dict:
         "logical_cells": result.logical_cells,
         "worst_ring_rmse_cm": max(finite) if finite else float("nan"),
         "mean_rho": _nanmean([result.coarsening[r]["rho"] for r in rings]),
-        "regret": None,
+        "regret": None if regret is None else regret.regret,
+        "frechet_m": None if regret is None else regret.frechet_m,
+        "unknown_fraction": None if regret is None else regret.unknown_fraction,
+        "blocked_on_reference": None if regret is None else regret.blocked_on_reference,
     }

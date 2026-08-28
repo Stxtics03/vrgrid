@@ -74,6 +74,12 @@ class GridMap:
     speed_ms: float = 0.0
     scatter_mode: str = "sorted"
 
+    # Where the vehicle is in the WORLD, in metres. Queries arrive in vehicle
+    # frame (the frozen API says so) but cells are world-anchored, so this is
+    # what converts between them. `harness.recenter()` maintains it; it stays
+    # (0, 0) for a stationary map, which is what the unit tests use.
+    vehicle_xy_m: tuple = (0.0, 0.0)
+
 
 def slot_of(gm: GridMap, x_m: float, y_m: float):
     """(ring, flat slot) for a point in vehicle frame, or (OUTSIDE, -1).
@@ -82,6 +88,19 @@ def slot_of(gm: GridMap, x_m: float, y_m: float):
     lattice (§2), slot from the ring's toroidal window. Three separate
     concerns and each one owned by the file that proved it — this function is
     only allowed to compose them, never to recompute a lattice index itself.
+
+    ⚑ The same two-frame split as `fusion.scatter()`, and it has to be: the
+      RING is decided in the vehicle frame, because foveation follows the
+      vehicle, and the CELL is decided in the world frame, because cell
+      identity is world-anchored and the toroidal window is addressed in world
+      lattice coordinates.
+
+      Index the lattice in the vehicle frame instead and nothing raises: the
+      window has moved with the vehicle, so the computed slot is simply some
+      other place's cell, or falls outside the window and reads as out-of-map.
+      A map holding 143,000 observed cells answers "never seen" five metres
+      ahead, and every metric built on `query()` quietly measures an empty
+      map. Found by the plan-regret harness reporting a path 100% unknown.
     """
     ring = ring_of(x_m, y_m, gm.schedule, gm.speed_ms)
     if ring == OUTSIDE:
@@ -89,8 +108,8 @@ def slot_of(gm: GridMap, x_m: float, y_m: float):
 
     c0 = gm.schedule.base_cell_m
     k = gm.schedule.k(ring)
-    ix = i_ring(x_m, c0, k)
-    iy = i_ring(y_m, c0, k)
+    ix = i_ring(x_m + gm.vehicle_xy_m[0], c0, k)
+    iy = i_ring(y_m + gm.vehicle_xy_m[1], c0, k)
 
     slot = int(gm.buffers[ring].flat_slot(ix, iy))
     return (ring, slot) if slot >= 0 else (OUTSIDE, -1)
@@ -175,9 +194,12 @@ def _refined(gm: GridMap, ring: int, slot: int, x_m: float, y_m: float):
     k_parent = gm.schedule.k(ring)
     m = k_parent // k_child                       # children per side
 
-    # Where inside the parent the point falls, in child cells.
-    ox = i_ring(x_m, c0, k_child) - i_ring(x_m, c0, k_parent) * m
-    oy = i_ring(y_m, c0, k_child) - i_ring(y_m, c0, k_parent) * m
+    # Where inside the parent the point falls, in child cells. World frame,
+    # for the same reason slot_of() uses it.
+    wx = x_m + gm.vehicle_xy_m[0]
+    wy = y_m + gm.vehicle_xy_m[1]
+    ox = i_ring(wx, c0, k_child) - i_ring(wx, c0, k_parent) * m
+    oy = i_ring(wy, c0, k_child) - i_ring(wy, c0, k_parent) * m
     inner = int(oy) * m + int(ox)
     return gm.pool.cells, gm.pool.block_cells(block).start + inner
 

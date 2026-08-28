@@ -46,7 +46,7 @@ def scene(tmp_path_factory):
                    np.ones(int((~moving).sum()), dtype=bool), pose)
 
     gm = build_gridmap(load(SCHEDULE))
-    frames = run_sequence(gm, scans())
+    frames = run_sequence(gm, scans()).frames
     return gm, reference, frames
 
 

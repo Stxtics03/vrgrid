@@ -216,3 +216,62 @@ def test_occupied_and_free_are_distinguished(gm):
     gm.soa["log_odds"][slot] = -30
     assert query(gm, 7.0, 2.0).occupancy == OCC_FREE
     assert free_space(gm, 7.0, 2.0)
+
+
+# --- the two frames, after the vehicle has moved -----------------------------
+
+
+def test_query_finds_observed_cells_after_the_map_has_moved():
+    """⚑ Regression. Queries arrive in VEHICLE frame; cells are WORLD-anchored.
+    Index the lattice in the vehicle frame and nothing raises -- the window has
+    moved with the vehicle, so the slot computed is some other place's cell, or
+    falls outside the window and reads as out-of-map.
+
+    A map holding 143,000 observed cells then answers "never seen" five metres
+    ahead, and every metric built on query() quietly measures an empty map.
+    Hidden for a while because every earlier test kept the vehicle at the
+    origin, where the two frames coincide. Found by the plan-regret harness
+    reporting a planned path 100% unknown.
+    """
+    import tempfile
+    from pathlib import Path
+
+    import numpy as np
+    from vrgrid.eval.harness import build_gridmap, run_sequence
+    from vrgrid.eval.synthetic import read_sequence, write_sequence
+    from vrgrid.grid.query import window_cells
+
+    root = Path(tempfile.mkdtemp())
+    write_sequence(root, "99", n_frames=6)
+
+    def scans():
+        for pts, labels, pose in read_sequence(root, "99"):
+            moving = (labels >= 250) & (labels <= 259)
+            yield (pts[~moving], (labels[~moving] % 16).astype("uint8"),
+                   np.ones(int((~moving).sum()), dtype=bool), pose)
+
+    gm = build_gridmap(load("5/10/20/40"))
+    run_sequence(gm, scans())
+    assert gm.vehicle_xy_m[0] > 5.0, "the vehicle did not move; the bug cannot show"
+
+    # Walk the map's own observed cells and ask query() about each one's centre.
+    hits = 0
+    for ring in (0, 1):
+        buf = gm.buffers[ring]
+        ix, iy = window_cells(buf)
+        slots = np.arange(buf.slots) + buf.offset
+        seen = np.flatnonzero(gm.soa["obs_count"][slots] > 0)
+        assert seen.size > 100, f"ring {ring} holds nothing to check"
+
+        cell_m = gm.schedule.rings[ring].cell_m
+        for k in seen[:: max(1, seen.size // 60)]:
+            wx = (ix[k] + 0.5) * cell_m          # world metres
+            wy = (iy[k] + 0.5) * cell_m
+            q = query(gm, wx - gm.vehicle_xy_m[0], wy - gm.vehicle_xy_m[1])
+            if q.confidence == gm.soa["obs_count"][slots[k]]:
+                hits += 1
+
+    assert hits > 100, (
+        f"only {hits} observed cells were reachable through query(); the "
+        "vehicle-to-world conversion is wrong again"
+    )

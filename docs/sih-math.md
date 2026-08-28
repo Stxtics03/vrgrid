@@ -520,6 +520,16 @@ Plan regret:   R(S) = J_{M*}(π_S) − J_{M*}(π*)   ≥ 0                (23)
 
 Report alongside a purely geometric measure, the discrete Fréchet distance `d_F(π_S, π*)`, which catches the case where a detour costs the same but goes somewhere quite different.
 
+> **⚑⚑ Note, 29 Aug — Aakash. Three things eq. (23) needs that §8 does not give it. The third one can reverse the headline.**
+>
+> **(a) `w` is undefined.** §8.1 says "`w` derived from the traversability bitfield" and stops. Derived in `src/eval/plan_regret.py`, numbers in `configs/thresholds.yaml` under `plan:`. The split follows §7.1: clearance, slope and step are **impassable** (the vehicle cannot), roughness and class are **weights** (it would rather not). Geometry decides, semantics filters — now as numbers.
+>
+> **(b) Unknown cannot be impassable here, and that is a real concession.** Everywhere else in this project unknown fails safe. For a planner that rule makes R(S) *undefined*: at `P_fill < 2%` per frame most of the far field has never been observed, so no path exists for any schedule. Unknown is therefore passable at price `w_unknown`, and the fraction of each path crossing it is reported beside R(S). **Zero regret along a mostly-unknown path means the sequence was too short to fill the map, not that the coarsening was free.**
+>
+> **(c) ⚑ R(S) compared across schedules measures FILL RATE, not coarsening, unless it is restricted to ground every schedule observed.** Measured on the synthetic scene, one 11 × 11 m window: `5/10/20/40` scored **5.803** against uniform-20 cm's **0.146** — read naively, forty times worse. Nothing was impassable in either map. The 5 cm ring holds few returns per cell, so 65% of its cells sat below `n_min` against the uniform grid's 4%, paid `w_unknown`, and the planner routed around a map that was merely *sparse*. **A finer schedule is penalised for resolving finely, and the effect is large enough to reverse the result.** `common_support()` restricts both maps to cells every schedule observed; with it the same comparison reads 1.793 against 0.146 and the unknown fraction is 0%. Any ablation quoting R(S) without the unknown fraction beside it is not interpretable.
+>
+> **And one that is not a §8 defect but bites here first:** a planning cell must AGGREGATE over its footprint, not sample the map at its centre. A 25 cm planning cell over a 5 cm ring covers 25 map cells and at ring-0 fill rates the centre is usually a gap between beam tracks, so centre-sampling shows a map that is mostly holes — worse the finer the schedule, and it left the common support of six schedules disconnected, with no path at all. The combination rule is §7.2's: OR the bitfields, a block is safe only if every cell in it is. Done by sampling for now; it should call `query_conservative()` when the pyramid lands.
+
 ### 8.2 The money plot
 
 Sweep `S` over schedules (5/10/20/40, 5/10/50, uniform 5, uniform 10, uniform 20, …). Plot memory on x, `R(S)` on y. The curve has a knee. The result reads:
@@ -642,6 +652,10 @@ Packed as 4-bit candidate + 4-bit counter = 1 byte. **Guaranteed to return the t
 > **⚑ Conflict, 29 Aug — Aakash. 19 classes do not fit in 4 bits, and three files currently assume three different class ranges.** *A 4-bit candidate holds 16. The project uses pretrained FRNet with **19** classes (CLAUDE.md, and the `moving-*` labels come from the raw `.label` files on top of that), while `gpu/kernels.py` packs its class key assuming ids `< 32`. Nothing has failed yet only because no real labels have reached the map.*
 >
 > *`boyer_moore_update()` rejects an id above 15 rather than wrapping: a silent `% 16` would relabel class 16 as 0, and 0 is `unlabeled`, so a chunk of the map would quietly become unlabelled ground — plausible-looking, and undetectable without the reference map. Loud failure at the seam is the safer of the two until the room decides.*
+>
+> **⚑ Update, 29 Aug — Aakash. The cost of this is now concrete, and it is worse than "some classes are missing".** *The semantic gate (master v4 §3.4) exists for thin structures whose geometry is smaller than the cell they land in past 25 m. The canonical two are **`pole` (id 18)** and **`traffic-sign` (id 19)**. Neither fits the 4-bit nibble, so no cell can ever report them and **the gate's class criterion is dead code that reads as working** — it matches against ids no cell can hold, fires on nothing, and nothing fails. `gate.unstorable_refine_classes()` names them rather than letting a `% 16` turn `pole` into `other-vehicle` and `traffic-sign` into `road`. It comes back empty by itself the day the byte is re-split.*
+>
+> *Separately, `terrain` (id 17) is in `drivable_classes` and does not fit either — so one of the five classes the traversability predicate consults on every cell is unstorable too (§7.1). Three independent places now, all from one byte.*
 >
 > *Cheapest fix that keeps the byte: **5-bit candidate + 3-bit counter**. That holds all 19 and caps the counter at 7 instead of 15; Boyer–Moore's majority guarantee does not depend on where the counter saturates, only the confidence readout gets coarser. The alternative — remapping 19 classes onto ≤16 — is a semantic decision with a report consequence, since `drivable_classes` is quoted by name in `configs/thresholds.yaml`. Either way it changes a frozen struct's semantics, so it is a whole-team call. Pinned in `test_nineteen_classes_do_not_fit`.*
 

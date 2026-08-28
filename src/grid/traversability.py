@@ -21,6 +21,16 @@ alike.
 
 --- what the section leaves out, and what this file does about it ---------
 
+**Neighbours must have been OBSERVED, not merely exist.** An unobserved cell
+holds ground_height 0, which is a default and not a measurement at the datum.
+Differencing against it fabricates obstacles -- on a 30 cm rise, an observed
+cell beside an unobserved one reads as a 30 cm step and becomes impassable.
+At ring 0's 11.6% single-frame fill rate that is most of the map. Bits 1 and 2
+are therefore computed only where the cell and its four neighbours have all
+been seen; everything else carries bit 5 instead, which says "I have not
+looked" rather than "there is a step here". Both are untraversable and only
+one is true.
+
 **Neighbours stop at the ring window.** (22) is a central difference over the
 four neighbours, which needs both of them. A ring is stored as a side x side
 toroidal square, so rolling the array wraps the far edge of the map onto the
@@ -143,6 +153,26 @@ def bitfield(soa, ring_slice: slice, side: int, cell_m: float, thresholds=None):
 
     out = np.zeros(ground.size, dtype=np.uint8)
 
+    # ⚑ An unobserved cell holds ground_height 0, which is a DEFAULT, not a
+    # measurement at the datum. Differencing against it fabricates obstacles:
+    # on a 30 cm rise, an observed cell beside an unobserved one reads as a
+    # 30 cm step, sets bit 2, and becomes impassable. At ring 0's 11.6%
+    # single-frame fill rate (§1.3) that is most of the map, so the far field
+    # would come out walled off by cells that were never looked at -- and it
+    # looks like terrain, not like a bug.
+    #
+    # So the geometric bits are only computed where the cell AND its four
+    # neighbours have been seen. Everything else already carries bit 5
+    # (confidence), which is the honest statement: not "there is a step here"
+    # but "I have not looked". Both are untraversable; only one is true, and
+    # only one lets a planner tell an obstacle from a hole in the data.
+    seen = (n >= 1).reshape(side, side)
+    geometric = seen.copy()
+    for axis in (0, 1):
+        for shift in (-1, 1):
+            geometric &= np.roll(seen, shift, axis=axis)
+    geometric = geometric.reshape(-1)
+
     # bit 0 -- clearance
     h_vehicle_cm = t["h_vehicle_m"] * 100.0
     out |= np.where(ceiling - ground < h_vehicle_cm, TRAV_CLEARANCE, 0).astype(np.uint8)
@@ -150,11 +180,11 @@ def bitfield(soa, ring_slice: slice, side: int, cell_m: float, thresholds=None):
     # bit 1 -- slope, compared as tan(theta_max) so no arctan on the hot path
     dzdx, dzdy = gradient(ground, side, cell_m)
     slope = np.hypot(dzdx, dzdy)
-    out |= np.where(slope > np.tan(np.radians(t["theta_max_deg"])),
+    out |= np.where(geometric & (slope > np.tan(np.radians(t["theta_max_deg"]))),
                     TRAV_SLOPE, 0).astype(np.uint8)
 
     # bit 2 -- step
-    out |= np.where(max_step_cm(ground, side) > t["s_max_m"] * 100.0,
+    out |= np.where(geometric & (max_step_cm(ground, side) > t["s_max_m"] * 100.0),
                     TRAV_STEP, 0).astype(np.uint8)
 
     # bit 3 -- roughness. The stored variance is a log code, in cm^2 once
