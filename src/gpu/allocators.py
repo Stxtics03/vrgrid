@@ -251,7 +251,7 @@ def allocate(schedule, thresholds: dict | None = None, device: str = "cpu",
     transient = {name: xp.zeros(n_transient, dtype=dt) for name, dt in TRANSIENT_FIELDS}
     pool = {name: xp.zeros(blocks * cells_per_block, dtype=dt) for name, dt in CELL_FIELDS}
     tracks = xp.zeros(max_tracks, dtype=TRACK_DTYPE)
-    scratch = (new_sorted_scratch(max_points) if scatter_mode == "sorted"
+    scratch = (new_sorted_scratch(max_points, n_cells) if scatter_mode == "sorted"
                else new_dense_scratch(n_cells))
 
     alloc = Allocation(

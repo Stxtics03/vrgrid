@@ -10,7 +10,9 @@ from vrgrid.gpu.kernels import (
     CEILING_NONE,
     CLASS_RADIX,
     WEIGHT_MAX,
+    grid_bytes,
     measurement_variance_cm2,
+    new_sorted_scratch,
     quantise_height,
     quantise_weight,
     scatter_atomic,
@@ -179,3 +181,124 @@ def test_scratch_cost_is_reported_for_both_paths():
     assert scatter_scratch_bytes("atomic", 2 * 745_000, 150_000) == 2 * atomic_b
     with pytest.raises(ValueError, match="unknown scatter mode"):
         scatter_scratch_bytes("magic", 1, 1)
+
+
+# --- the Day-2 gate: no allocation inside the frame loop ---------------------
+#
+# "Verify with a profiler, not by reading the code." Reading the code was
+# exactly how this was got wrong the first time: `scatter_sorted` was handed a
+# preallocated scratch by `allocate()`, never touched it, and allocated 19 MB a
+# frame -- more than twice the whole 8.94 MB grid -- behind a docstring that
+# said it didn't. These measure instead.
+
+
+def _per_frame_bytes(fn, frames=3):
+    """Peak transient allocation over a few steady-state frames."""
+    import tracemalloc
+
+    fn()  # warm: first call may touch lazily-initialised numpy internals
+    tracemalloc.start()
+    tracemalloc.reset_peak()
+    base = tracemalloc.get_traced_memory()[0]
+    for _ in range(frames):
+        fn()
+    peak = tracemalloc.get_traced_memory()[1] - base
+    tracemalloc.stop()
+    return peak
+
+
+def _scan_of(rng, n, n_cells):
+    scan = random_scan(rng, n=n, n_cells=n_cells)
+    return scan
+
+
+def test_scatter_with_scratch_allocates_a_small_bounded_amount():
+    """The shipping path runs in preallocated buffers.
+
+    Not literally zero on the numpy stand-in: `np.compress` builds one index
+    temporary of 8 bytes per touched cell that it gives no `out=` to reach. That
+    residual is bounded by the cells one scan can touch, and on the CUDA port it
+    is `cub::DeviceSelect::Flagged`'s temp storage, which IS preallocated. Every
+    other step below writes through an `out=`.
+    """
+    rng = np.random.default_rng(4)
+    n_cells = 200_000
+    scan = _scan_of(rng, 60_000, n_cells)
+    scratch = new_sorted_scratch(60_000, n_cells)
+
+    touched = len(scatter_sorted(**scan, scratch=scratch))
+    per_frame = _per_frame_bytes(lambda: scatter_sorted(**scan, scratch=scratch))
+
+    # Generous factor over the one temporary; tight enough that reintroducing a
+    # single per-point copy (8 bytes x 60,000 points) would break it.
+    assert per_frame < 4 * 8 * touched, (
+        f"{per_frame:,} B per frame against {touched:,} touched cells")
+    assert per_frame < grid_bytes(n_cells) / 2
+
+
+def test_dropping_the_scratch_is_caught_by_the_profiler():
+    """Negative control. Without this the test above passes on an
+    implementation that ignores its scratch entirely -- which is the bug it
+    exists to catch, and the one that was actually there."""
+    rng = np.random.default_rng(4)
+    n_cells = 200_000
+    scan = _scan_of(rng, 60_000, n_cells)
+    scratch = new_sorted_scratch(60_000, n_cells)
+
+    with_scratch = _per_frame_bytes(lambda: scatter_sorted(**scan, scratch=scratch))
+    without = _per_frame_bytes(lambda: scatter_sorted(**scan))
+    assert without > 5 * with_scratch, (
+        f"private scratch cost {without:,} B, preallocated {with_scratch:,} B -- "
+        "the profiler can no longer tell the two apart")
+
+
+def test_per_frame_allocation_does_not_grow_with_the_grid():
+    """The claim the memory bound rests on: the same scan into a grid ten times
+    larger must not cost ten times the transient memory. A per-cell temporary
+    anywhere on this path would show up here and nowhere else."""
+    rng = np.random.default_rng(5)
+    scan = _scan_of(rng, 40_000, 100_000)
+
+    small = new_sorted_scratch(40_000, 100_000)
+    large = new_sorted_scratch(40_000, 1_000_000)
+    a = _per_frame_bytes(lambda: scatter_sorted(**scan, scratch=small))
+    b = _per_frame_bytes(lambda: scatter_sorted(**scan, scratch=large))
+
+    assert b < 1.5 * a + 4096, f"10x the grid cost {b:,} B against {a:,} B"
+    assert scatter_scratch_bytes("sorted", 1_000_000, 40_000) == \
+           scatter_scratch_bytes("sorted", 100_000, 40_000)
+
+
+def test_scratch_arrays_are_reused_not_replaced():
+    """Steady state: after many frames the buffers must be the same objects at
+    the same sizes. A path that quietly swapped in a bigger array would keep
+    the profiler happy for one frame and blow the bound on a busy one."""
+    scratch = new_sorted_scratch(30_000, 50_000)
+    before = {k: (id(v), v.nbytes) for k, v in scratch.items()}
+    for seed in range(20):
+        scatter_sorted(**_scan_of(np.random.default_rng(seed), 30_000, 50_000),
+                       scratch=scratch)
+    assert {k: (id(v), v.nbytes) for k, v in scratch.items()} == before
+
+
+def test_too_many_points_is_refused_rather_than_reallocated():
+    """The one place growth would be tempting. Growing the buffer here is an
+    allocation in the frame loop, so it raises and names the config knob."""
+    rng = np.random.default_rng(7)
+    scratch = new_sorted_scratch(1_000, 4_096)
+    with pytest.raises(ValueError, match="max_points_per_frame"):
+        scatter_sorted(**_scan_of(rng, 2_000, 4_096), scratch=scratch)
+
+
+def test_aggregate_is_a_view_into_the_scratch():
+    """Documented contract, asserted so nobody relies on the opposite: the
+    aggregate is valid only until the next scatter on the same scratch."""
+    rng = np.random.default_rng(8)
+    scratch = new_sorted_scratch(5_000, 4_096)
+    agg = scatter_sorted(**_scan_of(rng, 5_000, 4_096), scratch=scratch)
+    assert agg.cells.base is scratch["cells"]
+    first = agg.wz_sum.copy()
+    scatter_sorted(**_scan_of(np.random.default_rng(9), 5_000, 4_096), scratch=scratch)
+    assert not np.array_equal(agg.wz_sum, first), (
+        "the second scatter did not write through the first aggregate's buffers, "
+        "so this contract is stale and the docstring is wrong")
