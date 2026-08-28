@@ -28,11 +28,11 @@
   (default, scratch sized by points) and `scatter_atomic` (dense accumulator,
   the literal reading of master v4 §3.5). `tests/test_kernels.py` asserts they
   agree field-for-field; if they diverge, the optimisation is the bug. At
-  120,000 returns into 745,000 cells: sorted p50 5.8 / p99 8.9 ms, 10.6 MB
-  scratch; atomic p50 15.3 / p99 24.2 ms, 19.4 MB. 11.2× headroom at 10 Hz.
-- **Scratch is now the largest line item in the budget** — 13.2 MB at the
+  120,000 returns into 745,000 cells: sorted p50 5.9 / p99 6.1 ms; atomic p50
+  15.3 / p99 24.2 ms. 16× headroom at 10 Hz.
+- **Scratch is now the largest line item in the budget** — 15.0 MB at the
   150,000-point cap, against 8.94 MB of grid, for a preallocated total of
-  27.86 MB. That is the honest price of a zero-allocation scatter: the same
+  29.66 MB. That is the honest price of a zero-allocation scatter: the same
   memory was being spent per frame before, just undeclared and with the GC
   paying for it. `scatter.max_points_per_frame` in `configs/thresholds.yaml`
   is the knob — a real HDL-64E sweep is ~120,000, so 150,000 has headroom to
@@ -65,6 +65,29 @@
   (27.86 MB, scratch included): 6.9x and 91.9x. The dashboard counter shows
   the total, so be ready for the second pair; quoting the first while the
   screen shows the second is how a good claim gets called cherry-picking.
+- **`np.take` allocates unless you ask it not to.** With int32 indices and the
+  default `mode="raise"` it copies the index array twice — once to widen it to
+  intp, once to bounds-check it. Measured at 200,000 elements: 3.2 MB a frame
+  int32/raise, 1.6 MB intp/raise, **1 KB intp/clip**. Every gather on a frame
+  path uses `intp` indices and `mode="clip"`, and the index buffers are built
+  in range so the check cannot fire. This alone took scatter's p99 from 8.9 to
+  6.1 ms and visibility's from 17.5 to 11.4 ms. It is worth 0.6 MB of extra
+  declared scratch to not narrow `order` to int32.
+- **Visibility cleanup is eq (32) plus the guard, and it produces a MASK.**
+  Log-odds and the three-state decision are fusion (§10.1, Aakash). At 200,000
+  candidate cells: p50 8.2 / p99 11.4 ms, 0.07 MB transient, 13.6 MB scratch.
+- **⚑ The visibility scratch is NOT in `allocate()` yet, on purpose.** Sizing it
+  means choosing a cap on candidate cells per frame, which moves the headline
+  total — the same kind of decision as the transient-layer line, so it goes to
+  the room rather than into my directory quietly. `visibility_scratch_bytes()`
+  computes it for whatever cap gets chosen.
+- **⚑ delta for eq (32): the math doc and the config disagree.** §10.4 says
+  `delta = 3*sigma(r)` precisely so the band widens with range; the config says
+  a flat 0.30 m, which is 26.9σ at 5 m and 1.7σ at 100 m — so it barely clears
+  in the near field where ghosts matter most, and it clears real structure at
+  range, which is what the guard exists to prevent. Implemented as 3σ(r) with
+  the config value as a floor for pose error. No threshold was changed; one was
+  given a new job. Raise it at a gate review.
 - **No OptiX / RT cores.** Unsupported on Jetson; visibility cleanup is already
   O(1) per cell by range-image comparison. Future-work line only.
 

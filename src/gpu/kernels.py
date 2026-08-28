@@ -11,7 +11,7 @@ associative. See math §3.4.
 Two implementations, identical outputs, tested against each other:
 
   `scatter_sorted`  (default) sorts point indices and reduces each segment.
-                    Scratch is sized by POINTS (13.2 MB at 150,000/frame),
+                    Scratch is sized by POINTS (15.0 MB at 150,000/frame),
                     independent of grid size, and nothing needs clearing
                     between frames. Allocates nothing per frame.
   `scatter_atomic`  the literal reading of master v4 §3.5 level 4: unbuffered
@@ -230,20 +230,22 @@ def scatter_sorted(idx, z_cm, w_q, refl, class_id, is_ground, point_id=None,
     np.compress(bnd, scratch["iota"][:m], out=seg)
 
     cells = scratch["cells"][:k]
-    np.take(cell, seg, out=cells)
+    np.take(cell, seg, out=cells, mode="clip")
 
     # Gather the payloads into sorted order. `np.take` widens into the output
     # dtype, and `reduceat` accumulates at the output's width, so an int32
     # weight column sums into int64 with no overflow and no intermediate copy.
+    # mode="clip" throughout: `order` and `seg` are constructed in range, and
+    # the default "raise" pays for a bounds check by copying the index array.
     z = scratch["z_cm"][:m]
     w = scratch["w_q"][:m]
     wz = scratch["wz"][:m]
     r = scratch["refl"][:m]
     g = scratch["is_ground"][:m]
-    np.take(z_cm, order, out=z)
-    np.take(w_q, order, out=w)
-    np.take(refl, order, out=r)
-    np.take(is_ground, order, out=g)
+    np.take(z_cm, order, out=z, mode="clip")
+    np.take(w_q, order, out=w, mode="clip")
+    np.take(refl, order, out=r, mode="clip")
+    np.take(is_ground, order, out=g, mode="clip")
     np.multiply(w, z, out=wz)
 
     wz_sum, w_sum = scratch["wz_sum"][:k], scratch["w_sum"][:k]
@@ -267,8 +269,8 @@ def scatter_sorted(idx, z_cm, w_q, refl, class_id, is_ground, point_id=None,
     # that point first in its segment, so this is a gather, not a reduction.
     class_src = scratch["class_src"][:k]
     out_class = scratch["class_id"][:k]
-    np.take(order, seg, out=class_src)
-    np.take(class_id, class_src, out=out_class)
+    np.take(order, seg, out=class_src, mode="clip")
+    np.take(class_id, class_src, out=out_class, mode="clip")
 
     return CellAggregate(cells, wz_sum, w_sum, count, ceiling, refl_sum, out_class)
 
@@ -334,13 +336,17 @@ def _empty_aggregate() -> CellAggregate:
 # startup: it is the default `point_id` and the index source `np.compress`
 # selects segment starts out of, and building either with `np.arange` per frame
 # would be an allocation in the loop.
-# Only `key` and the two accumulator columns need 64 bits. A cell index fits in
-# CELL_MAX and a position in POINT_RADIX, so those are int32: at 150,000 points
-# that narrowing is 3.0 MB off a line item that is already the largest in the
-# budget. `w_q` stays 64-bit -- w*z peaks at 2^20 * 600, which fits int32 with
-# only 3x margin, and a silent overflow there would look like a plausible map.
+# `cell` and `iota` are int32 because a cell index fits in CELL_MAX and a
+# position in POINT_RADIX, and at 150,000 points that narrowing is worth 1.2 MB
+# each off the largest line in the budget. `order` is deliberately NOT narrowed:
+# it indexes every gather below, and np.take copies a non-intp index array to
+# widen it -- measured 1.6 MB a frame at 200,000 elements, which is the
+# allocation this whole path exists to avoid. Trading 0.6 MB of declared
+# scratch for 1.6 MB of per-frame garbage is a bad trade twice over.
+# `w_q` stays 64-bit -- w*z peaks at 2^20 * 600, which fits int32 with only 3x
+# margin, and a silent overflow there would look like a plausible map.
 SORTED_SCRATCH_POINT_FIELDS = (
-    ("key", np.int64), ("cell", np.int32), ("order", np.int32), ("iota", np.int32),
+    ("key", np.int64), ("cell", np.int32), ("order", np.intp), ("iota", np.int32),
     ("drop", np.bool_), ("bnd", np.bool_), ("z_cm", np.int16), ("w_q", np.int64),
     ("wz", np.int64), ("refl", np.int32), ("is_ground", np.bool_),
 )
@@ -348,9 +354,9 @@ SORTED_SCRATCH_POINT_FIELDS = (
 # Per-touched-cell columns -- the aggregate itself, returned as views. Sized for
 # the worst case of one cell per point, which is what makes the bound a bound.
 SORTED_SCRATCH_CELL_FIELDS = (
-    ("seg", np.int32), ("cells", np.int64), ("wz_sum", np.int64), ("w_sum", np.int64),
+    ("seg", np.intp), ("cells", np.int64), ("wz_sum", np.int64), ("w_sum", np.int64),
     ("n", np.int32), ("ceiling_cm", np.int16), ("refl_sum", np.int32),
-    ("class_id", np.uint8), ("class_src", np.int32),
+    ("class_id", np.uint8), ("class_src", np.intp),
 )
 
 
