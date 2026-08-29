@@ -500,6 +500,16 @@ Symmetrically, if `AND_mask(B)` has bit `k` set, **every** cell fails condition 
 
 **Cost.** A 4-ary pyramid over `N` cells adds `N(1/4 + 1/16 + …) = N/3`. Built over ground, ceiling and the traversability byte (5 bytes of the 12): `745,000 × 5 / 3 ≈ 1.24 MB`.
 
+> **Implementation note, 29 Aug — Shrestha. The cost figure is low by about half, and the pyramid needs one field §7.2 does not list.** *Built as `src/gpu/pyramid.py`; three things to ratify, because two of them change a number and one changes what a caller is allowed to conclude.*
+>
+> ***The cost is 2.73 MB, not 1.24 MB.*** *Two independent errors, and they compound. A node does not store the source fields, it stores the* reductions*: ground contributes* both *`H_max` and `H_min`, so it is 4 bytes and not 2, and `n_min` adds a fifth — **8 bytes per node by §7.2's own list**, before anything is added. And `N` is the ring* windows*, which are the 910,000 allocated slots, not the 745,000 logical cells: the pyramid is built over what is stored, and §2.4 stores full squares. `910,000 × 9 / 3 = 2.73 MB`, measured by `pyramid_bytes()` and pinned in a test. The `N/3` claim itself is exactly right — measured ratio 3.00.*
+>
+> ***`OR_mask` is added, for 1 byte per node.*** *Without it the only available notion of SAFE is Theorem 3's, which covers bits 0, 2 and 5 —* three of the six*. A uniformly steep bank has every cell clear on clearance, step and confidence, so Theorem 3 reports SAFE while every cell fails bit 1, and a planner reading that as "drivable" drives onto the bank. `OR_mask == 0` says every cell is traversable on* all six*, which is what `api.QueryLOD.SAFE` already promises its callers. Theorem 3 is untouched and is still tested exactly as §7.3 states it; it keeps its own name, `theorem3_safe()`, so the weaker claim can never be mistaken for the stronger one.*
+>
+> ***Levels halve by ceiling, not floor.*** *Ring windows are 400 and 500 cells across and neither is a power of two. Floor-halving 500 gives 250, 125, **62** — silently dropping the last row and column of a 125-wide level, at the map edge, where nothing looks wrong. Ceiling-halving means edge blocks are 1 cell wide rather than 2, which is a correct reduction over a block of one. The partition property (exactly one block per cell per level) is asserted the same way §2.4(a) asserts it for the lattice.*
+>
+> *Measured, 910,000 slots: rebuild p50 **2.45 ms** / p99 3.10 ms, 32× headroom at 10 Hz, zero allocation per frame. Numbers from `scripts/bench_pyramid.py`. **Not switched on by default** — it takes the preallocated total from 29.06 MB to 32.17 MB, and that is a gate-review decision, not mine.*
+
 **Unit test.** Exhaustive: for 10⁴ random blocks, if `SAFE(B)` then assert every constituent cell is individually traversable. Any counterexample is a proof failure, not a tuning issue.
 
 ---

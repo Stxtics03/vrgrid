@@ -41,6 +41,8 @@ from vrgrid.gpu.kernels import (
     new_sorted_scratch,
     scatter_scratch_bytes,
 )
+from vrgrid.gpu.pyramid import NODE_BYTES, allocate_pyramid, pyramid_bytes
+from vrgrid.gpu.pyramid import scratch_bytes as pyramid_scratch_bytes
 
 # --- the state of a cell nothing has been written into yet ---------------------
 #
@@ -414,6 +416,7 @@ class Allocation:
     pool_cells_per_block: int
     max_tracks: int
     device: str = "cpu"
+    pyramid: object = None     # None unless allocate(with_pyramid=True); §7.2
     _budget: dict = field(default_factory=dict)
     _resident_delta: int = 0
 
@@ -467,13 +470,24 @@ class Allocation:
 
 def allocate(schedule, thresholds: dict | None = None, device: str = "cpu",
              transient_rings: int | None = None, max_tracks: int = 256,
-             storage: str = "toroidal", commit_pages: bool = True) -> Allocation:
+             storage: str = "toroidal", commit_pages: bool = True,
+             with_pyramid: bool = False) -> Allocation:
     """Preallocate the grid, the transient layer, the refinement pool and the
     tracked-object list. Called once at startup.
 
     `transient_rings` limits the transient layer to the innermost N rings.
     Default is every ring. See the note in `docs/` and the budget printout --
     this is the one line item whose size is a team decision, not a derivation.
+
+    `with_pyramid` adds the conservative pyramid (§7.2). **Off by default, on
+    purpose.** It is a stretch item and it costs 3.11 MB on the default
+    schedule -- 2.73 MB of nodes plus 0.38 MB of reduction scratch -- which
+    moves the preallocated total from 29.06 MB to 32.17 MB and therefore moves
+    a number that is already on a slide. Switching it on is one argument and
+    the budget line appears with it; doing that by default would change the
+    headline from inside my directory, which is the thing the Day-0 gate
+    review said not to do. §7.2's own figure of 1.24 MB is low by about half
+    and is wrong for a second reason too -- see the note in gpu/pyramid.py.
     """
     xp = array_module(device)
     rings = derive_ring_layouts(schedule, storage)
@@ -501,6 +515,7 @@ def allocate(schedule, thresholds: dict | None = None, device: str = "cpu",
     tracks = xp.zeros(max_tracks, dtype=TRACK_DTYPE)
     scratch = (new_sorted_scratch(max_points, n_cells) if scatter_mode == "sorted"
                else new_dense_scratch(n_cells))
+    pyramid = allocate_pyramid(rings) if with_pyramid else None
 
     # The grid and the pool hold cells, so they get the empty-cell state rather
     # than raw zeros. The pool matters as much as the grid: a block handed out
@@ -522,6 +537,7 @@ def allocate(schedule, thresholds: dict | None = None, device: str = "cpu",
         pool=pool, tracks=tracks, scratch=scratch, scatter_mode=scatter_mode,
         storage=storage, pool_blocks=blocks,
         pool_cells_per_block=cells_per_block, max_tracks=max_tracks, device=device,
+        pyramid=pyramid,
     )
     alloc._resident_delta = (resident_bytes() - resident_before) if device == "cpu" else 0
     alloc._budget = {
@@ -534,6 +550,10 @@ def allocate(schedule, thresholds: dict | None = None, device: str = "cpu",
         f"refinement pool ({blocks} x {cells_per_block})": blocks * cells_per_block * CELL_BYTES,
         f"tracked objects (cap {max_tracks})": max_tracks * TRACK_DTYPE.itemsize,
     }
+    if pyramid is not None:
+        alloc._budget[f"conservative pyramid ({NODE_BYTES} B/node)"] = \
+            pyramid_bytes(rings)
+        alloc._budget["pyramid reduction scratch"] = pyramid_scratch_bytes(rings)
     return alloc
 
 

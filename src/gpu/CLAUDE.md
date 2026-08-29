@@ -130,6 +130,39 @@
   the full 64 MB when it ran alone. `resident_fraction()` asks the pages
   themselves and returns None off POSIX so callers can fall back rather than
   silently report 0.
+- **The conservative pyramid is OFF by default** (`allocate(with_pyramid=True)`).
+  It is a stretch item and it takes the preallocated total from 29.06 MB to
+  32.17 MB — a number already on a slide does not get to move because a
+  default did. 2.73 MB of nodes plus 0.38 MB of shared reduction scratch;
+  rebuild p50 2.45 / p99 3.10 ms over 910,000 slots, 32× headroom, zero
+  allocation per frame. `scripts/bench_pyramid.py` produces all of it.
+- **⚑ §7.2's 1.24 MB is low by about half, for two compounding reasons.** A
+  node stores the REDUCTIONS, not the source fields: ground contributes both
+  `H_max` and `H_min`, so it is 4 bytes not 2, and `n_min` adds a fifth —
+  8 B/node by §7.2's own list, 9 with `OR_mask`. And `N` is the ring WINDOWS,
+  910,000 allocated slots, not 745,000 logical cells. Corrected: 2.73 MB, and
+  the `N/3` claim itself is exactly right (measured 3.00). Ratify at a gate
+  review before it reaches a slide.
+- **Three pyramid predicates, and only one of them means "drivable".**
+  `theorem3_safe()` is §7.3 verbatim and covers bits 0, 2 and 5 — three of
+  six. A uniformly steep bank is SAFE by Theorem 3 and fails bit 1 in every
+  cell, so a planner reading it as drivable drives onto the bank. `all_clear()`
+  (`OR_mask == 0`) is the one that answers the question, and it is what
+  `classify()` returns as `QueryLOD.SAFE`. `certainly_blocked()`
+  (`AND_mask != 0`) needs a COMMON reason: a block where every cell is blocked
+  differently comes back MIXED, which costs a descent and never safety.
+- **Pyramid levels halve by CEILING.** Ring windows are 400 and 500 across,
+  neither a power of two, and floor-halving 500 gives 250, 125, **62** —
+  dropping a 125-wide level's last row and column silently, at the map edge.
+  Edge blocks are therefore 1 cell wide, which is why the reduction is two
+  pairwise passes and not `reshape(h, 2, h, 2)`: the reshape spelling needs an
+  even side, so it would need `np.pad` per field per level per ring per frame.
+- **The theorem test is mutation-checked.** Six deliberate breakages — each
+  min written as a max, and/or swapped, floor-halving, the odd leftover column
+  dropped — and all six fail the suite. §7.3's test passes trivially on an
+  implementation where SAFE is never true, and on a uniform-random map SAFE
+  fires ~150 times in 120 maps, so the test asserts a floor on how often it
+  saw its own antecedent and generates terrain-shaped maps to get there.
 - **No OptiX / RT cores.** Unsupported on Jetson; visibility cleanup is already
   O(1) per cell by range-image comparison. Future-work line only.
 
