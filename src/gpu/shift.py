@@ -26,6 +26,7 @@ every ratio in the report is computed from. Allocation is 910,000 slots.
 from dataclasses import dataclass
 
 import numpy as np
+from vrgrid.gpu.allocators import EMPTY_CELL
 
 
 @dataclass
@@ -102,16 +103,25 @@ def shift(buf: RingBuffer, dx: int, dy: int, soa: dict | None = None,
 
     Nothing is copied. The cost is |dx|*W + |dy|*W slot writes -- O(perimeter)
     for the small per-frame shifts ego-motion actually produces.
+
+    A newly visible cell is a never-observed cell, so by default the strip is
+    written with `allocators.EMPTY_CELL` -- the same state `allocate()` starts
+    the map in -- and not with raw zeros. The difference is `ceiling_height`:
+    zeroing it says "solid ground at the datum" and drives TRAV_CLEARANCE
+    across the whole strip, so a map that boots correct would degrade as soon
+    as the vehicle moved. Pass `fill={}` for a literal zero clear.
     """
     cleared = np.unique(np.concatenate(
         [columns_to_clear(buf, dx), rows_to_clear(buf, dy)]))
     buf.x0 += dx
     buf.y0 += dy
 
+    fill = EMPTY_CELL if fill is None else fill
+
     if soa is not None and cleared.size:
         flat = cleared + buf.offset
         for name, arr in soa.items():
-            arr[flat] = (fill or {}).get(name, 0)
+            arr[flat] = fill.get(name, 0)
     return cleared + buf.offset
 
 

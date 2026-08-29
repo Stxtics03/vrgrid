@@ -88,6 +88,48 @@
   range, which is what the guard exists to prevent. Implemented as 3σ(r) with
   the config value as a floor for pose error. No threshold was changed; one was
   given a new job. Raise it at a gate review.
+- **Height sums are GROUND returns only, and `w_sum == 0` is a real state.**
+  §3 estimates the elevation of the ground, so a canopy return is not weak
+  evidence about it -- it is evidence about something else. Both scatter paths
+  zero the weight where `is_ground` is false; every other column (count,
+  reflectivity, class, ceiling) stays over all returns. The consequence is the
+  part to remember: a wall, a car flank or a tree trunk now yields `w_sum = 0`,
+  `mean_height_cm()` returns 0 there, and **0 is not a neutral height** -- the
+  road sits near -173 cm in the vehicle frame, so writing it stands every wall
+  1.7 m above the road at `meas_var` 1024 cm^2, confident enough to hold
+  against the next few real returns. `has_ground_evidence()` is the predicate;
+  `fuse()` leaves those cells' height and variance alone and ages them. The
+  mask is `np.multiply(w, g, out=w)` and not `w[~g] = 0` because `~g` is a
+  per-frame temporary: measured, the mask adds **0 B** per frame.
+- **`mean_height_cm()` rounded every NEGATIVE mean 1 cm low**, and the ground
+  plane is almost entirely negative. `(2*wz + sign(wz)*w) // (2*w)` is right
+  for positive sums and one short for negative ones -- `//` floors, so after
+  the away-from-zero nudge a negative quotient takes an extra step down. 540
+  of 600 negative probes were wrong; only the exact half-centimetres agreed,
+  and all 203 positive probes were fine, which is why it read as correct. A
+  systematic 1 cm sag over the whole ground plane against a §3.2 noise floor
+  of 0.8 cm at 5 m, and per-ring RMSE is the only place it would ever have
+  shown. Round on the magnitude and put the sign back.
+- **`EMPTY_CELL` is the one definition of a never-observed cell**, used by
+  `allocate()` and by the strip `shift()` clears. Only `ceiling_height` differs
+  from zero, and it is not a small difference: 0 cm reads as solid ground at
+  the datum, so `ceiling - ground < h_vehicle` holds everywhere, TRAV_CLEARANCE
+  marks the whole world untraversable, and it never recovers because `fuse()`
+  only ever lowers a ceiling. Fixing it in `allocate()` alone gives a map that
+  is correct exactly until the vehicle moves, which is why it is a shared dict
+  and not two literals. The refinement pool needs it too -- a block handed out
+  by `acquire()` is brand-new cells, so missing it there makes precisely the
+  cells we chose to look at more closely go untraversable.
+- **Residency is `mincore(2)` on the array, not a process-RSS delta.** The
+  delta is the right instrument for "what did this cost the machine" -- it is
+  the dashboard counter and it stays -- and the wrong one for "are these pages
+  in core". glibc raises its mmap threshold once it has seen a large block
+  freed, so a later allocation of about that size comes off the heap and
+  reuses pages the process already holds: measured, a correctly committed
+  64 MB baseline reported a 42 MB delta after the allocator tests had run and
+  the full 64 MB when it ran alone. `resident_fraction()` asks the pages
+  themselves and returns None off POSIX so callers can fall back rather than
+  silently report 0.
 - **No OptiX / RT cores.** Unsupported on Jetson; visibility cleanup is already
   O(1) per cell by range-image comparison. Future-work line only.
 

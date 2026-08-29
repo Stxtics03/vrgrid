@@ -29,25 +29,27 @@ so determinism is settled upstream and not re-argued per rule.
   bit-identical outputs; the results land back in int16 cm and one uint8
   code, both rounded by fixed rules.
 
---- two defects at the seam with gpu/, neither fixable from this side -----
+--- two defects at the seam with gpu/, both now closed from that side ------
 
-(1) `allocate()` zeros every field, so `ceiling_height` starts at 0, which
+Kept as a record of what the seam is for, because both produced maps that
+looked entirely plausible and neither was findable from this file alone.
+
+(1) `allocate()` zeroed every field, so `ceiling_height` started at 0, which
     reads as "something solid at the ground datum" rather than "nothing
     overhead seen" — the sentinel for that is `CEILING_NONE` = 32767. Left
-    alone, `ceiling - ground < h_vehicle` is true for every cell in the map
-    and TRAV_CLEARANCE marks the entire world untraversable, forever, because
-    nothing ever raises a ceiling back up. `initialise()` below is the fix
-    from this side; the real one is two characters in `allocate()` and in the
-    shift's strip clear, and it belongs to whoever owns those.
+    alone, `ceiling - ground < h_vehicle` was true for every cell in the map
+    and TRAV_CLEARANCE marked the entire world untraversable, forever,
+    because nothing ever raises a ceiling back up. Fixed in `allocate()` and
+    in the shift's strip clear, which now share one `EMPTY_CELL` definition;
+    `initialise()` below delegates to it and is kept for callers.
 
-(2) The aggregate's height sums are taken over ALL returns, ground and not.
-    `is_ground` reaches the kernel and is used only for the ceiling, so a
-    cell holding a road return at 0 cm and a canopy return at 200 cm reports
-    a ground height of 100 cm — a metre of tree averaged into the road, and
-    the resulting map looks entirely plausible. `fuse()` therefore documents
-    that it treats `wz_sum`/`w_sum` as GROUND evidence, which is what §3 says
-    they are. Pinned as an xfail in tests/test_fusion.py so it turns green by
-    itself when the mask lands in the kernel.
+(2) The aggregate's height sums were taken over ALL returns, ground and not,
+    so a cell holding a road return at 0 cm and a canopy return at 200 cm
+    reported a ground height of 100 cm — a metre of tree averaged into the
+    road. The kernel now masks the height sums by `is_ground`, which makes
+    `wz_sum`/`w_sum` the GROUND evidence §3 says they are, and makes
+    `w_sum == 0` mean "no ground return this frame". `fuse()` leaves such a
+    cell's height and variance alone — see `has_ground_evidence()` below.
 """
 
 import numpy as np
@@ -57,7 +59,8 @@ from vrgrid.cell import (
     OCC_OCCUPIED,
     OCC_UNKNOWN,
 )
-from vrgrid.gpu.kernels import CEILING_NONE, WEIGHT_SCALE
+from vrgrid.gpu.allocators import initialise_cells
+from vrgrid.gpu.kernels import WEIGHT_SCALE
 from vrgrid.grid.quantise import dequantise_variance_cm2, quantise_variance_cm2
 from vrgrid.grid.schedule import load_thresholds
 
@@ -75,16 +78,19 @@ FRAMES_SEEN_MAX = 255
 def initialise(soa) -> None:
     """Put the grid into the state a never-observed map is supposed to be in.
 
-    Call once after `allocate()`, and on any strip the ego-motion shift clears.
+    `allocate()` and `shift()` now do this themselves, so this is no longer
+    required after either — it is kept because it is idempotent, because a
+    grid built by hand in a test still needs it, and because deleting a public
+    name mid-week costs more than keeping one that forwards.
 
-    Only `ceiling_height` needs it: every other field's "no information" value
-    really is zero — obs_count 0, log_odds 0 (§10.1 decides unknown by count,
-    not by log-odds near zero), and variance code 0, which this project's codec
-    deliberately maps to MAXIMUM variance for exactly this reason. Ceiling is
-    the one field whose empty value is a sentinel rather than a zero. See
-    defect (1) in the module docstring.
+    Only `ceiling_height` needs setting: every other field's "no information"
+    value really is zero — obs_count 0, log_odds 0 (§10.1 decides unknown by
+    count, not by log-odds near zero), and variance code 0, which this
+    project's codec deliberately maps to MAXIMUM variance for exactly this
+    reason. Ceiling is the one field whose empty value is a sentinel rather
+    than a zero. See defect (1) in the module docstring.
     """
-    soa["ceiling_height"][:] = CEILING_NONE
+    initialise_cells(soa)
 
 
 # --- §3.3: the scalar update -------------------------------------------------
@@ -149,6 +155,24 @@ def fuse(soa, aggregate, thresholds=None, dt_s: float | None = None) -> None:
     first = soa["obs_count"][slots] == 0
     post_mu = np.where(first, z_cm, post_mu)
     post_var = np.where(first, meas_var, post_var)
+
+    # ...and a cell whose returns this frame were ALL non-ground has no
+    # measurement to update it with. The kernel masks the height sums by
+    # `is_ground`, so `w_sum == 0` says exactly that, and `mean_height_cm()`
+    # is 0 there for want of anything better to return. Writing that 0 would
+    # put the top of every wall and vehicle at the datum -- 1.73 m above the
+    # road in the vehicle frame -- with `meas_var` of 1024 cm^2 behind it,
+    # which is confident enough to hold against the next few real returns.
+    #
+    # The prior goes back untouched except for the process noise already added
+    # to it, which is the right answer: the cell was seen, so its occupancy,
+    # class and ceiling all update below; its ground height simply was not
+    # measured this frame, and it ages exactly as an unseen cell's would.
+    # This overrides `first` deliberately -- a cell whose first-ever return is
+    # a wall is the case that matters most.
+    ground = aggregate.has_ground_evidence()
+    post_mu = np.where(ground, post_mu, prior_mu)
+    post_var = np.where(ground, post_var, prior_var)
 
     soa["ground_height"][slots] = np.clip(np.rint(post_mu), -32768, 32767).astype(np.int16)
     soa["height_variance"][slots] = quantise_variance_cm2(post_var)

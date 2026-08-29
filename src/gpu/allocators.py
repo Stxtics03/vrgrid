@@ -28,6 +28,7 @@ This file owns storage, not lattice semantics: `annulus_index()` takes cell
 coordinates that are already on ring L's integer lattice (math §2, Aakash).
 """
 
+import ctypes
 import mmap
 import sys
 from dataclasses import dataclass, field
@@ -35,10 +36,49 @@ from dataclasses import dataclass, field
 import numpy as np
 from vrgrid.cell import CELL_BYTES, CELL_FIELDS
 from vrgrid.gpu.kernels import (
+    CEILING_NONE,
     new_dense_scratch,
     new_sorted_scratch,
     scatter_scratch_bytes,
 )
+
+# --- the state of a cell nothing has been written into yet ---------------------
+#
+# `np.zeros` is the right empty value for nine of the ten fields: obs_count 0,
+# log_odds 0 (§10.1 decides unknown by observation count, not by log-odds near
+# zero), and variance code 0, which the codec deliberately maps to MAXIMUM
+# variance so a fresh cell claims no certainty it has not earned.
+#
+# `ceiling_height` is the exception and it is not a small one. Zero decodes as
+# "something solid at the ground datum", so `ceiling - ground < h_vehicle`
+# holds for every cell in the map and TRAV_CLEARANCE marks the entire world
+# untraversable -- permanently, because `fuse()` only ever lowers a ceiling and
+# nothing raises one back up. The empty value here is a sentinel, not a zero.
+#
+# Two places produce empty cells and they have to agree: `allocate()` at
+# startup, and the strip `shift()` clears as the window scrolls. That is why
+# this is one dict rather than two literals in two files -- getting it right in
+# only one of them yields a map that is correct until the vehicle moves.
+EMPTY_CELL = {"ceiling_height": CEILING_NONE}
+
+
+def initialise_cells(soa: dict, slots=None) -> None:
+    """Put cells into the state a never-observed map is supposed to be in.
+
+    `slots` selects which cells to reset; None means the whole array. Fields
+    absent from `EMPTY_CELL` are left alone: the caller has already zeroed
+    them and zero is their empty value. Passing a dict with none of the named
+    fields -- the transient layer, say -- is a no-op rather than an error.
+    """
+    for name, value in EMPTY_CELL.items():
+        arr = soa.get(name)
+        if arr is None:
+            continue
+        if slots is None:
+            arr[:] = value
+        else:
+            arr[slots] = value
+
 
 # --- how much memory we are ACTUALLY costing the machine -----------------------
 #
@@ -174,6 +214,63 @@ def commit(array: np.ndarray) -> np.ndarray:
     flat = array.reshape(-1).view(np.uint8)
     flat[::PAGE_BYTES] |= 0
     return array
+
+
+def resident_fraction(array: np.ndarray) -> float | None:
+    """What share of THIS array's own pages the OS holds in core, via
+    `mincore(2)`. Returns None where mincore is unavailable.
+
+    Why this exists alongside `resident_bytes()`. The obvious way to ask
+    whether an allocation is real is to read process RSS before and after and
+    subtract, and that measurement is wrong in a way that only shows up once a
+    process has been running for a while: glibc raises its mmap threshold when
+    it sees a large block freed, so a later allocation of about that size comes
+    off the heap and reuses pages the process ALREADY has resident. RSS barely
+    moves, the delta reads as a few tens of per cent of what was claimed, and
+    the honest conclusion "these pages are faulted in" is reported as a
+    failure. Measured here: a 64 MB baseline showed a 42 MB delta when it ran
+    after the allocator tests and the full 64 MB when it ran alone.
+
+    So the process delta is the right instrument for "what did this cost the
+    machine" -- which is the dashboard counter, and it stays -- and the wrong
+    one for "are these particular pages in core". This is the second question,
+    asked of the pages themselves, and it does not care what else the process
+    has done.
+    """
+    if _MINCORE is None or array.nbytes == 0:
+        return None
+
+    base = array.__array_interface__["data"][0]
+    start = base - (base % PAGE_BYTES)
+    length = base + array.nbytes - start
+    pages = (length + PAGE_BYTES - 1) // PAGE_BYTES
+
+    vec = (ctypes.c_ubyte * pages)()
+    if _MINCORE(ctypes.c_void_p(start), ctypes.c_size_t(length), vec) != 0:
+        return None
+    # Bit 0 is the residency bit; the rest are reserved and are not always 0.
+    return float(np.count_nonzero(np.frombuffer(vec, np.uint8) & 1) / pages)
+
+
+def _load_mincore():
+    """`mincore` if the platform has it, else None. POSIX only -- two of the
+    three devs are on Windows, where this stays None and callers fall back."""
+    import ctypes.util
+
+    name = ctypes.util.find_library("c")
+    if name is None:
+        return None
+    try:
+        libc = ctypes.CDLL(name, use_errno=True)
+        fn = libc.mincore
+    except (OSError, AttributeError):
+        return None
+    fn.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.POINTER(ctypes.c_ubyte)]
+    fn.restype = ctypes.c_int
+    return fn
+
+
+_MINCORE = _load_mincore()
 
 
 # The transient layer shares the foveated grid geometry (master v4 §3.7) but
@@ -404,6 +501,13 @@ def allocate(schedule, thresholds: dict | None = None, device: str = "cpu",
     tracks = xp.zeros(max_tracks, dtype=TRACK_DTYPE)
     scratch = (new_sorted_scratch(max_points, n_cells) if scatter_mode == "sorted"
                else new_dense_scratch(n_cells))
+
+    # The grid and the pool hold cells, so they get the empty-cell state rather
+    # than raw zeros. The pool matters as much as the grid: a block handed out
+    # by `pool.acquire()` is a set of brand-new cells, and one that boots with
+    # ceiling 0 is untraversable from the moment it is refined.
+    initialise_cells(grid)
+    initialise_cells(pool)
 
     # Fault every page in now rather than during frame 1. Only meaningful on
     # host memory; a cupy allocation is device-side and this does not apply.

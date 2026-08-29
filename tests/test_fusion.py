@@ -410,21 +410,15 @@ def test_ceiling_keeps_the_lowest_thing_overhead():
 # --- the seam with gpu/kernels.py --------------------------------------------
 
 
-@pytest.mark.xfail(
-    reason="kernels.scatter_* accumulates height over ALL returns; is_ground "
-           "is used only for the ceiling. One-line fix in gpu/, not mine.",
-    strict=False,
-)
 def test_ground_height_must_not_average_in_the_canopy():
     """⚑ A cell holding a road return at 0 cm and a canopy return at 200 cm
-    reports a ground height of 100 cm — a metre of tree averaged into the road.
-    The resulting map looks entirely plausible, which is what makes it
-    expensive to find later.
+    must not report a ground height of 100 cm — a metre of tree averaged into
+    the road. The resulting map looks entirely plausible, which is what makes
+    it expensive to find later.
 
-    §3 is about the height of the GROUND; `is_ground` already reaches the
-    kernel and is already used to pick the ceiling. Masking the height sums by
-    it is one line. Written as an xfail rather than a bug report so it turns
-    green by itself the day the mask lands.
+    §3 is about the height of the GROUND, so the kernel masks the height sums
+    by `is_ground`; the canopy return still supplies the ceiling. Was an xfail
+    until the mask landed in `gpu/kernels.py`.
     """
     agg = scatter_sorted(
         idx=np.array([0, 0]),
@@ -434,8 +428,10 @@ def test_ground_height_must_not_average_in_the_canopy():
         class_id=np.array([1, 2], dtype=np.uint8),
         is_ground=np.array([True, False]),
     )
-    assert agg.ceiling_cm[0] == 200          # this half is right today
-    assert agg.mean_height_cm()[0] == 0      # this half is not
+    assert agg.ceiling_cm[0] == 200
+    assert agg.mean_height_cm()[0] == 0
+    assert agg.w_sum[0] == 1000              # the road return alone
+    assert agg.n[0] == 2                     # but both are still observations
 
 
 def test_measurement_variance_matches_the_weights_fuse_infers():
@@ -473,3 +469,63 @@ def test_visibility_cleanup_spares_cells_with_a_current_return():
     """The guard that stops the cleanup eating fences, poles and sign posts
     within a few frames. Math §10.4."""
     pytest.skip("visibility_cleanup — Aakash, Day 3")
+
+
+def test_a_cell_with_only_non_ground_returns_keeps_its_height():
+    """The other half of the canopy fix, and the half that bites hardest.
+
+    Masking the height sums by `is_ground` leaves a wall, a car flank or a
+    tree trunk with `w_sum == 0`, and `mean_height_cm()` returns 0 there for
+    want of anything better. 0 is not a neutral value: in the vehicle frame
+    the road sits near -173 cm, so writing it would stand every wall in the
+    scene 1.7 m above the road — with `meas_var` of WEIGHT_SCALE/1 = 1024 cm²
+    behind it, which is confident enough to hold against the next few real
+    ground returns. `fuse()` must leave the height alone instead.
+    """
+    soa = _grid()
+    fuse(soa, _agg([5], [-173], [4000]))            # a real road return first
+    settled_mu = int(soa["ground_height"][5])
+    settled_var = dequantise_variance_cm2(soa["height_variance"][5])
+    assert settled_mu == -173
+
+    wall = _agg([5], [0], [0], n=[8], ceiling=[120])   # eight returns, none ground
+    assert not wall.has_ground_evidence()[0]
+    fuse(soa, wall)
+
+    assert soa["ground_height"][5] == settled_mu, "the wall was averaged into the road"
+    # The cell ages rather than sharpening: it gets the process noise every
+    # updated cell gets, and no measurement to pay for a smaller variance.
+    assert dequantise_variance_cm2(soa["height_variance"][5]) >= settled_var, \
+        "certainty grew on no evidence"
+
+
+def test_a_wall_seen_before_any_ground_does_not_plant_itself_at_the_datum():
+    """The first-observation path is the dangerous one: `first` would take the
+    measurement outright rather than filtering it, so a cell whose first-ever
+    return is a wall would be initialised to 0 cm at high confidence. The
+    ground guard has to override `first`, not the other way round."""
+    soa = _grid()
+    assert soa["obs_count"][9] == 0
+
+    fuse(soa, _agg([9], [0], [0], n=[4], ceiling=[300]))
+
+    assert soa["ground_height"][9] == 0        # unchanged, because never measured
+    assert soa["height_variance"][9] == 0      # code 0 is MAXIMUM variance
+    assert soa["obs_count"][9] == 4            # but it WAS observed
+    assert soa["ceiling_height"][9] == 300     # and the ceiling did land
+
+
+def test_the_rest_of_the_cell_still_updates_without_ground_evidence():
+    """A cell with no ground return is not an unobserved cell. Occupancy,
+    class, reflectivity, the ceiling and the counters all take evidence from
+    every return; only the height does not."""
+    soa = _grid()
+    before_odds = int(soa["log_odds"][3])
+
+    fuse(soa, _agg([3], [0], [0], n=[6], ceiling=[250], refl=[600], class_id=[2]))
+
+    assert soa["log_odds"][3] > before_odds
+    assert soa["ceiling_height"][3] == 250
+    assert soa["reflectivity"][3] == 100       # 600 // 6
+    assert soa["frames_since_seen"][3] == 0
+    assert soa["obs_count"][3] == 6

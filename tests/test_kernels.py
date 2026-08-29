@@ -12,6 +12,7 @@ from vrgrid.gpu.kernels import (
     SORTED_SCRATCH_POINT_FIELDS,
     WEIGHT_MAX,
     Z_MAX_CM,
+    CellAggregate,
     grid_bytes,
     measurement_variance_cm2,
     new_sorted_scratch,
@@ -84,7 +85,12 @@ def test_heights_clamp_to_the_vertical_extent():
 
 
 def test_hand_worked_aggregate():
-    """Three returns in cell 7, one in cell 9, one dropped."""
+    """Three returns in cell 7, one in cell 9, one dropped.
+
+    Cell 7's middle return is non-ground, which is what makes this worth
+    working by hand: it counts toward `n`, `refl_sum` and the ceiling, and it
+    is absent from both height sums.
+    """
     agg = scatter_sorted(
         idx=np.array([7, 9, 7, -1, 7]),
         z_cm=np.array([100, 50, 200, 999, 300], np.int16),
@@ -94,13 +100,13 @@ def test_hand_worked_aggregate():
         is_ground=np.array([True, True, False, True, True]),
     )
     assert agg.cells.tolist() == [7, 9]
-    assert agg.wz_sum.tolist() == [2 * 100 + 3 * 200 + 5 * 300, 5 * 50]
-    assert agg.w_sum.tolist() == [10, 5]
-    assert agg.n.tolist() == [3, 1]
-    assert agg.refl_sum.tolist() == [90, 20]
+    assert agg.wz_sum.tolist() == [2 * 100 + 5 * 300, 5 * 50]   # w=3 at 200 cm excluded
+    assert agg.w_sum.tolist() == [2 + 5, 5]                     # ground weight only
+    assert agg.n.tolist() == [3, 1]                             # all returns
+    assert agg.refl_sum.tolist() == [90, 20]                    # all returns
     assert agg.ceiling_cm.tolist() == [200, CEILING_NONE]   # only the non-ground return
     assert agg.class_id.tolist() == [1, 2]                  # lowest-indexed point
-    assert agg.mean_height_cm().tolist() == [230, 50]       # 2300/10
+    assert agg.mean_height_cm().tolist() == [243, 50]       # 1700/7, rounded away from 0
 
 
 def test_negative_indices_are_dropped_not_folded_into_cell_zero():
@@ -367,3 +373,102 @@ def test_aggregate_is_a_view_into_the_scratch():
     assert not np.array_equal(agg.wz_sum, first), (
         "the second scatter did not write through the first aggregate's buffers, "
         "so this contract is stale and the docstring is wrong")
+
+
+# --- the height sums are GROUND evidence -------------------------------------
+
+
+def test_a_cell_with_no_ground_return_has_no_height_evidence():
+    """A wall, a car flank, a tree trunk: returns, but none of them measure
+    the elevation of the ground under the cell.
+
+    `w_sum == 0` is the signal, and it is unambiguous because
+    `quantise_weight()` clips every point to >= 1 -- a zero sum cannot mean
+    "ground returns that happened to weigh nothing". `mean_height_cm()` is 0
+    here for want of anything better to return, which is precisely why the
+    predicate exists rather than callers testing the mean against 0: in the
+    vehicle frame the road sits near -173 cm, so 0 is a plausible-looking
+    height rather than an obviously absent one.
+    """
+    agg = scatter_sorted(
+        idx=np.array([2, 2, 2]), z_cm=np.array([100, 150, 200], np.int16),
+        w_q=np.array([500, 500, 500], np.int32), refl=np.zeros(3, np.uint8),
+        class_id=np.zeros(3, np.uint8), is_ground=np.zeros(3, bool),
+    )
+    assert agg.w_sum.tolist() == [0]
+    assert agg.wz_sum.tolist() == [0]
+    assert not agg.has_ground_evidence()[0]
+
+    assert agg.n.tolist() == [3]                 # still three observations
+    assert agg.ceiling_cm.tolist() == [100]      # and the lowest is the ceiling
+
+
+def test_ground_evidence_is_per_cell_not_per_frame():
+    """Mixed frame: one cell all ground, one all canopy, one both. The
+    predicate has to separate them, because a frame is almost never uniform
+    and a per-frame answer would be useless."""
+    agg = scatter_sorted(
+        idx=np.array([0, 1, 2, 2]), z_cm=np.array([10, 20, 30, 40], np.int16),
+        w_q=np.full(4, 100, np.int32), refl=np.zeros(4, np.uint8),
+        class_id=np.zeros(4, np.uint8),
+        is_ground=np.array([True, False, True, False]),
+    )
+    assert agg.has_ground_evidence().tolist() == [True, False, True]
+    assert agg.mean_height_cm().tolist() == [10, 0, 30]   # cell 2 excludes the 40
+
+
+def test_the_ground_mask_does_not_split_the_two_paths():
+    """The two scatter paths must stay bit-identical, and the mask is the
+    newest chance for them to drift. This scan is built so that some cells are
+    all-ground, some all-canopy and some mixed -- an all-ground scan would
+    agree whether or not either path masked anything."""
+    rng = np.random.default_rng(20260829)
+    scan = random_scan(rng, n=3_000, n_cells=2048)   # ~1.5 returns per cell
+    a = scatter_sorted(**scan)
+    b = scatter_atomic(**scan, n_cells=2048)
+
+    assert not np.all(a.has_ground_evidence()), "no all-canopy cell: test is vacuous"
+    assert np.any(a.has_ground_evidence()), "no ground at all: test is vacuous"
+    for field in a.as_dict():
+        np.testing.assert_array_equal(getattr(a, field), getattr(b, field), err_msg=field)
+
+
+def test_the_weighted_mean_rounds_symmetrically_about_zero():
+    """Half-away-from-zero, and the same rule on both sides of zero.
+
+    The regression this pins: `(2*wz + sign(wz)*w) // (2*w)` floors, so after
+    the away-from-zero nudge every negative quotient took one extra step down
+    and came out 1 cm low -- exact values included. It looked right because
+    the positive half is right, and because 1 cm is a plausible height error.
+
+    It is not a curiosity at this sign. Vehicle frame is z up with the sensor
+    at 1.73 m, so the road is near -173 cm and almost every ground cell in the
+    map has a negative mean: the defect was a systematic 1 cm sag across the
+    entire ground plane, against a §3.2 noise floor of 0.8 cm at 5 m.
+    """
+    w = 4000
+    z_cm = np.arange(-200, 601)
+    agg = CellAggregate(
+        np.arange(z_cm.size, dtype=np.int64), (z_cm * w).astype(np.int64),
+        np.full(z_cm.size, w, np.int64), np.ones(z_cm.size, np.int32),
+        np.zeros(z_cm.size, np.int16), np.zeros(z_cm.size, np.int32),
+        np.zeros(z_cm.size, np.uint8),
+    )
+    np.testing.assert_array_equal(agg.mean_height_cm(), z_cm,
+                                  err_msg="an exact mean did not survive the round")
+
+
+@pytest.mark.parametrize(("wz_sum", "expected"), [
+    (250, 3), (150, 2), (100, 1), (50, 1), (49, 0),        # +0.5 rounds up
+    (-250, -3), (-150, -2), (-100, -1), (-50, -1), (-49, 0),  # -0.5 rounds down
+])
+def test_the_mean_is_a_mirror_image_across_zero(wz_sum, expected):
+    """Half-away-from-zero means |mean(-x)| == |mean(x)| for every input. A
+    rule that is not symmetric puts a sign-dependent bias into the ground
+    plane, which is exactly the shape of error a map hides best."""
+    agg = CellAggregate(
+        np.array([0]), np.array([wz_sum], np.int64), np.array([100], np.int64),
+        np.ones(1, np.int32), np.zeros(1, np.int16), np.zeros(1, np.int32),
+        np.zeros(1, np.uint8),
+    )
+    assert int(agg.mean_height_cm()[0]) == expected

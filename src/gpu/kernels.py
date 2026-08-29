@@ -27,6 +27,14 @@ field-for-field on random input.
 
 This file does NOT own the Kalman update or the class-fusion rule -- those are
 semantics (math §3.3, §10.2, Aakash). It owns making them fast and repeatable.
+
+One piece of semantics does live here, because it is a property of the
+reduction rather than of the filter: **the height sums are taken over GROUND
+returns only.** §3 estimates the elevation of the ground, so a canopy return is
+not weak evidence about it. `w_sum == 0` therefore means "no ground evidence
+this frame" and `mean_height_cm()` is meaningless for those cells --
+`has_ground_evidence()` is the predicate, and `fuse()` leaves such a cell's
+height and variance untouched. Every other column stays over all returns.
 """
 
 import numpy as np
@@ -119,18 +127,50 @@ class CellAggregate:
 
     def __init__(self, cells, wz_sum, w_sum, n, ceiling_cm, refl_sum, class_id):
         self.cells = cells            # int64, sorted, unique
-        self.wz_sum = wz_sum          # int64, sum of w_q * z_cm
-        self.w_sum = w_sum            # int64, sum of w_q
-        self.n = n                    # int32, returns in the cell this frame
+        self.wz_sum = wz_sum          # int64, sum of w_q * z_cm over GROUND returns
+        self.w_sum = w_sum            # int64, sum of w_q over GROUND returns; 0 = none
+        self.n = n                    # int32, returns in the cell this frame, all of them
         self.ceiling_cm = ceiling_cm  # int16, lowest non-ground return
-        self.refl_sum = refl_sum      # int32
+        self.refl_sum = refl_sum      # int32, over all returns
         self.class_id = class_id      # uint8, class of the lowest-indexed return
 
     def mean_height_cm(self) -> np.ndarray:
-        """Integer-weighted mean, rounded half-away-from-zero in integers so the
-        result does not depend on float rounding mode."""
+        """Integer-weighted mean of the GROUND returns, rounded half-away-from-
+        zero in integers so the result does not depend on float rounding mode.
+
+        **Meaningless where `has_ground_evidence()` is False**, and it returns 0
+        there rather than raising, because the frame path wants a branch-free
+        column. 0 is not a neutral value -- the road sits near -173 cm in the
+        vehicle frame -- so a caller that writes this into the map without
+        consulting `has_ground_evidence()` puts every wall and car body 1.7 m
+        above the road with a plausible-looking variance behind it.
+        """
         w = np.maximum(self.w_sum, 1)
-        return ((2 * self.wz_sum + np.sign(self.wz_sum) * w) // (2 * w)).astype(np.int32)
+        # Rounded on the MAGNITUDE, with the sign put back afterwards. The
+        # obvious spelling -- `(2*wz + sign(wz)*w) // (2*w)` -- is correct for
+        # positive sums and one short for negative ones: `//` floors, so after
+        # the away-from-zero nudge a negative quotient takes one extra step
+        # down. Every negative mean came out 1 cm low, exact values included,
+        # and only the exact half-centimetres agreed.
+        #
+        # That is not a rounding curiosity here. Vehicle frame is z up with the
+        # sensor at 1.73 m, so the road sits near -173 cm and essentially every
+        # ground cell in the map has a negative mean: the bias was a systematic
+        # 1 cm sag over the whole ground plane, against a §3.2 noise floor of
+        # 0.8 cm at 5 m. It reads as a real height, and per-ring RMSE is the
+        # only place it would ever have surfaced.
+        s = np.sign(self.wz_sum)
+        return (s * ((2 * np.abs(self.wz_sum) + w) // (2 * w))).astype(np.int32)
+
+    def has_ground_evidence(self) -> np.ndarray:
+        """Which cells saw at least one ground return this frame.
+
+        `quantise_weight()` clips every point's weight to >= 1, so a zero sum
+        cannot mean "ground returns that happened to weigh nothing". It means
+        the cell held nothing but canopy, wall or vehicle, and §3 has no height
+        measurement to offer for it.
+        """
+        return self.w_sum > 0
 
     def __len__(self) -> int:
         return len(self.cells)
@@ -273,6 +313,20 @@ def scatter_sorted(idx, z_cm, w_q, refl, class_id, is_ground, point_id=None,
     np.take(w_q, order, out=w, mode="clip")
     np.take(refl, order, out=r, mode="clip")
     np.take(is_ground, order, out=g, mode="clip")
+
+    # §3 estimates the height of the GROUND, so a non-ground return is not a
+    # weak measurement of it -- it is a measurement of something else. Zeroing
+    # the weight drops it from both height sums and leaves every other column
+    # (count, reflectivity, class, ceiling) over all returns, which is what
+    # those want. Without this a cell holding a road return at 0 cm and a
+    # canopy return at 200 cm reports a ground height of 100 cm, and the map
+    # it produces looks entirely plausible.
+    #
+    # Multiplying by the bool column rather than masking with `~g` on purpose:
+    # `~g` is a temporary, and this path's whole contract is that it allocates
+    # nothing. int32 * bool writes back into the int32 buffer in place.
+    np.multiply(w, g, out=w)
+
     # w peaks at 2^20 and z at 600 cm: the product needs 64 bits and the int32
     # inputs would silently wrap without `dtype`, which is the overflow that
     # would look like a plausible map. Buffered per chunk, so no temporary.
@@ -336,8 +390,13 @@ def scatter_atomic(idx, z_cm, w_q, refl, class_id, is_ground, n_cells,
     acc = scratch if scratch is not None else new_dense_scratch(n_cells)
     clear_dense_scratch(acc)
 
-    np.add.at(acc["wz_sum"], idx, w_q * z_cm)
-    np.add.at(acc["w_sum"], idx, w_q.astype(np.int32))
+    # Ground mask, as in the sorted path -- the two must stay bit-identical, so
+    # this is the same rule spelled the way an allocating reference path may
+    # spell it. See the note beside `np.multiply(w, g, out=w)` above.
+    w_ground = w_q * is_ground
+
+    np.add.at(acc["wz_sum"], idx, w_ground * z_cm)
+    np.add.at(acc["w_sum"], idx, w_ground.astype(np.int32))
     np.add.at(acc["n"], idx, 1)
     np.add.at(acc["refl_sum"], idx, refl.astype(np.int32))
     np.minimum.at(acc["ceiling_cm"], idx,

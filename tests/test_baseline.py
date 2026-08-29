@@ -9,6 +9,7 @@ be checked by allocating -- that the memory is really resident -- is checked at
 import numpy as np
 import pytest
 from vrgrid.cell import CELL_BYTES, CELL_FIELDS
+from vrgrid.gpu.allocators import resident_fraction
 from vrgrid.gpu.baseline import (
     PAGE_BYTES,
     allocate_dense3d,
@@ -66,12 +67,25 @@ def test_uniform_baseline_uses_the_frozen_cell_struct():
 def test_allocation_is_actually_resident():
     """The demo-critical property. A baseline that claims 2.56 GB and costs
     the machine nothing is not a demonstration, it is a worse version of the
-    table we already have."""
+    table we already have.
+
+    Asked of the baseline's OWN pages via mincore(2), not of the process RSS
+    delta. The delta is the honest instrument for "what did this cost the
+    machine" and the wrong one for this question: glibc raises its mmap
+    threshold once it has seen a large block freed, so a later allocation of
+    about that size comes off the heap and reuses pages the process already
+    holds. RSS then barely moves and a correctly faulted-in 64 MB baseline
+    reports 42 MB, depending on nothing but which tests ran first. That is a
+    test that fails on Tuesdays, which is worse than no test.
+    """
     b = allocate_uniform25d(footprint_m=SMALL_FOOTPRINT_M)
     assert b.claimed_bytes > 60e6, "test size too small to be a real mmap"
-    assert b.counters().resident_bytes > 0.9 * b.claimed_bytes, (
-        f"claimed {b.claimed_bytes:,} B but only {b.counters().resident_bytes:,} B "
-        "is resident -- the pages were never faulted in")
+
+    fractions = {name: resident_fraction(a) for name, a in b.arrays.items()}
+    if all(f is None for f in fractions.values()):
+        pytest.skip("mincore unavailable on this platform")
+    for name, f in fractions.items():
+        assert f > 0.99, f"{name}: only {f:.1%} of its pages are in core"
 
 
 def test_an_untouched_allocation_would_have_read_as_free():
@@ -83,20 +97,30 @@ def test_an_untouched_allocation_would_have_read_as_free():
     up nothing at all.
     """
     n = 64 * 1024 * 1024
-    before = resident_bytes()
     lazy = np.zeros(n, np.uint8)
-    lazy_delta = resident_bytes() - before
-
-    before = resident_bytes()
     touched = commit(np.zeros(n, np.uint8))
-    touched_delta = resident_bytes() - before
-
     assert lazy.nbytes == touched.nbytes == n
-    assert lazy_delta < 0.25 * n, (
-        f"np.zeros became resident on its own ({lazy_delta:,} B); this platform "
-        "does not need commit(), and the docstring in baseline.py should say so")
-    assert touched_delta > 0.9 * n
-    assert touched_delta > 3 * lazy_delta
+
+    if resident_fraction(lazy) is None:
+        pytest.skip("mincore unavailable on this platform")
+    assert resident_fraction(lazy) < 0.01, (
+        f"np.zeros came back {resident_fraction(lazy):.1%} resident on its own; "
+        "this platform does not need commit(), and baseline.py should say so")
+    assert resident_fraction(touched) > 0.99
+
+
+def test_the_process_counter_still_sees_a_large_allocation():
+    """`resident_bytes()` is what the dashboard shows, so it keeps a test of
+    its own -- it is just no longer the instrument for the question above.
+
+    Loose on purpose: the reuse effect that makes it a bad residency probe is
+    real and platform-dependent, so this asserts only that a 64 MB commit
+    moves the process counter substantially, not that it moves it by 64 MB.
+    """
+    before = resident_bytes()
+    held = commit(np.zeros(64 * 1024 * 1024, np.uint8))
+    delta = resident_bytes() - before
+    assert delta > 0.25 * held.nbytes, f"{delta:,} B for a {held.nbytes:,} B commit"
 
 
 def test_commit_does_not_disturb_the_contents():
