@@ -1,6 +1,8 @@
 # dataset -- SemanticKITTI 00/07/08 is ~40 GB, never commit it
 data/*
 !data/README.md
+# External KITTI dataset (C:/KITTI/dataset) - never commit
+C:/KITTI/dataset/
 *.bin
 *.label
 *.pcd

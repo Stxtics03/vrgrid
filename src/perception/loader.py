@@ -10,21 +10,23 @@ labels are ground truth, so the mapping contribution is evaluated independently
 of segmentation quality. That is a feature — it isolates the contribution from
 segmentation error.
 
-USES OFFICIAL KITTI GROUND-TRUTH POSES from `data/sequences/dataset/poses/<seq>.txt`
+USES OFFICIAL KITTI GROUND-TRUTH POSES from `C:/KITTI/dataset/poses/<seq>.txt`
 NOT the SemanticKITTI internal SLAM poses at `data/sequences/<seq>/poses.txt`.
+VELODYNE SCANS AND LABELS from `C:/KITTI/dataset/sequences/<seq>/velodyne/` and `labels/`.
 """
 
 import numpy as np
 from pathlib import Path
 
-# Data root — adjust if needed
-DATA_ROOT = Path(__file__).resolve().parents[3] / "vrgrid" / "data"
+# Data root — use the REAL KITTI dataset at C:/KITTI/dataset
+DATA_ROOT = Path(r"C:/KITTI/dataset")
 
 # Official KITTI ground-truth poses (top-level)
-GT_POSES_DIR = DATA_ROOT / "sequences" / "dataset" / "poses"
+GT_POSES_DIR = DATA_ROOT / "poses"
 
-# SemanticKITTI velodyne scans (downloaded subset)
+# SemanticKITTI velodyne scans and labels (full dataset)
 VELODYNE_DIR = DATA_ROOT / "sequences"
+LABELS_DIR = DATA_ROOT / "sequences"
 
 MOVING_LABEL_IDS = range(250, 260)  # verify against raw files — Hriday, hour 4
 
@@ -35,7 +37,7 @@ def _velodyne_path(sequence: str, frame: int) -> Path:
 
 def _label_path(sequence: str, frame: int) -> Path:
     # SemanticKITTI labels (if downloaded)
-    return DATA_ROOT / "sequences" / sequence / "labels" / f"{frame:06d}.label"
+    return LABELS_DIR / sequence / "labels" / f"{frame:06d}.label"
 
 
 def _gt_poses_path(sequence: str) -> Path:
