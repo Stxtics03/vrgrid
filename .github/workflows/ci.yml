@@ -2,9 +2,10 @@ name: ci
 
 # main is always green. If CI is red, fixing it outranks whatever you were
 # doing. Never merge a red branch "to fix later".
+# Runs on every branch, not just main: a dev branch that only gets checked at
+# PR time is a branch that discovers a red test hours after it was written.
 on:
   push:
-    branches: [main]
   pull_request:
 
 jobs:

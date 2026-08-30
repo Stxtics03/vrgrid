@@ -53,7 +53,7 @@ def test_rings_tile_the_flat_array_without_gap_or_overlap():
     layouts = derive_ring_layouts(load("5/10/20/40"))
     assert layouts[0].offset == 0
     for a, b in pairwise(layouts):
-        assert a.offset + a.count == b.offset
+        assert a.offset + a.slots == b.offset
 
 
 def test_config_that_disagrees_with_its_own_geometry_is_rejected():
@@ -114,7 +114,7 @@ def test_one_array_per_field_not_array_of_structs(alloc):
 def test_ring_view_writes_through_to_the_allocation(alloc):
     v = alloc.view("ground_height", 2)
     r = alloc.ring(2)
-    assert v.shape == (r.count,)
+    assert v.shape == (r.slots,)
     v[0] = 1234
     assert alloc.grid["ground_height"][r.offset] == 1234
     v[0] = 0
@@ -129,10 +129,28 @@ def test_claimed_bound_equals_measured_bytes(alloc):
     assert bytes_allocated(alloc) == measured_bytes(alloc)
 
 
-def test_grid_line_item_is_the_headline_figure(alloc):
-    grid_bytes = sum(a.nbytes for a in alloc.grid.values())
-    assert grid_bytes == 745_000 * CELL_BYTES
-    assert round(grid_bytes / 1e6, 2) == 8.94
+def test_logical_cell_count_is_the_headline_figure(alloc):
+    """745,000 logical cells is what every ratio in the report counts. It is
+    unchanged by toroidal padding, which adds slots, not cells."""
+    assert alloc.logical_cells == 745_000
+    assert round(alloc.logical_cells * CELL_BYTES / 1e6, 2) == 8.94
+
+
+def test_toroidal_padding_is_reported_separately(alloc):
+    """Storing full squares so the shift stays O(perimeter) costs 165,000
+    slots. It belongs on its own budget line, not folded into the grid."""
+    assert alloc.allocated_slots == 910_000
+    padding = alloc.allocated_slots - alloc.logical_cells
+    assert padding == 165_000
+    assert round(padding * CELL_BYTES / 1e6, 2) == 1.98
+    assert any("padding" in k for k in alloc.budget)
+
+
+def test_annulus_storage_drops_the_padding(thresholds):
+    """The memory-optimal layout is still available, and costs 15 ms a frame
+    on the shift -- see gpu/shift.py."""
+    a = allocate(load("5/10/20/40"), thresholds, storage="annulus")
+    assert a.allocated_slots == a.logical_cells == 745_000
 
 
 def test_refinement_pool_is_ninety_eight_kilobytes(alloc):
@@ -141,7 +159,7 @@ def test_refinement_pool_is_ninety_eight_kilobytes(alloc):
 
 
 def test_transient_layer_shares_the_grid_geometry(alloc):
-    n = sum(r.count for r in alloc.rings)
+    n = alloc.allocated_slots
     assert all(a.shape == (n,) for a in alloc.transient.values())
     assert sum(a.nbytes for a in alloc.transient.values()) == n * TRANSIENT_BYTES
 
@@ -151,15 +169,15 @@ def test_transient_layer_can_be_limited_to_the_inner_rings(thresholds):
     transient layer over rings 0-1 is defensible and saves 1.5 MB. Team call,
     not mine -- but the allocator supports either answer."""
     a = allocate(load("5/10/20/40"), thresholds, transient_rings=2)
-    n = 160_000 + 210_000
+    n = 160_000 + 250_000   # allocated slots for rings 0-1
     assert all(arr.shape == (n,) for arr in a.transient.values())
     assert a.total_bytes() < allocate(load("5/10/20/40"), thresholds).total_bytes()
 
 
 def test_ablation_schedule_allocates_the_smaller_bound(thresholds):
     a = allocate(load("5/10/50"), thresholds)
-    grid_bytes = sum(arr.nbytes for arr in a.grid.values())
-    assert round(grid_bytes / 1e6, 2) == 6.24
+    assert a.logical_cells == 520_000
+    assert round(a.logical_cells * CELL_BYTES / 1e6, 2) == 6.24
 
 
 def test_tracked_object_list_is_capped(alloc):

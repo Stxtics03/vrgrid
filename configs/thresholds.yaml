@@ -28,6 +28,23 @@ occupancy:
   log_odds_miss: -2
   log_odds_clamp: [-64, 63]
 
+# --- split / merge variance model (math §5.2 eq. 17) ------------------------
+# sigma2_child = sigma2_parent + kappa ||grad z||^2 (c_p^2 - c_c^2) + alpha
+split_merge:
+  kappa: 0.0625            # 1/16, §5.2 as written.
+                           # ⚑ §5.2 derives this from "d^2 = c_p^2/16", but
+                           # (17) multiplies it by (c_p^2 - c_c^2), not c_p^2.
+                           # The stated geometry actually gives 1/12, at every
+                           # refinement ratio m. 1/16 under-inflates by 25%.
+                           # Kept as documented; the room decides, not me.
+                           # Pinned in tests/test_splitmerge.py.
+  alpha_m2: 0.0            # sub-cell roughness. UNCALIBRATED: §5.2 calibrates
+                           # it against the reference map (§9), which is
+                           # blocked on the download. 0 is also the only value
+                           # consistent with §5.3's "splitting flat ground
+                           # costs nothing" and §5.4's unit test (c) -- raising
+                           # alpha means restating both, in the same commit.
+
 # --- sensor (HDL-64E on KITTI) ----------------------------------------------
 sensor:
   height_m: 1.73
@@ -35,6 +52,22 @@ sensor:
   d_phi_deg: 0.427
   phi_min_deg: -24.8
   blind_cone_m: 3.74       # h / tan|phi_min|. Unknown, never free. 11% of Ring 0.
+  # Measurement-noise model, math §3.2 eq (12). sigma_phi is stated in the
+  # math doc; sigma_r is NOT -- 2 cm is the HDL-64E datasheet figure and an
+  # assumption of ours. It only moves the near-field floor: the 8.7 cm at 50 m
+  # and 17.5 cm at 100 m figures are dominated by the sigma_phi term.
+  sigma_r_m: 0.02
+  sigma_phi_deg: 0.1
+
+# --- scatter (math §3.4) -----------------------------------------------------
+scatter:
+  # "sorted" reduces segments of a sorted index array: scratch is sized by
+  # POINTS (~1.8 MB) and needs no per-frame clear. "atomic" is the literal
+  # integer-atomics path: a dense per-cell accumulator, ~11.9 MB at 745,000
+  # cells, cleared every frame. Both are bit-identical; this is a cost choice.
+  mode: sorted
+  max_points_per_frame: 150000
+  weight_scale: 1024
 
 # --- visibility cleanup (math §10.4) ----------------------------------------
 visibility:

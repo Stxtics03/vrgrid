@@ -32,6 +32,11 @@ from dataclasses import dataclass, field
 
 import numpy as np
 from vrgrid.cell import CELL_BYTES, CELL_FIELDS
+from vrgrid.gpu.kernels import (
+    new_dense_scratch,
+    new_sorted_scratch,
+    scatter_scratch_bytes,
+)
 
 # The transient layer shares the foveated grid geometry (master v4 §3.7) but
 # not the full 12-byte cell: a dynamic-obstacle hit needs a height, an
@@ -72,8 +77,15 @@ class RingLayout:
     cell_m: float
     side: int          # W: cells across the full square
     hole: int          # w: cells across the hole covered by the inner ring
-    count: int         # W^2 - w^2
+    count: int         # W^2 - w^2, the LOGICAL cells -- what every report ratio counts
     offset: int        # start index in the flat per-field arrays
+
+    @property
+    def slots(self) -> int:
+        """Allocated slots. Toroidal storage keeps the full square so the
+        ego-motion shift stays O(perimeter); see gpu/shift.py for the
+        measurement that decided it. `slots - count` is the padding."""
+        return self.side * self.side
 
     @property
     def lo(self) -> int:
@@ -92,7 +104,7 @@ class RingLayout:
         return 0, a, a + b, a + b + c
 
 
-def derive_ring_layouts(schedule) -> list:
+def derive_ring_layouts(schedule, storage: str = "toroidal") -> list:
     """Ring geometry from the schedule, cross-checked against its stated counts.
 
     The check matters: if someone edits a half-width in the YAML without
@@ -112,9 +124,10 @@ def derive_ring_layouts(schedule) -> list:
             raise ValueError(f"ring {r.ring}: geometry gives {count:,} cells but the "
                              f"config says {r.cells:,} -- one of them is wrong")
         layouts.append(RingLayout(r.ring, r.cell_m, side, hole, count, offset))
-        offset += count
-    if offset != schedule.total_cells:
-        raise ValueError(f"rings sum to {offset:,}, config says {schedule.total_cells:,}")
+        offset += side * side if storage == "toroidal" else count
+    logical = sum(r.count for r in layouts)
+    if logical != schedule.total_cells:
+        raise ValueError(f"rings sum to {logical:,}, config says {schedule.total_cells:,}")
     return layouts
 
 
@@ -159,6 +172,9 @@ class Allocation:
     transient: dict            # field -> flat array, same geometry, 4 B/cell
     pool: dict                 # field -> flat array over pool blocks
     tracks: np.ndarray
+    scratch: dict
+    scatter_mode: str
+    storage: str
     pool_blocks: int
     pool_cells_per_block: int
     max_tracks: int
@@ -170,9 +186,20 @@ class Allocation:
 
     def view(self, field_name: str, ring_index: int):
         """A ring's slice of one field. A view, not a copy -- writing to it
-        writes through to the allocation."""
+        writes through to the allocation. Spans allocated slots, which under
+        toroidal storage exceed the ring's logical cell count."""
         r = self.rings[ring_index]
-        return self.grid[field_name][r.offset:r.offset + r.count]
+        n = r.slots if self.storage == "toroidal" else r.count
+        return self.grid[field_name][r.offset:r.offset + n]
+
+    @property
+    def logical_cells(self) -> int:
+        """What the report's ratios count: 745,000 for the default schedule."""
+        return sum(r.count for r in self.rings)
+
+    @property
+    def allocated_slots(self) -> int:
+        return sum(r.slots if self.storage == "toroidal" else r.count for r in self.rings)
 
     @property
     def budget(self) -> dict:
@@ -182,7 +209,9 @@ class Allocation:
         return sum(self._budget.values())
 
     def report(self) -> str:
-        lines = [f"schedule {self.schedule_name}, device {self.device}", ""]
+        header = (f"schedule {self.schedule_name}, device {self.device}, "
+                  f"storage {self.storage}")
+        lines = [header, ""]
         for k, v in self._budget.items():
             lines.append(f"  {k:<34} {v / 1e6:>8.2f} MB")
         lines.append(f"  {'-' * 34} {'-' * 8}")
@@ -191,7 +220,8 @@ class Allocation:
 
 
 def allocate(schedule, thresholds: dict | None = None, device: str = "cpu",
-             transient_rings: int | None = None, max_tracks: int = 256) -> Allocation:
+             transient_rings: int | None = None, max_tracks: int = 256,
+             storage: str = "toroidal") -> Allocation:
     """Preallocate the grid, the transient layer, the refinement pool and the
     tracked-object list. Called once at startup.
 
@@ -200,28 +230,42 @@ def allocate(schedule, thresholds: dict | None = None, device: str = "cpu",
     this is the one line item whose size is a team decision, not a derivation.
     """
     xp = array_module(device)
-    rings = derive_ring_layouts(schedule)
-    n_cells = sum(r.count for r in rings)
+    rings = derive_ring_layouts(schedule, storage)
+    n_logical = sum(r.count for r in rings)
+    n_cells = sum(r.slots for r in rings) if storage == "toroidal" else n_logical
 
     pool_cfg = (thresholds or {}).get("refinement_pool", {})
     blocks = pool_cfg.get("blocks", 512)
     cells_per_block = pool_cfg.get("cells_per_block", 16)
 
-    n_transient = n_cells if transient_rings is None else sum(
-        r.count for r in rings[:transient_rings])
+    scatter_cfg = (thresholds or {}).get("scatter", {})
+    scatter_mode = scatter_cfg.get("mode", "sorted")
+    max_points = scatter_cfg.get("max_points_per_frame", 150_000)
+
+    def _size(rs):
+        return sum(r.slots if storage == "toroidal" else r.count for r in rs)
+
+    n_transient = n_cells if transient_rings is None else _size(rings[:transient_rings])
 
     grid = {name: xp.zeros(n_cells, dtype=dt) for name, dt in CELL_FIELDS}
     transient = {name: xp.zeros(n_transient, dtype=dt) for name, dt in TRANSIENT_FIELDS}
     pool = {name: xp.zeros(blocks * cells_per_block, dtype=dt) for name, dt in CELL_FIELDS}
     tracks = xp.zeros(max_tracks, dtype=TRACK_DTYPE)
+    scratch = (new_sorted_scratch(max_points) if scatter_mode == "sorted"
+               else new_dense_scratch(n_cells))
 
     alloc = Allocation(
         schedule_name=schedule.name, rings=rings, grid=grid, transient=transient,
-        pool=pool, tracks=tracks, pool_blocks=blocks,
+        pool=pool, tracks=tracks, scratch=scratch, scatter_mode=scatter_mode,
+        storage=storage, pool_blocks=blocks,
         pool_cells_per_block=cells_per_block, max_tracks=max_tracks, device=device,
     )
     alloc._budget = {
-        f"grid ({n_cells:,} cells x {CELL_BYTES} B)": n_cells * CELL_BYTES,
+        f"grid ({n_logical:,} logical cells x {CELL_BYTES} B)": n_logical * CELL_BYTES,
+        f"toroidal padding ({n_cells - n_logical:,} slots)":
+            (n_cells - n_logical) * CELL_BYTES,
+        f"scatter scratch ({scatter_mode})": scatter_scratch_bytes(
+            scatter_mode, n_cells, max_points),
         f"transient ({n_transient:,} x {TRANSIENT_BYTES} B)": n_transient * TRANSIENT_BYTES,
         f"refinement pool ({blocks} x {cells_per_block})": blocks * cells_per_block * CELL_BYTES,
         f"tracked objects (cap {max_tracks})": max_tracks * TRACK_DTYPE.itemsize,
@@ -244,4 +288,5 @@ def measured_bytes(handle: Allocation) -> int:
     total = sum(a.nbytes for a in handle.grid.values())
     total += sum(a.nbytes for a in handle.transient.values())
     total += sum(a.nbytes for a in handle.pool.values())
+    total += sum(a.nbytes for a in handle.scratch.values())
     return total + handle.tracks.nbytes

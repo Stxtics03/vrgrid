@@ -5,7 +5,7 @@ config files are frozen against it and CI checks them. Aakash owns it from
 here; rewrite freely, keep `validate()` rejecting the same two things.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import yaml
@@ -23,6 +23,22 @@ class Ring:
 
 
 @dataclass
+class Anisotropy:
+    """Speed-scaled foveation parameters. Math §6.2 eq. (20).
+
+    Defaults are the isotropic case: at v = 0 every stretch is 1 and (20)
+    collapses to the plain Chebyshev norm of (18), which is what makes the
+    anisotropic path safe to run always rather than as a special case.
+    """
+
+    kappa_forward: float = 1.0
+    kappa_side: float = 0.5
+    v_ref_ms: float = 15.0
+    rear_stretch: float = 1.0          # a_r: the rear is never stretched
+    rear_floor_cell_m: float = 0.20    # hard floor within 50 m behind
+
+
+@dataclass
 class Schedule:
     name: str
     base_cell_m: float
@@ -30,6 +46,7 @@ class Schedule:
     total_cells: int
     vertical_extent_m: tuple
     hysteresis_eps: float
+    anisotropy: Anisotropy = field(default_factory=Anisotropy)
 
     def k(self, ring: int) -> int:
         """Integer divisor from the base lattice to ring `ring` (math §2.1)."""
@@ -53,6 +70,7 @@ def load(name_or_path) -> Schedule:
         total_cells=raw["total_cells"],
         vertical_extent_m=tuple(raw["vertical_extent_m"]),
         hysteresis_eps=raw["hysteresis_eps"],
+        anisotropy=Anisotropy(**raw.get("anisotropy", {})),
     )
     validate(s)
     return s
