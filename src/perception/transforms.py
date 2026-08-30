@@ -14,18 +14,36 @@ sensor-to-vehicle and vehicle-to-world errors in one shot.
 
 import numpy as np
 
-# Sensor → Vehicle: identity rotation, translation [0, 0, 1.73] (sensor height)
-# From calib.txt and KITTI spec: Velodyne frame aligns with vehicle frame.
+# Sensor → Vehicle transform.
+#
+# IMPORTANT: The 1.73 m height and identity rotation are KITTI DOCUMENTED
+# CONVENTIONS, NOT parsed from calib.txt.
+#
+# - calib.txt's Tr matrix is Velodyne → Camera 0 (x right, y down, z forward),
+#   NOT Velodyne → Vehicle. Its translation is ~[-0.01, -0.05, -0.29] m.
+# - The KITTI odometry benchmark does NOT publish a Velodyne→Vehicle extrinsic.
+#   The separate KITTI raw-data release includes calib_imu_to_velo.txt with
+#   IMU→Velodyne, but we don't have that file in the odometry dataset.
+# - The 1.73 m figure comes from the KITTI spec sheet / HDL-64E mounting
+#   documentation ("sensor height 1.73 m"), universally used in the literature.
+# - Identity rotation assumes Velodyne axes align with vehicle axes
+#   (x forward, y left, z up), which is the standard KITTI convention.
+#
+# If this assumption is wrong, the static-wall test (Gate Item 1) will catch it:
+# a systematic rotation/translation drift of a known flat wall across frames.
 T_S_V = np.eye(4, dtype=np.float64)
-T_S_V[2, 3] = 1.73  # sensor height in metres
+T_S_V[2, 3] = 1.73  # sensor height in metres — KITTI documented convention
 
 
 def sensor_to_vehicle() -> np.ndarray:
     """Constant transform: Sensor (Velodyne) → Vehicle frame.
 
     Returns:
-        4×4 homogeneous matrix. Sensor axes already match vehicle axes (x forward, y left, z up).
-        Only translation is sensor height (1.73 m).
+        4×4 homogeneous matrix.
+
+    NOTE: This uses the KITTI convention (identity rotation + 1.73 m height).
+    The calib.txt Tr matrix is Velodyne→Camera 0 and CANNOT provide this.
+    The KITTI odometry benchmark does not include Velodyne→Vehicle extrinsic.
     """
     return T_S_V.copy()
 

@@ -24,7 +24,7 @@ Ranges and gradients are float metres (suffix `_m`). Heights are int16 in 1 cm (
 
 | From → To | Notation | Defined by | Notes |
 |-----------|----------|------------|-------|
-| Sensor → Vehicle | `T_S_V` | `calib.txt` (Tr_velo_to_cam) + known Camera 0 ↔ Vehicle | **Identity rotation**, translation only: sensor mounted at (0, 0, 1.73) m in vehicle frame. `T_S_V = [I | [0, 0, 1.73]^T]`. |
+| Sensor → Vehicle | `T_S_V` | **KITTI documented convention** (1.73 m HDL-64E mount height, identity rotation) | **Identity rotation**, translation only: sensor mounted at (0, 0, 1.73) m in vehicle frame. `T_S_V = [I | [0, 0, 1.73]^T]`. **NOT from calib.txt** — see note below. |
 | Vehicle → World | `T_V_W(k)` | `poses.txt` (KITTI poses) | Per-frame 4×4 pose from `poses.txt` (row-major 3×4, bottom row implied [0,0,0,1]). Pose is **Vehicle in World** (i.e., `T_V_W`). |
 | Sensor → World | `T_S_W(k)` | `T_S_W = T_V_W @ T_S_V` | Composed for each frame k. Used to transform points to world for mapping. |
 
@@ -34,10 +34,18 @@ Ranges and gradients are float metres (suffix `_m`). Heights are int16 in 1 cm (
 
 ### Sensor → Vehicle (`T_S_V`)
 
-The HDL-64E is rigidly mounted on the roof. From KITTI spec and `calib.txt`:
+The HDL-64E is rigidly mounted on the roof.
 
-- **Rotation**: Identity (sensor axes align with vehicle axes: x forward, y left, z up)
-- **Translation**: `[0, 0, 1.73]^T` metres (sensor height from ground)
+**Source of parameters (STATED ASSUMPTION, NOT MEASURED DATA):**
+
+- **1.73 m height**: From KITTI spec sheet / HDL-64E documentation ("sensor height 1.73 m"). Universal convention in literature.
+- **Identity rotation**: Assumes Velodyne axes align with vehicle axes (x forward, y left, z up). Standard KITTI convention.
+
+**Why NOT from calib.txt:**
+- `calib.txt` Tr matrix is **Velodyne → Camera 0** (x right, y down, z forward), NOT Velodyne → Vehicle.
+- Its translation is `[-0.012, -0.054, -0.292]` m — clearly a camera offset, not vehicle.
+- The KITTI **odometry benchmark does not publish** a Velodyne→Vehicle extrinsic.
+- The separate KITTI **raw-data release** includes `calib_imu_to_velo.txt` (IMU→Velodyne), but we don't have that file.
 
 ```
 T_S_V = [[1, 0, 0, 0],
@@ -47,6 +55,8 @@ T_S_V = [[1, 0, 0, 0],
 ```
 
 **Units:** metres. `T_S_V` is constant for all frames.
+
+**Validation:** If this assumption is wrong, the static-wall test (Gate Item 1) will catch it — a known flat wall will show systematic rotation/translation drift across frames.
 
 ### Vehicle → World (`T_V_W(k)`)
 
