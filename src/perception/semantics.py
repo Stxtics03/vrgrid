@@ -23,12 +23,14 @@ ones (FRNet repo configs/_base_/datasets/semantickitti_seg.py labels_map), so a
 future FRNet swap lines up with no relabelling.
 """
 
-import numpy as np
-import torch
-import yaml
 from pathlib import Path
 
-from .frnet import FRNet
+import numpy as np
+import yaml
+
+# torch and the FRNet port are imported lazily inside FRNetInference only. The
+# ground-truth label path (semantic_labels / is_moving) is pure numpy, so this
+# module must import with neither torch nor the frnet package present.
 
 # Raw SemanticKITTI id (lower 16 bits of the .label word) -> 19-class index.
 # 19 = unlabeled/ignore. moving-* ids (252-259) fold onto their static class
@@ -113,6 +115,8 @@ class FRNetInference:
     """FRNet 20-class (19 semantic) semantic segmentation inference."""
 
     def __init__(self, config_path: str = "configs/frnet.yaml"):
+        import torch  # lazy: the GT-label path must import without torch
+
         with open(config_path, "r") as f:
             self.cfg = yaml.safe_load(f)
 
@@ -127,6 +131,10 @@ class FRNetInference:
 
     def _load_model(self):
         """Load FRNet model from checkpoint."""
+        import torch
+
+        from .frnet import FRNet
+
         if not self.checkpoint_path.exists():
             raise FileNotFoundError(
                 f"FRNet checkpoint not found at {self.checkpoint_path}. "
@@ -195,7 +203,6 @@ class FRNetInference:
 
         print(f"[FRNet] Loaded {len(mapped)} / {len(model_dict)} parameters from checkpoint")
 
-    @torch.no_grad()
     def infer_points(self, points: np.ndarray) -> np.ndarray:
         """
         Run FRNet inference on raw 3D points.
@@ -206,17 +213,21 @@ class FRNetInference:
         Returns:
             per_point_labels: (N,) int32 — class indices 0-18 (19 semantic classes), -1=ignore
         """
-        # Convert to tensor
-        pts_tensor = torch.from_numpy(points).float().to(self.device)
-        if pts_tensor.ndim == 2:
-            pts_tensor = pts_tensor.unsqueeze(0)  # (1, N, 4)
+        import torch
 
-        # Model expects List[Tensor]
-        pts_list = [pts_tensor[0]] if pts_tensor.shape[0] == 1 else list(pts_tensor.unbind(0))
+        with torch.no_grad():
+            pts_tensor = torch.from_numpy(points).float().to(self.device)
+            if pts_tensor.ndim == 2:
+                pts_tensor = pts_tensor.unsqueeze(0)  # (1, N, 4)
 
-        # Forward pass
-        pred_list = self.model.predict(pts_list)
-        per_point_labels = pred_list[0].cpu().numpy()  # (N,)
+            # Model expects List[Tensor]
+            pts_list = (
+                [pts_tensor[0]] if pts_tensor.shape[0] == 1 else list(pts_tensor.unbind(0))
+            )
+
+            # Forward pass
+            pred_list = self.model.predict(pts_list)
+            per_point_labels = pred_list[0].cpu().numpy()  # (N,)
 
         # Map from model classes (0-18 = semantic, 19 = ignore) to semantic (0-18)
         semantic_labels = np.full_like(per_point_labels, -1, dtype=np.int32)
@@ -226,7 +237,6 @@ class FRNetInference:
 
         return semantic_labels
 
-    @torch.no_grad()
     def infer_range_image(self, range_image: np.ndarray, inverse_index: np.ndarray) -> np.ndarray:
         """
         Run FRNet inference and project results to range image.
