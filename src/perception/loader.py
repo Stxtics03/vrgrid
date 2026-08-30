@@ -10,21 +10,35 @@ labels are ground truth, so the mapping contribution is evaluated independently
 of segmentation quality. That is a feature — it isolates the contribution from
 segmentation error.
 
-USES OFFICIAL KITTI GROUND-TRUTH POSES from `C:/KITTI/dataset/poses/<seq>.txt`
-NOT the SemanticKITTI internal SLAM poses at `data/sequences/<seq>/poses.txt`.
-VELODYNE SCANS AND LABELS from `C:/KITTI/dataset/sequences/<seq>/velodyne/` and `labels/`.
+Data root is set by the `VRGRID_DATA_ROOT` environment variable and must hold
+the KITTI odometry layout:
+
+    $VRGRID_DATA_ROOT/poses/<seq>.txt                    official GT poses
+    $VRGRID_DATA_ROOT/sequences/<seq>/velodyne/*.bin
+    $VRGRID_DATA_ROOT/sequences/<seq>/labels/*.label     SemanticKITTI labels
+    $VRGRID_DATA_ROOT/sequences/<seq>/calib.txt
+
+We use the OFFICIAL KITTI GT poses from `poses/<seq>.txt`, not the SemanticKITTI
+internal SLAM poses at `sequences/<seq>/poses.txt`. If the variable is unset it
+defaults to `./data` (the gitignored data dir at the repo root); set it
+explicitly if your download lives elsewhere -- see the README.
 """
 
-import numpy as np
+import os
 from pathlib import Path
 
-# Data root — use the REAL KITTI dataset at C:/KITTI/dataset
-DATA_ROOT = Path(r"C:/KITTI/dataset")
+import numpy as np
+
+# Data root: $VRGRID_DATA_ROOT, or ./data relative to the working directory.
+# Resolved once at import; nothing here touches the filesystem, so an unset
+# variable is not an error until a scan is actually requested (callers get a
+# FileNotFoundError naming the missing path).
+DATA_ROOT = Path(os.environ.get("VRGRID_DATA_ROOT", "data")).expanduser()
 
 # Official KITTI ground-truth poses (top-level)
 GT_POSES_DIR = DATA_ROOT / "poses"
 
-# SemanticKITTI velodyne scans and labels (full dataset)
+# SemanticKITTI velodyne scans and labels
 VELODYNE_DIR = DATA_ROOT / "sequences"
 LABELS_DIR = DATA_ROOT / "sequences"
 

@@ -8,7 +8,10 @@
 model:
   name: "FRNet"
   num_classes: 20           # 19 semantic (0-18) + 1 ignore (19)
-  checkpoint: "C:/Users/JAIPREET SINGH/Downloads/FRNet-master/FRNet-master/checkpoints/frnet-semantickitti_seg.pth"
+  # FRNet is disabled (the standalone port is non-functional -- see
+  # src/perception/semantics.py). This path is only read if someone re-enables
+  # FRNetInference; override it with the VRGRID_FRNET_CHECKPOINT env var.
+  checkpoint: "checkpoints/frnet-semantickitti_seg.pth"
   # Range image / frustum projection parameters (HDL-64E on KITTI)
   input_height: 64
   input_width: 512

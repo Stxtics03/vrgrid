@@ -6,15 +6,23 @@ SemanticKITTI, **sequences 00, 07 and 08 only** — about 40 GB, not the full
 200 GB. JP starts this download before anything else on Day 0: it is the one
 item on the critical path that neither cleverness nor effort can accelerate.
 
+This directory is the default data root. Override it with the
+`VRGRID_DATA_ROOT` environment variable if your download lives elsewhere (see
+the README). Expected layout, either way:
+
 ```
-data/
+<root>/
+├── poses/
+│   ├── 00.txt   07.txt   08.txt        ← official KITTI GT poses (what we use)
 └── sequences/
-    ├── 00/{velodyne/*.bin, labels/*.label, poses.txt, calib.txt}
+    ├── 00/{velodyne/*.bin, labels/*.label, calib.txt}
     ├── 07/   ← mapping-parameter tuning
     └── 08/   ← reporting, as the community uses it
 ```
 
-Tune on 07, report on 08. Never both on the same sequence.
+We use `poses/<seq>.txt` (official KITTI GT), **not** the SemanticKITTI
+`sequences/<seq>/poses.txt` (internal SLAM). Tune on 07, report on 08 — never
+both on the same sequence.
 
 Both the semantic class (19-class) and the motion flag (`moving-*`, IDs
 250–259) are read straight from the raw `.label` files. Nothing is inferred

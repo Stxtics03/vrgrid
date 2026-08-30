@@ -23,6 +23,7 @@ ones (FRNet repo configs/_base_/datasets/semantickitti_seg.py labels_map), so a
 future FRNet swap lines up with no relabelling.
 """
 
+import os
 from pathlib import Path
 
 import numpy as np
@@ -122,7 +123,9 @@ class FRNetInference:
 
         self.num_classes = self.cfg["model"]["num_classes"]  # 20
         self.class_names = self.cfg["model"]["class_names"]
-        self.checkpoint_path = Path(self.cfg["model"]["checkpoint"])
+        self.checkpoint_path = Path(
+            os.environ.get("VRGRID_FRNET_CHECKPOINT", self.cfg["model"]["checkpoint"])
+        ).expanduser()
         self.sensor_cfg = self.cfg["sensor"]
 
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")

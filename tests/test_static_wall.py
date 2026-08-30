@@ -64,6 +64,7 @@ from vrgrid.perception.loader import (
     load_gt_poses,
     load_labels,
     load_velodyne_scan,
+    verify_sequence_exists,
 )
 from vrgrid.perception.transforms import (
     sensor_to_vehicle,
@@ -97,9 +98,10 @@ MAX_UNSIGNED_DRIFT_MAX_DEG = 6.0
 MAX_PLANE_RMS_M = 0.25
 MIN_WALL_PTS_PER_FRAME = 150
 
-_LABELS_AVAILABLE = _label_path("00", 3150).exists()
+_HAS_SEQ_00 = verify_sequence_exists("00") and _label_path("00", 3150).exists()
 pytestmark = pytest.mark.skipif(
-    not _LABELS_AVAILABLE, reason="SemanticKITTI .label files for sequence 00 not present"
+    not _HAS_SEQ_00,
+    reason="KITTI sequence 00 (GT poses + velodyne + .label files) not present -- set VRGRID_DATA_ROOT",
 )
 
 

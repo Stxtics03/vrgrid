@@ -14,6 +14,7 @@ That last clause is the contribution. Everything before it is engineering.
 ```bash
 python3 -m venv .venv && source .venv/bin/activate   # Debian/Kali: required, PEP 668
 pip install -e ".[dev]"            # or: make setup
+pip install -e ".[perception]"     # Patchwork++ ground segmentation (C++ ext)
 make test                          # all unit tests
 python -m vrgrid.run --seq 08 --schedule 5/10/20/40
 python -m vrgrid.dash              # Rerun dashboard, separate process
@@ -21,7 +22,24 @@ python scripts/sampling_table.py   # the numbers behind the ring schedule
 ```
 
 The dataset is **not** in this repo. SemanticKITTI sequences 00, 07, 08 only
-(~40 GB) into `data/`, which is gitignored.
+(~40 GB), in the KITTI odometry layout:
+
+```
+<root>/poses/<seq>.txt                     official KITTI GT poses
+<root>/sequences/<seq>/{velodyne/*.bin, labels/*.label, calib.txt}
+```
+
+Point the loader at it with an environment variable:
+
+```bash
+export VRGRID_DATA_ROOT=/path/to/kitti      # Windows: setx VRGRID_DATA_ROOT C:\KITTI\dataset
+```
+
+Unset, it defaults to `./data` (gitignored, at the repo root). Data-dependent
+tests **skip** when the root is missing rather than failing.
+
+FRNet is not used (see `docs/research-log.md`); if you ever re-enable it, set
+`VRGRID_FRNET_CHECKPOINT` to the `.pth` path.
 
 ## Who owns what
 

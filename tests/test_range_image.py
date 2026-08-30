@@ -13,7 +13,11 @@ Two guarantees this module has to make:
 import numpy as np
 import pytest
 
-from vrgrid.perception.loader import _velodyne_path, load_velodyne_scan
+from vrgrid.perception.loader import (
+    _velodyne_path,
+    load_velodyne_scan,
+    verify_sequence_exists,
+)
 from vrgrid.perception.range_image import bin_widths, project
 
 SENSOR_CFG = {
@@ -23,8 +27,10 @@ SENSOR_CFG = {
     "phi_max_deg": 2.0,
 }
 
-_HAS_DATA = _velodyne_path("00", 0).exists()
-needs_data = pytest.mark.skipif(not _HAS_DATA, reason="KITTI sequence 00 velodyne not present")
+_HAS_DATA = verify_sequence_exists("00") and _velodyne_path("00", 0).exists()
+needs_data = pytest.mark.skipif(
+    not _HAS_DATA, reason="KITTI sequence 00 not present -- set VRGRID_DATA_ROOT"
+)
 
 
 def _synthetic_points(bearings, ranges, intensities=None):

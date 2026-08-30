@@ -13,10 +13,16 @@ from vrgrid.perception.ground import (
     ground_from_semantics,
     segment_ground,
 )
-from vrgrid.perception.loader import _label_path, _velodyne_path, load_labels, load_velodyne_scan
+from vrgrid.perception.loader import (
+    _label_path,
+    _velodyne_path,
+    load_labels,
+    load_velodyne_scan,
+    verify_sequence_exists,
+)
 from vrgrid.perception.semantics import semantic_labels
 
-_HAS_DATA = _velodyne_path("00", 43).exists()
+_HAS_DATA = verify_sequence_exists("00") and _velodyne_path("00", 43).exists()
 needs_pw = pytest.mark.skipif(not _HAVE_PATCHWORKPP, reason="pypatchworkpp not installed")
 needs_data = pytest.mark.skipif(not _HAS_DATA, reason="KITTI sequence 00 not present")
 
