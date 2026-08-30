@@ -135,14 +135,27 @@ Raw points (Sensor frame, N×4: x, y, z, intensity)
    global plane (its span **and its linear slope** across the 100 frames); plane RMS;
    point count.
 
-**Failure modes:**
-- **Rotation** drift of the wall normal → `T_S_V` / `R_flip` / `Tr` rotation is wrong
-- **Translation** slope of the wall offset → `pose(k)` parsing or composition is wrong
+Per-frame the wall normal is re-fitted and split, relative to frame 0's normal, into
+signed **yaw** (rotation in the horizontal plane) and signed **pitch** (tilt from
+vertical). A linear trend is fitted to yaw, pitch and offset vs frame index; the
+total change over the 100-frame window is the drift number.
 
-**Pass criteria (current):** global plane vertical to `|n·up| < 0.12`; normal drift
-mean < 2.6°, max < 4.8°; offset span < 0.30 m; **offset slope < 0.10 m / 100 frames**;
-plane RMS max < 0.22 m. Clean segments sit ~30× inside the slope gate. Measured:
-3150 → 0.87°/0.46 cm-per-100f; 2550 → 1.17°/−0.88; 600 → 2.32°/2.54.
+**Failure modes:**
+- **yaw trend** in the normal → rotation error in `R_flip` / `Tr` / `T_S_V`
+- **offset trend** in the plane → `pose(k)` parsing or composition in `T_V_W`
+
+**Strict gates (all three segments 3150 / 2550 / 0600):** global plane vertical to
+`|n·up| < 0.12`; `|yaw trend| < 1.0°`; `|offset trend| < 0.03 m`. Measured:
+`|n·up|` 0.023 / 0.044 / 0.081; yaw `−0.08 / −0.22 / +0.27°`;
+offset `+0.45 / −0.88 / +2.51 cm`.
+
+**Loose regression guards (not tuning targets):** unsigned normal drift mean < 3°,
+max < 6°; plane RMS max < 0.25 m.
+
+**Pitch trend is reported, not gated.** `turning_2550` shows +3.8° pitch while its
+yaw and offset are clean; it does not track vehicle pitch (flat road here) and steps
+mid-segment — a set-back upper storey entering the vehicle-relative selection band,
+not a transform error. See the pitch note in `tests/test_static_wall.py`.
 
 ---
 
