@@ -70,7 +70,7 @@ vrgrid/
 │   ├── grid/          [Aakash]   lattice, rings, migration, split/merge, fusion, pool
 │   ├── eval/          [Aakash]   reference map, metrics, plan regret
 │   ├── gpu/           [Shrestha] kernels, allocators, timing, 3D baseline stub
-│   └── perception/    [JP]       loader, transforms, range image, FRNet, ground, reflectivity
+│   └── perception/    [JP]       loader, transforms, range image, semantic+motion labels (GT), ground, reflectivity
 ├── dashboard/         [JP]
 ├── tests/                            one file per module, name matches source
 ├── scripts/                          every number on a slide comes from a script here

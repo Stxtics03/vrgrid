@@ -5,10 +5,15 @@
   handedness, units. Frame confusion is the most common silent bug here: the
   map looks plausible and slowly rotates. Run the static-wall test on Day 0.
 - **Wire things in, do not rebuild them.** Patchwork++ for ground, KISS-ICP
-  for odometry, pretrained FRNet 19-class for semantics. Zero training.
-- **Motion labels are ground truth**, read from the raw `.label` files
-  (`moving-*`, IDs 250-259). Disclose it; it isolates the mapping
-  contribution from segmentation error, which is what a careful evaluator wants.
+  for odometry. FRNet was the plan for semantics but the only standalone port
+  available does not reproduce the trained network (wrong backbone activation,
+  wrong FOV, missing RangeInterpolation -> ~15% point accuracy); it is flagged
+  non-functional in `frnet/` and kept only for a possible real mmdet3d install.
+- **Both semantic class and motion are ground truth**, read from the raw
+  `.label` files: 19-class semantic via `semantics.semantic_labels()`, motion
+  (`moving-*`, IDs 250-259) via `semantics.is_moving()`. Disclose it; it
+  isolates the mapping contribution from segmentation error, which is what a
+  careful evaluator wants. Zero training, zero inference.
 - **Dataset:** SemanticKITTI sequences 00, 07, 08 only (~40 GB). Cache format
   is yours to choose, but it must be deterministic — the same sequence must
   produce byte-identical inputs twice.

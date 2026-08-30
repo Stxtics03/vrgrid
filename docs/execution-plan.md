@@ -34,7 +34,7 @@ If these five things work on 4 September you have a strong submission, even with
 
 ### Three decisions that save the deadline
 
-**A. Do not retrain anything.** FRNet pretrained 19-class for semantics; `moving-*` labels read straight from SemanticKITTI's raw `.label` files for motion (master v4 §3.6). This removes several days of GPU time from the critical path and **isolates the mapping contribution from segmentation error**, which is what a careful evaluator wants anyway. Disclose it plainly.
+**A. Do not retrain anything — and, as it turned out, do not run inference for labels either.** The plan was pretrained FRNet 19-class for semantics; the available standalone port does not reproduce the trained network (~15% accuracy — see the research log and master v4 §3.6), so **both** the 19-class semantic label and the `moving-*` motion flag are now read straight from SemanticKITTI's raw `.label` files (`src/perception/semantics.py`). This removes several days of GPU time from the critical path and **isolates the mapping contribution from segmentation error**, which is what a careful evaluator wants anyway. Disclose it plainly. A real mmdet3d FRNet install remains a possible later swap.
 
 **B. Do not download all of SemanticKITTI.** You need three sequences, not twenty-two. Sequence **00** (development), **07** (mapping-hyperparameter tuning, held out from reporting), **08** (validation, reported). ~40 GB instead of ~200 GB. Start the download in the first hour of Day 0 — it is the only thing on the critical path that money and cleverness cannot speed up.
 
@@ -63,7 +63,7 @@ Six people. Three research, three development, **paired one-to-one**. The pairin
 
 **D1 — Grid engine.** The lattice and indexing (§2), ring assignment and migration, toroidal shift, `scatter()`, Kalman fusion, `split()`/`merge()` with the variance mathematics and the `derived` bit (§4–5), the refinement pool, the memory bound. Then the conservative pyramid if time. **This is the contribution; D1 should be your strongest systems programmer and should touch nothing else.**
 
-**D2 — Perception front-end.** Loader and cached preprocessing, coordinate transforms and the static-wall test, range-image projection with inverse index, FRNet inference, motion labels, Patchwork++ ground segmentation, reflectivity normalisation. Then residual MOS and instance clustering if time.
+**D2 — Perception front-end.** Loader and cached preprocessing, coordinate transforms and the static-wall test, range-image projection with inverse index, GT semantic + motion labels from the raw `.label` files (FRNet dropped — see decision A), Patchwork++ ground segmentation, reflectivity normalisation. Then residual MOS and instance clustering if time.
 
 **D3 — Evaluation and dashboard.** Reference-map construction, the metrics harness, the Rerun dashboard, the allocating 3D baseline stub, the plan-regret study. **D3 owns the two things judges actually see** — the demo and the numbers — which is why it is a full-time role and not an afterthought.
 
@@ -230,7 +230,7 @@ Buffer only. Submit early. Do not touch the code.
 |---|---|---|---|
 | Download not finished by Day 1 | Medium | Started late | Work on sequence 00 alone; 07/08 arrive later. Never blocks D1. |
 | `moving-*` not in raw labels | Low | R2 Day 0 | Fall back to residual MOS immediately; the map contribution is unaffected. |
-| FRNet won't run / checkpoint mismatch | Medium | D2 Day 1 | Ship with GT semantic labels. Segmentation is not the contribution — say so and move on. |
+| FRNet won't run / checkpoint mismatch | ~~Medium~~ **realised, Day 1** | D2 Day 1 | **Done:** standalone port is non-functional (~15% acc); shipped with GT 19-class semantic labels from the raw `.label` files. Segmentation is not the contribution. Real mmdet3d install is a possible later swap. |
 | Plan-regret claim already published | Low–Medium | R3 Day 3 | Reframe as *validation* of the approach in a new domain; keep the curve, it is still the best figure in the deck. |
 | Split/merge maths doesn't pass tests | Medium | D1 Day 2 | **Spine item — stop everything and fix.** All three devs on it if needed. |
 | Integration fails on Day 5 | Medium | Interfaces drifted | Prevented by Gate 0. If it happens anyway, revert to last green commit and ship that. |

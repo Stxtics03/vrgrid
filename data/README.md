@@ -16,5 +16,8 @@ data/
 
 Tune on 07, report on 08. Never both on the same sequence.
 
-Motion labels (`moving-*`, IDs 250–259) are read straight from the raw
-`.label` files. Nothing is retrained.
+Both the semantic class (19-class) and the motion flag (`moving-*`, IDs
+250–259) are read straight from the raw `.label` files. Nothing is inferred
+and nothing is retrained — FRNet is not used (the only standalone port
+available does not reproduce the trained network). Disclose this: the mapping
+contribution is evaluated independently of segmentation quality.

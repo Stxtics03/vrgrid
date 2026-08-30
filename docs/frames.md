@@ -113,8 +113,9 @@ Raw points (Sensor frame, N×4: x, y, z, intensity)
     │     Spherical projection: yaw = atan2(y, x), pitch = asin(z / r)
     │     Inverse index stored for reversibility.
     │
-    ├─► FRNet inference (uses raw Sensor-frame points + frustum coords)
-    │     Output: per-point semantic labels (0-18, -1=ignore)
+    ├─► Semantic + motion labels (from the raw .label file, no inference)
+    │     semantic_labels(): per-point 19-class (0-18, -1=ignore)
+    │     is_moving():       per-point moving-* flag
     │
     └─► T_V_W(k) (per-frame) ──► World frame (for mapping)
           Scatter to variable-resolution grid.

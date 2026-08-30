@@ -250,7 +250,7 @@ Slide phrasing: **"bounded at 9.1 MB, degrading gracefully by dropping the least
 |---|---|---|
 | 0 | Load, transform, cache | Run **GT poses and KISS-ICP in parallel from day one**, report the gap |
 | 1 | Range image | 64×512 per FLARES, sweep as config; keep inverse index |
-| 2 | Semantic segmentation | **FRNet pretrained 19-class, no retraining** — see 3.6 |
+| 2 | Semantic segmentation | **GT 19-class labels from the raw `.label` files** — FRNet dropped, see 3.6 |
 | 3 | Motion | GT `moving-*` labels for the map demo; residual images as the learned path |
 | 4 | Scatter to variable grid | Kalman height, log-odds ×3-state, Boyer–Moore class, **fixed-point integer atomics** |
 | 5 | Persist and forget | Semantic gate → transient layer; visibility cleanup; decay |
@@ -263,8 +263,9 @@ v2 and the additions doc both assume retraining FRNet on the 25-class multi-scan
 
 You do not need it. **The `moving-*` labels already exist in SemanticKITTI's raw `.label` files** (IDs 250–259). The 19-class collapse happens in the `learning_map` config, not in the data. So:
 
-- **Semantics:** pretrained FRNet 19-class, off the shelf, Apache 2.0. Zero training.
-- **Motion, for the mapping demo and all map metrics:** read `moving-*` straight from the GT label files. Disclose it plainly — *"motion labels are ground truth; the mapping contribution is evaluated independently of segmentation quality."* This is a **feature**, not a compromise: it isolates your contribution from segmentation error, which is exactly what a careful evaluator wants.
+- **Semantics:** the plan was pretrained FRNet 19-class off the shelf. **Dropped** — the only standalone implementation available (no mmdet3d) does not reproduce the trained network (LeakyReLU where the checkpoint trained with HSwish, FOV 2.0/−24.8 vs 3.0/−25.0, missing RangeInterpolation), giving ~15% point accuracy on every frame. Instead: read the **19-class semantic label straight from the raw `.label` files**, the same source as the motion flag. A real mmengine/mmcv/mmdet/mmdet3d install can swap back in later if time allows; the port code is kept, flagged non-functional.
+- **Motion, for the mapping demo and all map metrics:** read `moving-*` straight from the GT label files.
+- **Disclose both plainly** — *"semantic and motion labels are both ground truth; the mapping contribution is evaluated independently of segmentation quality."* This is a **feature**, not a compromise: it isolates your contribution from segmentation error, which is exactly what a careful evaluator wants. Zero training, zero inference in the label path.
 - **Motion, learned:** residual-image MOS (LMNet approach) as a parallel track. If it lands, you show both and report the gap. If it doesn't, you lost nothing.
 
 This single decision converts the project from "will not finish" to "will finish with slack." Take it.

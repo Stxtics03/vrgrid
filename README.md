@@ -34,7 +34,7 @@ structured so two people rarely touch the same file.
 | `src/grid/` | Aakash | lattice, rings, split/merge, fusion, refinement pool |
 | `src/eval/` | Aakash | reference map, metrics, plan regret |
 | `src/gpu/` | Shrestha | kernels, allocators, timing |
-| `src/perception/` | JP | loader, transforms, range image, FRNet, ground |
+| `src/perception/` | JP | loader, transforms, range image, semantic + motion labels (GT), ground |
 | `dashboard/` | JP | Rerun app |
 | `configs/` | all three | schedules + thresholds, frozen before the ablation |
 | `docs/research-log.md` | Srinivas, Hriday, Pratyushi | findings, append-only |
