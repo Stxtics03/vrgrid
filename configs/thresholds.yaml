@@ -48,10 +48,11 @@ split_merge:
 # --- sensor (HDL-64E on KITTI) ----------------------------------------------
 sensor:
   height_m: 1.73
-  d_theta_deg: 0.2
-  d_phi_deg: 0.427
   phi_min_deg: -24.8
   blind_cone_m: 3.74       # h / tan|phi_min|. Unknown, never free. 11% of Ring 0.
+  # Range-image geometry (num_rings/num_azimuth/phi_max and the derived bin
+  # widths) lives in configs/frnet.yaml, which is what range_image.py reads.
+  # The old d_theta_deg / d_phi_deg keys here were never read by anything.
   # Measurement-noise model, math §3.2 eq (12). sigma_phi is stated in the
   # math doc; sigma_r is NOT -- 2 cm is the HDL-64E datasheet figure and an
   # assumption of ours. It only moves the near-field floor: the 8.7 cm at 50 m
