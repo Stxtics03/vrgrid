@@ -1,4 +1,10 @@
-"""FRNet Backbone — standalone, no mmcv/mmdet3d/torch_scatter deps."""
+# NON-FUNCTIONAL -- see the header of frnet.py. This standalone port does not
+# reproduce the trained network: this backbone uses nn.LeakyReLU throughout,
+# but the checkpoint was trained with HSwish (act_cfg=dict(type='HSwish') in
+# configs/_base_/models/frnet.py). Kept, not deleted, for a possible real
+# FRNet install later. semantics.py uses ground-truth .label files instead.
+
+"""FRNet Backbone — standalone, no mmcv/mmdet3d/torch_scatter deps. NON-FUNCTIONAL."""
 
 import torch
 import torch.nn as nn

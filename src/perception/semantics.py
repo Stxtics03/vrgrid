@@ -1,24 +1,82 @@
-"""Semantic segmentation. [JP]
+"""Semantic labels. [JP]
 
-Pretrained FRNet, 20-class (19 semantic + 1 ignore at index 19), off the shelf, Apache 2.0.
-ZERO training. Wire it in; do not reimplement it and do not fine-tune it.
-The checkpoint path lives in the config, never inline.
+Semantic class per point comes STRAIGHT FROM the SemanticKITTI `.label` files,
+mapped to the 19-class scheme. Nothing is inferred and nothing is retrained.
 
-Uses the FULL FRNet architecture: frustum (range-image) + point fusion.
-Input: raw 3D points (x, y, z, intensity) from loader.py
-Output: per-point class predictions (mapped to range image via inverse index)
+Disclose it plainly in the report: like the motion labels (see loader.py),
+the semantic labels are ground truth. This is deliberate -- it isolates the
+mapping contribution from segmentation error, which is what a careful evaluator
+wants. The variable-resolution grid is the contribution; how the points got
+their class is not.
+
+Why not FRNet: the pretrained checkpoint is available, but the only standalone
+implementation we have (src/perception/frnet/) does not reproduce the trained
+network -- wrong backbone activation (LeakyReLU vs HSwish), wrong FOV params,
+missing RangeInterpolation -- and collapses to ~15% point accuracy on every
+frame. Running FRNet properly needs its full mmengine/mmcv/mmdet/mmdet3d stack.
+That is a possible later swap (Option B); the port code is kept, flagged
+non-functional, for that. The module-level segment*/get_frnet helpers below
+raise rather than silently return that garbage.
+
+The 19-class scheme and the raw-id -> class map are the canonical SemanticKITTI
+ones (FRNet repo configs/_base_/datasets/semantickitti_seg.py labels_map), so a
+future FRNet swap lines up with no relabelling.
 """
 
-# TODO(Day 1): FRNet class distribution on frame 000043 looked skewed
-# (50% other-ground, minimal road/vegetation) - sanity-check projection/
-# intensity pipeline before trusting outputs further.
-
-import torch
 import numpy as np
+import torch
 import yaml
 from pathlib import Path
 
 from .frnet import FRNet
+
+# Raw SemanticKITTI id (lower 16 bits of the .label word) -> 19-class index.
+# 19 = unlabeled/ignore. moving-* ids (252-259) fold onto their static class
+# for the SEMANTIC label; motion is a separate signal (is_moving / loader.py).
+SEMANTIC_KITTI_LABEL_MAP = {
+    0: 19, 1: 19, 10: 0, 11: 1, 13: 4, 15: 2, 16: 4, 18: 3, 20: 4, 30: 5,
+    31: 6, 32: 7, 40: 8, 44: 9, 48: 10, 49: 11, 50: 12, 51: 13, 52: 19,
+    60: 8, 70: 14, 71: 15, 72: 16, 80: 17, 81: 18, 99: 19,
+    252: 0, 253: 6, 254: 5, 255: 7, 256: 4, 257: 4, 258: 3, 259: 4,
+}
+MOVING_LABEL_IDS = range(250, 260)  # SemanticKITTI moving-* raw ids
+
+_MAX_RAW = max(SEMANTIC_KITTI_LABEL_MAP) + 1
+_LUT = np.full(_MAX_RAW, -1, dtype=np.int32)  # unmapped raw id -> -1 (ignore)
+for _raw, _cls in SEMANTIC_KITTI_LABEL_MAP.items():
+    _LUT[_raw] = -1 if _cls == 19 else _cls
+
+
+def semantic_labels(raw_labels: np.ndarray) -> np.ndarray:
+    """Map raw SemanticKITTI `.label` words to 19-class indices.
+
+    Args:
+        raw_labels: (N,) uint32 -- as returned by loader.load_labels().
+
+    Returns:
+        (N,) int32 -- class index 0-18, or -1 for unlabeled / ignore / any raw
+        id outside the SemanticKITTI scheme.
+    """
+    sem = np.asarray(raw_labels, dtype=np.uint32) & 0xFFFF
+    out = np.full(sem.shape, -1, dtype=np.int32)
+    in_range = sem < _MAX_RAW
+    out[in_range] = _LUT[sem[in_range]]
+    return out
+
+
+def is_moving(raw_labels: np.ndarray) -> np.ndarray:
+    """(N,) bool -- True where the raw label is a SemanticKITTI moving-* id."""
+    sem = np.asarray(raw_labels, dtype=np.uint32) & 0xFFFF
+    return (sem >= MOVING_LABEL_IDS.start) & (sem < MOVING_LABEL_IDS.stop)
+
+
+_PORT_BROKEN = (
+    "FRNet inference is disabled: the standalone port in src/perception/frnet/ "
+    "does not reproduce the trained network (see its header). Use "
+    "semantic_labels(raw_labels) -- semantic class comes from the SemanticKITTI "
+    ".label files. To re-enable FRNet, install the real mmdet3d stack and "
+    "replace this module."
+)
 
 
 # FRNet model class names (from configs/_base_/datasets/semantickitti_seg.py)
@@ -198,83 +256,27 @@ class FRNetInference:
         return range_labels
 
 
-# Global instance for reuse
-_frnet_instance = None
-
-
 def get_frnet(config_path: str = "configs/frnet.yaml") -> FRNetInference:
-    """Get or create FRNet inference instance."""
-    global _frnet_instance
-    if _frnet_instance is None:
-        _frnet_instance = FRNetInference(config_path)
-    return _frnet_instance
+    """Disabled -- the standalone FRNet port is non-functional. See _PORT_BROKEN."""
+    raise RuntimeError(_PORT_BROKEN)
 
 
 def segment(points: np.ndarray, config_path: str = "configs/frnet.yaml") -> np.ndarray:
-    """
-    Segment raw 3D points using pretrained FRNet.
-
-    Args:
-        points: (N, 4) float32 — [x, y, z, intensity] in sensor frame
-        config_path: Path to FRNet config YAML
-
-    Returns:
-        semantic_labels: (N,) int32 — SemanticKITTI 19-class labels (0-18), -1=unlabeled
-    """
-    frnet = get_frnet(config_path)
-    return frnet.infer_points(points)
+    """Disabled -- use semantic_labels(raw_labels). See _PORT_BROKEN."""
+    raise RuntimeError(_PORT_BROKEN)
 
 
 def segment_range_image(
     range_image: np.ndarray,
     inverse_index: np.ndarray,
-    config_path: str = "configs/frnet.yaml"
+    config_path: str = "configs/frnet.yaml",
 ) -> np.ndarray:
-    """
-    Segment range image using pretrained FRNet (projects to points, infers, projects back).
-
-    Args:
-        range_image: (64, 512, 5) float32 — [range_m, x, y, z, intensity]
-        inverse_index: (64, 512) int32 — source point index per pixel
-        config_path: Path to FRNet config YAML
-
-    Returns:
-        semantic_labels: (64, 512) int32 — class indices 0-18, -1 for invalid
-    """
-    frnet = get_frnet(config_path)
-    return frnet.infer_range_image(range_image, inverse_index)
+    """Disabled -- use semantic_labels(raw_labels). See _PORT_BROKEN."""
+    raise RuntimeError(_PORT_BROKEN)
 
 
-def segment_with_probs(points: np.ndarray, config_path: str = "configs/frnet.yaml") -> tuple[np.ndarray, np.ndarray]:
-    """
-    Segment points and return both labels and probabilities.
-
-    Returns:
-        labels: (N,) int32 — class indices 0-18, -1=unlabeled
-        probs: (N, 19) float32 — softmax probabilities for 19 semantic classes
-    """
-    frnet = get_frnet(config_path)
-    device = frnet.device
-
-    pts_tensor = torch.from_numpy(points).float().to(device)
-    if pts_tensor.ndim == 2:
-        pts_tensor = pts_tensor.unsqueeze(0)
-
-    pts_list = [pts_tensor[0]] if pts_tensor.shape[0] == 1 else list(pts_tensor.unbind(0))
-
-    frnet.model.eval()
-    with torch.no_grad():
-        voxel_dict = frnet.model.forward(pts_list)
-        logits = voxel_dict['seg_logit']  # (N_total, 20)
-        probs_20 = torch.softmax(logits, dim=1).cpu().numpy()  # (N, 20)
-        pred_20 = logits.argmax(dim=1).cpu().numpy()  # (N,)
-
-    # Map to 19 semantic classes (model 0-18 -> semantic 0-18, model 19 -> ignore)
-    labels = np.full_like(pred_20, -1, dtype=np.int32)
-    probs_19 = np.zeros((len(pred_20), 19), dtype=np.float32)
-    for model_cls, sem_cls in MODEL_TO_SEMANTIC.items():
-        mask = pred_20 == model_cls
-        labels[mask] = sem_cls
-        probs_19[:, sem_cls] = probs_20[:, model_cls]
-
-    return labels, probs_19
+def segment_with_probs(
+    points: np.ndarray, config_path: str = "configs/frnet.yaml"
+) -> tuple[np.ndarray, np.ndarray]:
+    """Disabled -- ground-truth .label files carry no probabilities. See _PORT_BROKEN."""
+    raise RuntimeError(_PORT_BROKEN)

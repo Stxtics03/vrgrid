@@ -1,4 +1,27 @@
-"""Full FRNet model — standalone inference, no mmcv/mmdet3d deps."""
+# =============================================================================
+# NON-FUNCTIONAL -- DO NOT BUILD ON THIS OR TRUST ITS OUTPUT.
+#
+# This hand-written standalone port does NOT reproduce the trained FRNet
+# network. The checkpoint loads cleanly (413/413 tensors, no shape mismatch)
+# but the forward pass is wrong, so inference collapses to ~15% point accuracy
+# on every frame (verified on KITTI 00 frames 43 and 100: ~50-58% "other-ground"
+# predicted where ground truth has ~0%).
+#
+# Known divergences from configs/_base_/models/frnet.py in the FRNet repo:
+#   * backbone activation is nn.LeakyReLU here; the checkpoint was trained with
+#     HSwish (act_cfg=dict(type='HSwish')) -- wrong nonlinearity, every layer;
+#   * FOV is fed as fov_up=2.0 / fov_down=-24.8; training used 3.0 / -25.0;
+#   * the test-time RangeInterpolation densification (H=64, W=2048) is missing;
+#   * fusion/attention wiring and the manual scatter_max/scatter_mean are
+#     unaudited against the real source.
+#
+# The project decision (see src/perception/semantics.py) is to use the
+# SemanticKITTI ground-truth .label files instead. This code is kept, not
+# deleted, so a proper FRNet install (mmengine + mmcv + mmdet + mmdet3d + the
+# frnet package) can replace semantics.py later if time allows.
+# =============================================================================
+
+"""Full FRNet model — standalone inference, no mmcv/mmdet3d deps. NON-FUNCTIONAL."""
 
 import torch
 import torch.nn as nn

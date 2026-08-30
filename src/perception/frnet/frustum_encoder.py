@@ -1,4 +1,10 @@
-"""Frustum Feature Encoder — standalone, no mmcv/mmdet3d/torch_scatter deps."""
+# NON-FUNCTIONAL -- see the header of frnet.py. This standalone port does not
+# reproduce the trained network (wrong backbone activation, wrong FOV params,
+# missing RangeInterpolation; the manual scatter_max/scatter_mean here are
+# unaudited against the real source). Kept, not deleted, for a possible real
+# FRNet install later. semantics.py uses ground-truth .label files instead.
+
+"""Frustum Feature Encoder — standalone, no torch_scatter deps. NON-FUNCTIONAL."""
 
 import torch
 import torch.nn as nn

@@ -1,4 +1,9 @@
-"""FRNet Decode Head — standalone, no mmcv/mmdet3d deps."""
+# NON-FUNCTIONAL -- see the header of frnet.py. This standalone port does not
+# reproduce the trained network (wrong backbone activation, wrong FOV params,
+# missing RangeInterpolation). Kept, not deleted, for a possible real FRNet
+# install later. semantics.py uses ground-truth .label files instead.
+
+"""FRNet Decode Head — standalone, no mmcv/mmdet3d deps. NON-FUNCTIONAL."""
 
 import torch
 import torch.nn as nn
