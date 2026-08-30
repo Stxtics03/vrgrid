@@ -11,9 +11,7 @@ Shows: the map coloured by ring, the schedule selector, per-stage timings
 persistent-unknown fraction.
 """
 
-
-def main() -> None:
-    raise NotImplementedError("JP — Day 0/1, against a mock grid")
+from .demo_synthetic import main
 
 
 if __name__ == "__main__":
