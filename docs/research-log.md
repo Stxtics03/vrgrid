@@ -39,3 +39,21 @@ segmentation error, which is what a careful evaluator wants (master v4 §3.6,
 risk register). The broken port is kept, flagged non-functional, so a proper
 `mmengine`/`mmcv`/`mmdet`/`mmdet3d` install can swap real FRNet back in later if
 time allows.
+
+## 2026-08-31 — JP (decision)
+**Module:** β — dynamics & segmentation
+**Decision:** Given the FRNet finding above, three options were on the table —
+(A) use GT 19-class semantic labels from the `.label` files, disclosed;
+(B) install the real `mmengine`/`mmcv`/`mmdet`/`mmdet3d` stack and run the
+published checkpoint properly; (C) fix the standalone port (swap HSwish in, fix
+FOV, add RangeInterpolation, audit the fusion wiring). **Option A is chosen and
+FRNet is closed for the rest of the project.** Reasoning: FRNet is not one of
+the five spine items (grid engine, reference map, ghost toggle, dashboard,
+plan-regret curve); the risk register already pre-approved "ship with GT
+semantic labels" as the fallback for this exact failure mode; and the mmdet3d
+install chain is a known multi-hour Windows risk for something that is not
+demo-critical. Option C is a reimplementation-vs-paper validation task that
+could take a full day and still be subtly wrong — the brief's named failure
+mode. This decision is not to be revisited mid-project. If a real FRNet is ever
+wanted, Option B against the kept port scaffolding is the route, as a
+post-submission or slack-time task only.
