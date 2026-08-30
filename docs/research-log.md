@@ -99,3 +99,32 @@ Format:
 **Source:** FRNet GitHub (Xiangxu-0103/FRNet) & paper (arXiv:2312.04484).
 **So what:** D2 (JP) must build a projection with an inverse index using exact spherical math ($r, \theta, \phi \rightarrow u, v$). **Use Velodyne FOV bounds for the projection: +2° (top) to -24.9° (bottom).** If the main pipeline OOMs (runs out of memory), swap to the 7.5M Fast-FRNet checkpoint immediately. These four moving IDs are the sole triggers for ghost removal.
 ---
+---
+
+## 2026-08-30 - Hriday
+**Module:** R2 (Dynamics & Segmentation)
+**Finding:** DynamicMap Benchmark (Zhang et al., ITSC 2023) defines the primary evaluation metrics for ghost removal:
+1. Preservation Rate (PR / SP): $\text{PR} = \frac{|\mathcal{S}_{\text{preserved}}|}{|\mathcal{S}_{\text{groundtruth}}|}$. Measures what fraction of true static points are retained (guards against erasing walls/fences).
+2. Dynamic Removal (DR): $\text{DR} = \frac{|\mathcal{D}_{\text{removed}}|}{|\mathcal{D}_{\text{groundtruth}}|}$. Measures what fraction of dynamic points are successfully filtered out.
+**Source:** Zhang et al., "A Dynamic Points Removal Benchmark in Point Cloud Maps," ITSC 2023 (KTH-RPL).
+**So what:** D3 (Shrestha) must implement PR and DR exactly as defined above for the evaluation scripts and dashboard. **Critical defense note:** Zhang et al. evaluate offline global map cleaning, whereas our engine runs an online rolling local map. Our metrics must be explicitly contextualized against this constraint during the presentation.
+
+---
+
+## 2026-09-01 - Hriday
+**Module:** R2 (Dynamics & Segmentation)
+**Finding:** Sub-cloud range representations drastically outperform full-sweep views in memory-constrained settings. FLARES (Bosch, 2025) demonstrates that lower azimuth resolution with sub-clouds (64×512) improves both runtime and segmentation accuracy compared to full 64×2048 scans. Furthermore, BeautyMap (RA-L 2024) shows that range-visibility filtering causes over-clearing of thin geometry unless stabilized by static restoration / ground encoding.
+**Source:** FLARES (arXiv:2502.09274, Feb 2025); BeautyMap (RA-L 2024).
+**So what:** Locks D2's range image input to 64×512 sub-clouds. If our visibility cleanup produces over-clearing on thin static structures, we will implement BeautyMap's coarse-to-fine restoration mechanism as a mitigation.
+
+---
+
+## 2026-09-03 - Hriday
+**Module:** R2 (Dynamics & Segmentation)
+**Finding:** Synthesis of baseline benchmarks and related work for the final submission report:
+* *Segmentation:* Modern architectures shift from 3D voxelization to efficient 2D frustum-range representations. FRNet (Xu et al., IEEE TIP 2025) achieves state-of-the-art efficiency (~5× faster than voxel baselines) while maintaining 73.3% mIoU on SemanticKITTI (19 classes), optimized by FLARES sub-cloud processing.
+* *Dynamic Removal:* Conventional LiDAR MOS relies on multi-scan residual subtraction (LMNet). Geometric approaches like ERASOR (pseudo-occupancy) and DUFOMap (single-parameter ray-casting free space) provide non-learning alternatives. Our architecture combines lightweight semantic masking with localized rolling-map visibility cleanup, balancing latency against offline cleaners (Removert, Dynablox, BeautyMap).
+**Source:** Synthesized from Tier 1 & Tier 2 R2 bibliography (FRNet, LMNet, ERASOR, DUFOMap, BeautyMap, DynamicMap).
+**So what:** Completes R2 Day 5 (baseline numbers) and Day 6 (related work synthesis) deliverables for direct integration into the SIH submission documentation.
+
+---
