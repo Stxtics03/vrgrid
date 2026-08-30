@@ -112,10 +112,10 @@ Each day has an **exit gate**. A gate is binary and demonstrable. "Mostly workin
 | | Task |
 |---|---|
 | D1 | Ring assignment, toroidal shift with the O(perimeter) clear, `scatter()` with **fixed-point integer atomics**. Shift round-trip test. |
-| D2 | Range-image projection + inverse index at 64×512. FRNet inference running on one frame end-to-end. |
+| D2 | Range-image projection + inverse index at 64×512. Semantic + motion labels from the raw `.label` files (FRNet dropped — see decision A). |
 | D3 | Reference-map builder: aggregate sequence 07 with GT poses, strip `moving-*`, rasterise at 5 cm. **This is the long pole in evaluation — start it today.** |
 | R1 | Losasso 2004, Fankhauser 2014. Confirm the measurement-variance model matches §3.2. |
-| R2 | FRNet setup memo: exact config, checkpoint, class map, gotchas. |
+| R2 | ~~FRNet setup memo~~ — superseded: FRNet dropped, see research-log 2026-08-31. Confirm the 19-class `.label` mapping instead. |
 | R3 | **Novelty verdict on plan regret.** Metric pseudocode to D3. |
 
 > **GATE 1:** A real scan scatters into the real grid and renders on the dashboard. Ugly is fine. Shift round-trip is bit-exact. Reference map for one sequence exists on disk.

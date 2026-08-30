@@ -34,7 +34,7 @@ def make_synthetic_map() -> dict:
     ground_height = np.zeros((H, W), dtype=np.float32)
     semantic_class = np.full((H, W), -1, dtype=np.int32)
 
-    # Class indices (matching FRNet 19-class)
+    # Class indices (SemanticKITTI 19-class)
     ROAD = 8
     CAR = 0
     TERRAIN = 16
