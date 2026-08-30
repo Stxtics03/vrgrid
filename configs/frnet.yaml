@@ -46,9 +46,10 @@ model:
 # Sensor configuration for HDL-64E (KITTI)
 sensor:
   height_m: 1.73
-  d_theta_deg: 0.2
-  d_phi_deg: 0.427
-  phi_min_deg: -24.8
-  phi_max_deg: 2.0
-  num_rings: 64
-  num_azimuth: 512
+  phi_min_deg: -24.8       # vertical FOV, bottom ring
+  phi_max_deg: 2.0         # vertical FOV, top ring
+  num_rings: 64            # range-image height H
+  num_azimuth: 512         # range-image width W
+  # range_image.py derives the bin widths: d_theta = 2*pi/W,
+  # d_phi = (phi_max - phi_min)/H. The old fixed d_theta_deg: 0.2 /
+  # d_phi_deg: 0.427 keys implied an 1800-wide image and are no longer read.
