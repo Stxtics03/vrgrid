@@ -109,9 +109,11 @@ Raw points (Sensor frame, N×4: x, y, z, intensity)
     │
     ├─► T_S_V (constant) ──► Vehicle frame (N×3)
     │
-    ├─► Range image projection (64×512) using vehicle-frame points
+    ├─► Range image projection (64×512) on SENSOR-frame points
     │     Spherical projection: yaw = atan2(y, x), pitch = asin(z / r)
     │     Inverse index stored for reversibility.
+    │       └─► Reflectivity (math §10.3): rho_hat = I·r² / max(cos θ_inc, 0.1)
+    │             θ_inc from range-image neighbour normals; one byte per pixel.
     │
     ├─► Semantic + motion labels (from the raw .label file, no inference)
     │     semantic_labels(): per-point 19-class (0-18, -1=ignore)
