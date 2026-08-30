@@ -1,61 +1,76 @@
 """Reflectivity normalisation. [JP]
 
-Math appendix §10.3, eq (31). Raw LiDAR intensity confounds surface reflectance
-with geometry -- the LiDAR equation gives ``I proportional to rho * cos(theta_inc) / r^2``
-for a Lambertian surface -- so recover the intrinsic reflectance:
+Math appendix §10.3 eq (31). The LiDAR equation for a Lambertian surface is
+``I_received  proportional to  rho * cos(theta_inc) / r^2``, so the intrinsic
+reflectance is recovered by
 
-    rho_hat = I * r^2 / max(cos(theta_inc), COS_INC_MIN)      then -> one byte
+    rho_hat = I * r^2 / max(cos(theta_inc), 0.1)                       (31)
 
-`r` is the per-pixel range from the range image; `theta_inc` is the angle
-between the beam and the local surface normal, estimated from the range image's
-own neighbour structure by central differences (the "trivial on a grid,
-effectively impossible on a raw cloud" operation the appendix leans on -- §7.1,
-§10.3). `cos(theta_inc)` is clamped at 0.1 to avoid the singularity at pure
-grazing (§3.2), and pixels that hit that clamp -- or have no usable normal --
-are flagged so the caller knows the value is unreliable there.
+`theta_inc` is the angle between the beam and the local surface normal,
+estimated from the range image's own neighbour structure by central differences
+(the "trivial on a grid" operation the appendix leans on -- §7.1, §10.3),
+implemented in `incidence_cos()` and checked against analytic plane normals to
+1e-4.
 
-Use: lane paint has rho ~= 0.5, dry asphalt ~= 0.1; wet asphalt reflects
-specularly and returns almost nothing, so rho_hat ~= 0 on a cell classified
-`road` is a wet-surface indicator. One byte, no extra sensor.
+Eq (31) assumes the sensor reports RAW received power. KITTI's Velodyne does
+not -- its firmware already delivers a range- and incidence-normalised
+reflectance-like quantity in [0, 1]. Measured on flat asphalt (label `road`)
+across sequence 00:
 
-NOTE on KITTI: the recorded Velodyne intensity is already partly range-rolloff
-compensated by the sensor firmware, so the `* r^2` term over-corrects far
-returns. The median rho_hat still separates lane-marking from plain road
-clearly (see tests/test_reflectivity.py); the per-point spread on plain road is
-wide and washes out in per-cell aggregation.
+    log(I) vs log(r) slope = 0.01           -> I has no range trend  (r^2 already out)
+    median I flat at ~0.25 while cos(theta_inc)
+        falls from 0.32 at 6 m to 0.12 at 17 m -> I has no incidence trend either
+
+Applying eq (31)'s geometric terms to KITTI therefore re-injects a range trend
+that is not in the data and destroys cross-range comparability:
+
+    * `* r^2`    -> ring-1 road pixels 62% saturated at byte 255 (ring 0: 0%)
+    * `/ cos`    -> ring-1 road reads ~2x ring-0 road, purely from geometry
+
+So for KITTI both `range_compensated` and `incidence_compensated` default to
+True and `rho_hat = I`; the byte is `round(clip(I, 0, 1) * 255)` -- a direct
+8-bit quantisation of the reflectance the firmware already gives us. A raw-power
+sensor passes `range_compensated=False, incidence_compensated=False` and gets
+the full eq (31). `incidence_cos()` is always computed and returned regardless,
+because the elevation-variance model (§3.2) and the caller may want it.
+
+Use (math §10.3): lane paint reads ~1.3-1.5x brighter than plain asphalt
+(per-point, range-stable); wet asphalt reflects specularly and returns almost
+nothing, so `rho8 ~= 0` on a cell classified `road` is a wet-surface indicator.
+One byte, no extra sensor.
 """
 
 from dataclasses import dataclass
 
 import numpy as np
 
-# cos(theta_inc) clamp -- math appendix §3.2 line 241 / §10.3 eq (31).
+# cos(theta_inc) clamp for the raw-power eq-(31) path -- math §3.2 / §10.3.
 COS_INC_MIN = 0.1
 
-# rho_hat value that saturates the output byte. Linear map, clipped:
-# byte = clip(round(rho_hat / RHO_SATURATION * 255), 0, 255). This is the single
-# per-sensor calibration constant; the default keeps plain-road medians in the
-# low-mid byte range on KITTI and lets the r^2-inflated tail clip.
-RHO_SATURATION = 255.0
+# rho_hat value mapped to byte 255 on the raw-power path (I * r^2 / cos, which
+# is unbounded). Unused on the KITTI path, where rho_hat = I in [0, 1] and the
+# map to a byte is a plain * 255.
+RHO_SATURATION = 4000.0
 
 # reliability flags (bitfield, 0 = clean)
-FLAG_GRAZING = 1  # cos(theta_inc) hit the COS_INC_MIN clamp
-FLAG_NO_NORMAL = 2  # no usable surface normal at this pixel (edge / empty neighbour / degenerate)
+FLAG_GRAZING = 1    # cos(theta_inc) below COS_INC_MIN -- advisory; on the raw-power
+#                     path the value used the clamp, not the true cos
+FLAG_NO_NORMAL = 2  # no usable surface normal (image edge / empty neighbour / degenerate)
 
 
 @dataclass
 class Reflectivity:
     """Per-pixel result, all arrays (H, W)."""
 
-    rho8: np.ndarray  # uint8  -- normalised reflectivity, 0 where invalid
+    rho8: np.ndarray     # uint8   -- normalised reflectivity, 0 where no return
     cos_inc: np.ndarray  # float64 -- cos(theta_inc), NaN where no normal
-    flags: np.ndarray  # uint8  -- FLAG_* bitfield, 0 = clean
-    rho_hat: np.ndarray  # float64 -- pre-normalisation rho_hat, NaN where invalid
+    flags: np.ndarray    # uint8   -- FLAG_* bitfield, 0 = clean
+    rho_hat: np.ndarray  # float64 -- pre-byte reflectivity estimate, NaN where none
 
     @property
     def valid(self) -> np.ndarray:
-        """(H, W) bool -- a normal was found and incidence was not pure grazing."""
-        return self.flags == 0
+        """(H, W) bool -- a reflectivity value was produced for this pixel."""
+        return np.isfinite(self.rho_hat)
 
 
 def incidence_cos(range_image: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -90,16 +105,29 @@ def incidence_cos(range_image: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     return cos_inc, has_normal
 
 
-def normalise(range_image: np.ndarray) -> Reflectivity:
-    """Per-pixel normalised reflectivity from a range image (math §10.3 eq 31).
+def normalise(
+    range_image: np.ndarray,
+    *,
+    range_compensated: bool = True,
+    incidence_compensated: bool = True,
+    rho_full_scale: float | None = None,
+) -> Reflectivity:
+    """Per-pixel reflectivity byte from a range image (math §10.3 eq 31).
 
     Args:
         range_image: (H, W, 5) [range, x, y, z, intensity], sensor frame.
+        range_compensated: True (KITTI default) -> skip the `* r^2` term because
+            the sensor firmware already removed the range roll-off. False -> a
+            raw-power sensor, apply `* r^2` (eq 31).
+        incidence_compensated: True (KITTI default) -> skip the `/ cos` term.
+            False -> apply `/ max(cos, COS_INC_MIN)` (eq 31).
+        rho_full_scale: rho_hat value mapped to byte 255. Default: 1.0 when both
+            compensations are on (rho_hat = I in [0, 1]), else RHO_SATURATION.
 
     Returns:
-        Reflectivity -- see the dataclass. Invalid pixels (no return, no normal)
-        get rho8 = 0 and FLAG_NO_NORMAL; grazing-clamped pixels get a real rho8
-        and FLAG_GRAZING.
+        Reflectivity. Pixels with no return get rho8 = 0, rho_hat = NaN,
+        FLAG_NO_NORMAL. On the raw-power path, pixels with no surface normal also
+        get rho8 = 0 (the `/cos` term needs one).
     """
     rng = range_image[:, :, 0].astype(np.float64)
     intensity = range_image[:, :, 4].astype(np.float64)
@@ -107,19 +135,27 @@ def normalise(range_image: np.ndarray) -> Reflectivity:
 
     flags = np.zeros(rng.shape, dtype=np.uint8)
     flags[~has_normal] |= FLAG_NO_NORMAL
-    # grazing: cos below the clamp (only meaningful where we have a normal)
-    grazing = has_normal & (cos_inc < COS_INC_MIN)
-    flags[grazing] |= FLAG_GRAZING
+    flags[has_normal & (cos_inc < COS_INC_MIN)] |= FLAG_GRAZING
 
-    cos_eff = np.where(has_normal, np.maximum(cos_inc, COS_INC_MIN), np.nan)
-    with np.errstate(invalid="ignore"):
-        rho_hat = intensity * rng**2 / cos_eff
+    rho_hat = intensity.copy()
+    if not range_compensated:
+        rho_hat = rho_hat * rng**2
+    if not incidence_compensated:
+        cos_eff = np.where(has_normal, np.maximum(cos_inc, COS_INC_MIN), np.nan)
+        with np.errstate(invalid="ignore"):
+            rho_hat = rho_hat / cos_eff
+
+    rho_hat[~np.isfinite(rng) | (rng <= 0) | ~np.isfinite(intensity)] = np.nan
     rho_hat[~np.isfinite(rho_hat)] = np.nan
+
+    if rho_full_scale is None:
+        rho_full_scale = 1.0 if (range_compensated and incidence_compensated) else RHO_SATURATION
 
     rho8 = np.zeros(rng.shape, dtype=np.uint8)
     good = np.isfinite(rho_hat)
-    scaled = np.clip(np.round(rho_hat[good] / RHO_SATURATION * 255.0), 0, 255)
-    rho8[good] = scaled.astype(np.uint8)
+    rho8[good] = np.clip(
+        np.round(rho_hat[good] / rho_full_scale * 255.0), 0, 255
+    ).astype(np.uint8)
 
     return Reflectivity(rho8=rho8, cos_inc=cos_inc, flags=flags, rho_hat=rho_hat)
 

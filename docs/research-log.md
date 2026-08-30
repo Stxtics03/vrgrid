@@ -40,6 +40,36 @@ risk register). The broken port is kept, flagged non-functional, so a proper
 `mmengine`/`mmcv`/`mmdet`/`mmdet3d` install can swap real FRNet back in later if
 time allows.
 
+## 2026-08-31 — JP
+**Module:** β — segmentation / perception front-end
+**Finding:** Reflectivity normalisation eq (31), `rho_hat = I * r^2 / max(cos
+theta_inc, 0.1)`, assumes the sensor reports raw received power. **KITTI's
+Velodyne does not** -- its firmware already delivers a range- and
+incidence-normalised reflectance-like quantity. Measured on label `road` (flat
+asphalt) across sequence 00: `log(I)` vs `log(r)` slope = **0.01** (no range
+trend), and median `I` stays ~0.25 while `cos(theta_inc)` falls 3x from 6 m to
+17 m (no incidence trend). Applying eq (31)'s geometric terms to KITTI
+re-injects a range trend that is not in the data: the `* r^2` term saturated
+**62%** of ring-1 road pixels at byte 255 (ring 0: 0%), median rho8 255 vs
+ring 0's 37 at the same raw intensity -- i.e. reflectivity carried zero
+information past ~10 m. Caught by Aakash via a ring-by-ring per-cell analysis of
+`test_lane_marking_reflectivity_separates_from_road`, which also showed the
+original "1.46x median gap" was a pooled-all-pixels statistic, not the per-cell
+quantity `fusion.py` aggregates (single-frame ground returns are n=1-2 per cell
+at 5-10 cm, so there is no per-cell median/mean effect at all).
+**Source:** direct measurement on `data/sequences/00` velodyne + labels;
+`vrgrid.grid.lattice` ring/cell assignment.
+**So what:** `reflectivity.normalise()` now defaults to `range_compensated=True,
+incidence_compensated=True` for KITTI -> `rho_hat = I`, `rho8 = round(I * 255)`.
+A raw-power sensor passes both False and gets eq (31) verbatim (still
+implemented and tested). Result: 0% saturation in every ring, ring-0/1 road
+median 64/64 (range-stable), lane-vs-road per-point ratio 1.36 (median) / 1.61
+(mean) in ring 0. `incidence_cos()` (finite-difference range-image normal,
+verified to 1e-4 against analytic planes) is still computed and returned for
+the elevation-variance model (§3.2). **`docs/sih-math.md` §10.3 eq (31) should
+note the raw-power assumption -- flag for Aakash.** `fusion.scatter()` is still
+a stub on this branch and does not consume reflectivity yet.
+
 ## 2026-08-31 — JP (decision)
 **Module:** β — dynamics & segmentation
 **Decision:** Given the FRNet finding above, three options were on the table —

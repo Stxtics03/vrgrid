@@ -11,7 +11,8 @@ Stages (all JP's, `src/perception/`):
     range_image.project()   64x512 spherical image + inverse index (sensor frame)
     semantics               semantic_labels() 19-class + is_moving()  (GT .label)
     ground.segment_ground() Patchwork++ ground / non-ground mask
-    reflectivity.normalise() rho_hat = I*r^2 / max(cos th_inc, 0.1) -> one byte
+    reflectivity.normalise() rho_hat -> one byte  (KITTI: rho_hat = I; the
+                             eq-31 r^2/cos terms are firmware-redundant here)
     grid.scatter()          << STUB on this branch -- Aakash's grid is not here yet
 
 The dashboard (`--viz` / `--save`) renders the real per-frame output, replacing
