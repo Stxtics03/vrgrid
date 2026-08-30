@@ -6,6 +6,9 @@ bit-exactly.
 
 import numpy as np
 import pytest
+from vrgrid.cell import CELL_FIELDS
+from vrgrid.gpu.allocators import EMPTY_CELL
+from vrgrid.gpu.kernels import CEILING_NONE
 from vrgrid.gpu.shift import (
     RingBuffer,
     cells_per_shift,
@@ -147,3 +150,44 @@ def test_negative_shift_clears_the_other_edge(buf):
     cleared = shift(buf, -3, 0, soa)
     assert len(cleared) == 3 * W
     assert np.all(soa["ground_height"][cleared] == 0)
+
+
+def test_a_newly_visible_strip_has_no_ceiling(buf):
+    """The strip a shift exposes is unobserved ground, and unobserved means
+    CEILING_NONE, not a ceiling at the datum.
+
+    Zeroing it instead makes `ceiling - ground < h_vehicle` true across the
+    whole strip, so TRAV_CLEARANCE marks it untraversable and nothing ever
+    raises it back up -- `fuse()` only lowers a ceiling. A map that booted
+    correct would rot along its leading edge as the vehicle drove, which is
+    the version of this bug that survives a static test.
+    """
+    soa = {"ceiling_height": np.full(W * W, 123, np.int16),
+           "obs_count": np.full(W * W, 7, np.uint8)}
+    cleared = shift(buf, 3, 0, soa)
+
+    assert np.all(soa["ceiling_height"][cleared] == CEILING_NONE)
+    assert np.all(soa["obs_count"][cleared] == 0)   # zero really is empty for this one
+
+    retained = np.setdiff1d(np.arange(W * W), cleared)
+    assert np.all(soa["ceiling_height"][retained] == 123), "the interior was touched"
+
+
+def test_the_strip_clear_agrees_with_what_allocate_starts_the_map_in(buf):
+    """One definition, two callers. Getting this right in `allocate()` alone
+    yields a map that is correct exactly until the vehicle moves, so the test
+    is that the two use the same dict rather than that each looks sensible."""
+    soa = {name: np.full(W * W, 99, dtype=dt) for name, dt in CELL_FIELDS}
+    cleared = shift(buf, 1, 1, soa)
+    for name, _ in CELL_FIELDS:
+        expected = EMPTY_CELL.get(name, 0)
+        assert np.all(soa[name][cleared] == expected), name
+
+
+def test_a_literal_zero_clear_is_still_available(buf):
+    """`fill={}` is not the same as `fill=None`. The transient layer and the
+    scratch buffers want raw zeros, and an empty dict has to keep meaning
+    that rather than falling through to the cell default."""
+    soa = {"ceiling_height": np.full(W * W, 123, np.int16)}
+    cleared = shift(buf, 2, 0, soa, fill={})
+    assert np.all(soa["ceiling_height"][cleared] == 0)

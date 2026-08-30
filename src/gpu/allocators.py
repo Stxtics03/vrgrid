@@ -28,15 +28,252 @@ This file owns storage, not lattice semantics: `annulus_index()` takes cell
 coordinates that are already on ring L's integer lattice (math §2, Aakash).
 """
 
+import ctypes
+import mmap
+import sys
 from dataclasses import dataclass, field
 
 import numpy as np
 from vrgrid.cell import CELL_BYTES, CELL_FIELDS
 from vrgrid.gpu.kernels import (
+    CEILING_NONE,
     new_dense_scratch,
     new_sorted_scratch,
     scatter_scratch_bytes,
 )
+from vrgrid.gpu.pyramid import NODE_BYTES, allocate_pyramid, pyramid_bytes
+from vrgrid.gpu.pyramid import scratch_bytes as pyramid_scratch_bytes
+
+# --- the state of a cell nothing has been written into yet ---------------------
+#
+# `np.zeros` is the right empty value for nine of the ten fields: obs_count 0,
+# log_odds 0 (§10.1 decides unknown by observation count, not by log-odds near
+# zero), and variance code 0, which the codec deliberately maps to MAXIMUM
+# variance so a fresh cell claims no certainty it has not earned.
+#
+# `ceiling_height` is the exception and it is not a small one. Zero decodes as
+# "something solid at the ground datum", so `ceiling - ground < h_vehicle`
+# holds for every cell in the map and TRAV_CLEARANCE marks the entire world
+# untraversable -- permanently, because `fuse()` only ever lowers a ceiling and
+# nothing raises one back up. The empty value here is a sentinel, not a zero.
+#
+# Two places produce empty cells and they have to agree: `allocate()` at
+# startup, and the strip `shift()` clears as the window scrolls. That is why
+# this is one dict rather than two literals in two files -- getting it right in
+# only one of them yields a map that is correct until the vehicle moves.
+EMPTY_CELL = {"ceiling_height": CEILING_NONE}
+
+
+def initialise_cells(soa: dict, slots=None) -> None:
+    """Put cells into the state a never-observed map is supposed to be in.
+
+    `slots` selects which cells to reset; None means the whole array. Fields
+    absent from `EMPTY_CELL` are left alone: the caller has already zeroed
+    them and zero is their empty value. Passing a dict with none of the named
+    fields -- the transient layer, say -- is a no-op rather than an error.
+    """
+    for name, value in EMPTY_CELL.items():
+        arr = soa.get(name)
+        if arr is None:
+            continue
+        if slots is None:
+            arr[:] = value
+        else:
+            arr[slots] = value
+
+
+# --- how much memory we are ACTUALLY costing the machine -----------------------
+#
+# `np.zeros` does not allocate memory. It asks for a mapping and the kernel
+# hands back copy-on-write zero pages that cost nothing until written to:
+# measured, `np.zeros(2_560_000_000, np.uint8)` moves RSS by 0.0 MB. Two
+# consequences, and both matter more than they look.
+#
+# The demo one: a dense-3D baseline built the obvious way would show 0 MB on
+# screen beside our counter, and we would be claiming a 286x reduction over
+# something visibly free, in front of judges. See gpu/baseline.py.
+#
+# The one that is ours: if our own grid is never faulted in either, the first
+# frames pay the page faults instead -- which is a latency spike in exactly
+# the p99 the 10 Hz claim rests on, and it lands during the demo rather than
+# during a benchmark. So `allocate()` commits what it allocates, and the
+# preallocation is real rather than promised.
+
+# `os.sysconf` and /proc are POSIX; two of the three devs are on Windows and
+# CI is ubuntu, so a Linux-only import here is invisible in CI and fatal
+# locally. `mmap.PAGESIZE` is the same number from the stdlib on every
+# platform. -- portability fix, Aakash
+PAGE_BYTES = mmap.PAGESIZE
+
+# Refuse to allocate past this share of what the OS says is available. An OOM
+# kill halfway through the demo is a worse outcome than a baseline that
+# declines to run and says why.
+SAFETY_FRACTION = 0.6
+
+
+def resident_bytes() -> int:
+    """This process's resident set size, from the OS rather than from us.
+
+    The counter on the dashboard should read this, not `nbytes`. `nbytes` is
+    what we asked for; this is what we are actually costing the machine, and
+    the difference between them is the entire subject of this file.
+    """
+    if sys.platform != "win32":
+        with open("/proc/self/statm") as f:
+            return int(f.read().split()[1]) * PAGE_BYTES
+    return _windows_working_set()
+
+
+def available_bytes() -> int:
+    """MemAvailable, the kernel's own estimate of what can be had without
+    swapping. Deliberately not MemFree, which excludes reclaimable cache and
+    would refuse allocations that would have been fine."""
+    if sys.platform != "win32":
+        with open("/proc/meminfo") as f:
+            for line in f:
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) * 1024
+        raise RuntimeError("MemAvailable missing from /proc/meminfo")
+    return _windows_available()
+
+
+# --- Windows equivalents of the two /proc reads above ------------------------
+# Same quantities, from the Win32 API. Kept together and out of the way so the
+# Linux path above still reads as the primary one -- the Jetson is the target
+# and these exist so the thing can be developed on the machines we have.
+
+
+def _windows_working_set() -> int:
+    """WorkingSetSize from GetProcessMemoryInfo -- the Windows name for RSS."""
+    import ctypes
+
+    class _Counters(ctypes.Structure):
+        _fields_ = [("cb", ctypes.c_ulong), ("PageFaultCount", ctypes.c_ulong),
+                    ("PeakWorkingSetSize", ctypes.c_size_t),
+                    ("WorkingSetSize", ctypes.c_size_t),
+                    ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+                    ("QuotaPagedPoolUsage", ctypes.c_size_t),
+                    ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+                    ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+                    ("PagefileUsage", ctypes.c_size_t),
+                    ("PeakPagefileUsage", ctypes.c_size_t)]
+
+    # argtypes are not optional here: a HANDLE is 64-bit and ctypes defaults
+    # to c_int, so the pseudo-handle is truncated and the call just fails.
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    psapi = ctypes.WinDLL("psapi", use_last_error=True)
+    kernel32.GetCurrentProcess.restype = ctypes.c_void_p
+    psapi.GetProcessMemoryInfo.argtypes = [ctypes.c_void_p,
+                                           ctypes.POINTER(_Counters),
+                                           ctypes.c_ulong]
+    psapi.GetProcessMemoryInfo.restype = ctypes.c_int
+
+    counters = _Counters()
+    counters.cb = ctypes.sizeof(counters)
+    if not psapi.GetProcessMemoryInfo(kernel32.GetCurrentProcess(),
+                                      ctypes.byref(counters), counters.cb):
+        raise OSError(ctypes.get_last_error(), "GetProcessMemoryInfo failed")
+    return int(counters.WorkingSetSize)
+
+
+def _windows_available() -> int:
+    """ullAvailPhys from GlobalMemoryStatusEx. Not the same estimate as
+    MemAvailable -- it does not count reclaimable cache -- so it is the more
+    conservative of the two, which is the right direction for a check whose
+    job is to refuse an allocation that would OOM mid-demo."""
+    import ctypes
+
+    class _Status(ctypes.Structure):
+        _fields_ = [("dwLength", ctypes.c_ulong), ("dwMemoryLoad", ctypes.c_ulong),
+                    ("ullTotalPhys", ctypes.c_ulonglong),
+                    ("ullAvailPhys", ctypes.c_ulonglong),
+                    ("ullTotalPageFile", ctypes.c_ulonglong),
+                    ("ullAvailPageFile", ctypes.c_ulonglong),
+                    ("ullTotalVirtual", ctypes.c_ulonglong),
+                    ("ullAvailVirtual", ctypes.c_ulonglong),
+                    ("ullAvailExtendedVirtual", ctypes.c_ulonglong)]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.GlobalMemoryStatusEx.argtypes = [ctypes.POINTER(_Status)]
+    kernel32.GlobalMemoryStatusEx.restype = ctypes.c_int
+
+    status = _Status()
+    status.dwLength = ctypes.sizeof(status)
+    if not kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+        raise OSError(ctypes.get_last_error(), "GlobalMemoryStatusEx failed")
+    return int(status.ullAvailPhys)
+
+
+def commit(array: np.ndarray) -> np.ndarray:
+    """Fault in every page so the allocation is real and the counter is honest.
+
+    Any *store* to a copy-on-write zero page faults it in, so an OR with zero
+    commits the page while leaving the byte exactly as it was. Assigning zero
+    would commit it just as well and would quietly blank one byte per page of
+    whatever it was handed -- harmless on the fresh `np.zeros` this is called
+    on today, and a corruption bug the first time someone reuses it.
+    """
+    flat = array.reshape(-1).view(np.uint8)
+    flat[::PAGE_BYTES] |= 0
+    return array
+
+
+def resident_fraction(array: np.ndarray) -> float | None:
+    """What share of THIS array's own pages the OS holds in core, via
+    `mincore(2)`. Returns None where mincore is unavailable.
+
+    Why this exists alongside `resident_bytes()`. The obvious way to ask
+    whether an allocation is real is to read process RSS before and after and
+    subtract, and that measurement is wrong in a way that only shows up once a
+    process has been running for a while: glibc raises its mmap threshold when
+    it sees a large block freed, so a later allocation of about that size comes
+    off the heap and reuses pages the process ALREADY has resident. RSS barely
+    moves, the delta reads as a few tens of per cent of what was claimed, and
+    the honest conclusion "these pages are faulted in" is reported as a
+    failure. Measured here: a 64 MB baseline showed a 42 MB delta when it ran
+    after the allocator tests and the full 64 MB when it ran alone.
+
+    So the process delta is the right instrument for "what did this cost the
+    machine" -- which is the dashboard counter, and it stays -- and the wrong
+    one for "are these particular pages in core". This is the second question,
+    asked of the pages themselves, and it does not care what else the process
+    has done.
+    """
+    if _MINCORE is None or array.nbytes == 0:
+        return None
+
+    base = array.__array_interface__["data"][0]
+    start = base - (base % PAGE_BYTES)
+    length = base + array.nbytes - start
+    pages = (length + PAGE_BYTES - 1) // PAGE_BYTES
+
+    vec = (ctypes.c_ubyte * pages)()
+    if _MINCORE(ctypes.c_void_p(start), ctypes.c_size_t(length), vec) != 0:
+        return None
+    # Bit 0 is the residency bit; the rest are reserved and are not always 0.
+    return float(np.count_nonzero(np.frombuffer(vec, np.uint8) & 1) / pages)
+
+
+def _load_mincore():
+    """`mincore` if the platform has it, else None. POSIX only -- two of the
+    three devs are on Windows, where this stays None and callers fall back."""
+    import ctypes.util
+
+    name = ctypes.util.find_library("c")
+    if name is None:
+        return None
+    try:
+        libc = ctypes.CDLL(name, use_errno=True)
+        fn = libc.mincore
+    except (OSError, AttributeError):
+        return None
+    fn.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.POINTER(ctypes.c_ubyte)]
+    fn.restype = ctypes.c_int
+    return fn
+
+
+_MINCORE = _load_mincore()
+
 
 # The transient layer shares the foveated grid geometry (master v4 §3.7) but
 # not the full 12-byte cell: a dynamic-obstacle hit needs a height, an
@@ -179,7 +416,9 @@ class Allocation:
     pool_cells_per_block: int
     max_tracks: int
     device: str = "cpu"
+    pyramid: object = None     # None unless allocate(with_pyramid=True); §7.2
     _budget: dict = field(default_factory=dict)
+    _resident_delta: int = 0
 
     def ring(self, index: int) -> RingLayout:
         return self.rings[index]
@@ -206,7 +445,14 @@ class Allocation:
         return dict(self._budget)
 
     def total_bytes(self) -> int:
+        """What we claim. Compare against `resident_delta` -- the gap between
+        the two is the difference between a bound asserted and a bound paid."""
         return sum(self._budget.values())
+
+    @property
+    def resident_delta(self) -> int:
+        """What allocating this actually cost the machine, per the OS."""
+        return self._resident_delta
 
     def report(self) -> str:
         header = (f"schedule {self.schedule_name}, device {self.device}, "
@@ -216,18 +462,32 @@ class Allocation:
             lines.append(f"  {k:<34} {v / 1e6:>8.2f} MB")
         lines.append(f"  {'-' * 34} {'-' * 8}")
         lines.append(f"  {'TOTAL (preallocated, fixed)':<34} {self.total_bytes() / 1e6:>8.2f} MB")
+        if self._resident_delta:
+            lines.append(f"  {'  of which resident, per the OS':<34} "
+                         f"{self._resident_delta / 1e6:>8.2f} MB")
         return "\n".join(lines)
 
 
 def allocate(schedule, thresholds: dict | None = None, device: str = "cpu",
              transient_rings: int | None = None, max_tracks: int = 256,
-             storage: str = "toroidal") -> Allocation:
+             storage: str = "toroidal", commit_pages: bool = True,
+             with_pyramid: bool = False) -> Allocation:
     """Preallocate the grid, the transient layer, the refinement pool and the
     tracked-object list. Called once at startup.
 
     `transient_rings` limits the transient layer to the innermost N rings.
     Default is every ring. See the note in `docs/` and the budget printout --
     this is the one line item whose size is a team decision, not a derivation.
+
+    `with_pyramid` adds the conservative pyramid (§7.2). **Off by default, on
+    purpose.** It is a stretch item and it costs 3.11 MB on the default
+    schedule -- 2.73 MB of nodes plus 0.38 MB of reduction scratch -- which
+    moves the preallocated total from 29.06 MB to 32.17 MB and therefore moves
+    a number that is already on a slide. Switching it on is one argument and
+    the budget line appears with it; doing that by default would change the
+    headline from inside my directory, which is the thing the Day-0 gate
+    review said not to do. §7.2's own figure of 1.24 MB is low by about half
+    and is wrong for a second reason too -- see the note in gpu/pyramid.py.
     """
     xp = array_module(device)
     rings = derive_ring_layouts(schedule, storage)
@@ -247,19 +507,39 @@ def allocate(schedule, thresholds: dict | None = None, device: str = "cpu",
 
     n_transient = n_cells if transient_rings is None else _size(rings[:transient_rings])
 
+    resident_before = resident_bytes() if device == "cpu" else 0
+
     grid = {name: xp.zeros(n_cells, dtype=dt) for name, dt in CELL_FIELDS}
     transient = {name: xp.zeros(n_transient, dtype=dt) for name, dt in TRANSIENT_FIELDS}
     pool = {name: xp.zeros(blocks * cells_per_block, dtype=dt) for name, dt in CELL_FIELDS}
     tracks = xp.zeros(max_tracks, dtype=TRACK_DTYPE)
-    scratch = (new_sorted_scratch(max_points) if scatter_mode == "sorted"
+    scratch = (new_sorted_scratch(max_points, n_cells) if scatter_mode == "sorted"
                else new_dense_scratch(n_cells))
+    pyramid = allocate_pyramid(rings) if with_pyramid else None
+
+    # The grid and the pool hold cells, so they get the empty-cell state rather
+    # than raw zeros. The pool matters as much as the grid: a block handed out
+    # by `pool.acquire()` is a set of brand-new cells, and one that boots with
+    # ceiling 0 is untraversable from the moment it is refined.
+    initialise_cells(grid)
+    initialise_cells(pool)
+
+    # Fault every page in now rather than during frame 1. Only meaningful on
+    # host memory; a cupy allocation is device-side and this does not apply.
+    if commit_pages and device == "cpu":
+        for group in (grid, transient, pool, scratch):
+            for arr in group.values():
+                commit(arr)
+        commit(tracks)
 
     alloc = Allocation(
         schedule_name=schedule.name, rings=rings, grid=grid, transient=transient,
         pool=pool, tracks=tracks, scratch=scratch, scatter_mode=scatter_mode,
         storage=storage, pool_blocks=blocks,
         pool_cells_per_block=cells_per_block, max_tracks=max_tracks, device=device,
+        pyramid=pyramid,
     )
+    alloc._resident_delta = (resident_bytes() - resident_before) if device == "cpu" else 0
     alloc._budget = {
         f"grid ({n_logical:,} logical cells x {CELL_BYTES} B)": n_logical * CELL_BYTES,
         f"toroidal padding ({n_cells - n_logical:,} slots)":
@@ -270,6 +550,10 @@ def allocate(schedule, thresholds: dict | None = None, device: str = "cpu",
         f"refinement pool ({blocks} x {cells_per_block})": blocks * cells_per_block * CELL_BYTES,
         f"tracked objects (cap {max_tracks})": max_tracks * TRACK_DTYPE.itemsize,
     }
+    if pyramid is not None:
+        alloc._budget[f"conservative pyramid ({NODE_BYTES} B/node)"] = \
+            pyramid_bytes(rings)
+        alloc._budget["pyramid reduction scratch"] = pyramid_scratch_bytes(rings)
     return alloc
 
 

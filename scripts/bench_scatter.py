@@ -9,7 +9,14 @@ Gate 6: the timing numbers on a slide come from here.
 import argparse
 
 import numpy as np
-from vrgrid.gpu.kernels import map_hash, scatter_atomic, scatter_scratch_bytes, scatter_sorted
+from vrgrid.gpu.kernels import (
+    map_hash,
+    new_dense_scratch,
+    new_sorted_scratch,
+    scatter_atomic,
+    scatter_scratch_bytes,
+    scatter_sorted,
+)
 from vrgrid.gpu.timing import Timer
 
 N_CELLS = 745_000
@@ -35,10 +42,17 @@ def main() -> None:
     rng = np.random.default_rng(0)
     scans = [make_scan(rng, args.points) for _ in range(10)]
 
+    # Benchmark the shipping configuration: both paths get the scratch that
+    # `allocate()` hands them at startup. Timing the no-scratch fallback instead
+    # measures an allocator, not a kernel -- it costs ~40% on p50.
     t = Timer(stages=("scatter",))
     hashes = {}
-    for label, fn, kw in (("sorted", scatter_sorted, {}),
-                          ("atomic", scatter_atomic, {"n_cells": N_CELLS})):
+    for label, fn, kw in (
+        ("sorted", scatter_sorted,
+         {"scratch": new_sorted_scratch(args.points, N_CELLS)}),
+        ("atomic", scatter_atomic,
+         {"n_cells": N_CELLS, "scratch": new_dense_scratch(N_CELLS)}),
+    ):
         fn(**scans[0], **kw)          # warm up
         t.reset()
         for i in range(args.frames):

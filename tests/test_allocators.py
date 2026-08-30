@@ -11,6 +11,7 @@ import pytest
 import yaml
 from vrgrid.cell import CELL_BYTES, CELL_FIELDS
 from vrgrid.gpu.allocators import (
+    EMPTY_CELL,
     TRANSIENT_BYTES,
     Allocation,
     allocate,
@@ -19,6 +20,7 @@ from vrgrid.gpu.allocators import (
     derive_ring_layouts,
     measured_bytes,
 )
+from vrgrid.gpu.kernels import CEILING_NONE
 from vrgrid.grid.schedule import load
 
 
@@ -216,3 +218,59 @@ def test_frame_loop_does_not_allocate(alloc):
     after = tracemalloc.get_traced_memory()[0]
     tracemalloc.stop()
     assert after - before < 4096, f"frame loop allocated {after - before} bytes"
+
+
+def test_our_own_allocation_is_resident_not_just_promised(alloc):
+    """The baselines are committed page by page so their counters are honest.
+    If ours were not, we would be comparing a real 2.56 GB against a promise,
+    and the comparison would flatter us on the one number the demo shows.
+
+    It is also a latency claim: pages faulted in at startup are pages not
+    faulted in during frame 1, and that spike would land in the p99 the 10 Hz
+    figure rests on -- during the demo, not during a benchmark.
+    """
+    assert alloc.resident_delta > 0.9 * alloc.total_bytes(), (
+        f"claimed {alloc.total_bytes():,} B, resident {alloc.resident_delta:,} B")
+
+
+def test_commit_can_be_declined(thresholds):
+    """Committing costs a moment at startup and is not always wanted -- a unit
+    test allocating a hundred grids does not need them all faulted in."""
+    schedule = load("5/10/20/40")
+    lazy = allocate(schedule, thresholds, commit_pages=False)
+    assert lazy.total_bytes() == allocate(schedule, thresholds).total_bytes()
+    assert lazy.resident_delta < 0.5 * lazy.total_bytes()
+
+
+# --- the state a fresh cell is in --------------------------------------------
+
+
+def test_a_fresh_grid_reports_nothing_overhead(alloc):
+    """`np.zeros` is the right empty value for nine of the ten fields and the
+    wrong one for `ceiling_height`: 0 cm reads as solid ground at the datum.
+
+    Left zeroed, `ceiling - ground < h_vehicle` holds for every cell in the
+    map, TRAV_CLEARANCE marks the whole world untraversable, and it stays that
+    way forever because `fuse()` only ever lowers a ceiling. The symptom is a
+    planner that refuses to move on a map that renders perfectly.
+    """
+    assert np.all(alloc.grid["ceiling_height"] == CEILING_NONE)
+
+
+def test_the_refinement_pool_starts_in_the_same_state(alloc):
+    """A block handed out by the pool is a set of brand-new cells, so it needs
+    the empty-cell state as much as the grid does. Missing it here is the
+    nastier half: the map is fine until semantics force a refinement, and then
+    exactly the cells we chose to look at more closely go untraversable."""
+    assert np.all(alloc.pool["ceiling_height"] == CEILING_NONE)
+
+
+def test_every_other_field_really_is_empty_at_zero(alloc):
+    """The counterpart claim, asserted rather than assumed -- obs_count 0,
+    log_odds 0 (§10.1 decides unknown by observation count, not by log-odds
+    near zero) and variance code 0, which the codec maps to MAXIMUM variance
+    so a fresh cell claims no certainty it has not earned."""
+    for name, _ in CELL_FIELDS:
+        if name in EMPTY_CELL:
+            continue
+        assert not np.any(alloc.grid[name]), name

@@ -237,7 +237,21 @@ Flaw E2 was correct: "compile-time bounded" was false. Three things to prealloca
 
 - **Grid:** fixed arrays per ring, allocated once. ✓ already bounded
 - **Refinement pool:** 512 blocks × 16 cells × 12 B = **98 KB**, fixed. Eviction by priority = closeness × dynamism × time-to-collision.
+
+  > ⚑ **Note, 29 Aug — Aakash. 16 cells per block does not hold one level of the ablation, and the priority formula is inverted from its own names.**
+  >
+  > *A 16-cell block holds a 4×4 subdivision — two levels at ratio 2, which is every boundary of 5/10/20/40. **5/10/50 refines 5× between rings 1 and 2, so one level there is 25 children, larger than an entire block.** `acquire()` refuses rather than truncating a 5×5 into 16 cells and leaving nine children reading as whatever the block held before. Fixes, all cheap, none mine to pick: 32 cells per block (196 KB, still trivial), refine the ablation's ring 2 in two steps through ring 1, or state that semantic refinement is unavailable on the ablation. Only bites if a semantic gate fires on the ablation — a Day-3 question — but the number is wrong now.*
+  >
+  > *And **`closeness × dynamism × time-to-collision` taken literally is backwards**: range, a dynamism flag and TTC all get larger for things that matter less, so a static kerb 90 m away with no collision in sight outranks a pedestrian stepping off the pavement. Each factor is inverted in the implementation, and "no collision course" floors rather than zeroes the urgency term — otherwise the product collapses and the pool refuses to refine anything not about to be hit, which is almost the whole map.*
 - **Transient layer:** preallocate as a fixed grid, *not* scaled to dynamic point count.
+
+  > **Note, 29 Aug — Aakash. Both are built and wired; three things worth ratifying.**
+  >
+  > *⚑ **The gate's third criterion was its own definition.** "High variance AND a traversability bit" reads as a careful two-part test; `TRAV_ROUGHNESS` **is** the predicate `σ² > σ²_max`, so it was one part written twice. It fired on 20,954 of 143,587 observed cells — eight times the whole pool every frame — leaving the priority ordering to do all the selection. Paired with a **geometric** hazard (step or slope) instead, the same scene fires 217 cells and refuses none.*
+  >
+  > *⚑ **The transient layer is worth 11 cm of ring 1.** One moving car 12 m ahead pulled ring 1's height RMSE from 0.48 cm to 11.71 cm — that ring's entire error budget, from one object. `scripts/eval_synthetic.py` used to strip moving points by hand to get an interpretable number; the pipeline separates them now, and §9.4 scores DR/SP/F from the loop's own counters.*
+  >
+  > *⚑ **Separation must run on RAW label ids.** The 19-class `learning_map` collapses every `moving-*` onto its static counterpart, so a scan already through it cannot be separated at all — and nothing raises. Every car that ever drove past would be welded into the elevation map, in a map that looks entirely plausible. Ordering, not a threshold, so it is a test rather than a config value.*
 - **Tracked object list:** cap at N tracks with the same priority eviction.
 
 Also fix E1 — the pool and ring migration fought each other. **Define refinement as "levels finer than the current ring," never as an absolute cell size**, and release a block back to the pool automatically when the schedule overtakes it. Otherwise blocks near the vehicle hold budget for refinement the schedule provides free, while being priority-protected from eviction, and the pool degrades to useless exactly as you approach things.

@@ -258,6 +258,16 @@ Since heights are quantised to 1 cm anyway, accumulate in **int32 fixed-point**.
 
 **Quantisation error budget.** Uniform quantisation with step `q` has variance `q²/12`. For `q = 1 cm`: `σ_quant = 2.9 mm`. Compare to (12): σ_z ≈ 8 mm at 5 m, 87 mm at 50 m. Quantisation is **≤ 1/3 of sensor noise at the closest range and negligible beyond**, and a 12 cm kerb resolves into 12 levels. int16 at 1 cm spans ±327 m. **1 cm is justified, not a default.**
 
+> **Implementation note, 29 Aug — Aakash. The height-variance codec, which §3 needs and no section defines.** *`cell.height_variance` is a uint8 marked "log-quantised" with no scheme attached, so nothing in §3 could be built until one existed. Written as `src/grid/quantise.py`; three decisions worth ratifying because each changes behaviour.*
+>
+> ***Code 0 is MAXIMUM variance, not minimum.*** *`allocate()` zeros every field and the ego-motion shift zeros each newly exposed strip, so 0 is the state of every cell never looked at and every cell that just scrolled into view. If 0 decoded to the smallest variance the map would boot claiming millimetre certainty about ground it has never seen — and worse, the first Kalman gain would be ≈ 0, so the cell would never recover. Zeroed memory now means "I know nothing", the same convention as `OCC_UNKNOWN = 0`.*
+>
+> ***The floor is q²/12 = 0.083 cm², the paragraph above.*** *σ² below the storage step is a claim the storage cannot express, and a filter allowed to reach zero locks — the same argument as §3.3's process noise, from the storage side.* ***The ceiling is (8 m)²***, *the vertical extent.*
+>
+> ***Rounding is toward the larger variance*** *(floor in code space), so a stored value is always ≥ the true one and a decreasing variance can never round back up. That is what keeps this section's monotonicity test true through the codec rather than in spite of it.*
+>
+> *Resolution: 255 codes over a range of 7.7×10⁶, so one code is a factor of **1.064** — 6.4% in variance, 3.2% in σ. ⚑ Consequence for §5: Theorem 1's strict inflation is only* observable *in the stored map when the slope term clears 6.4%. Measured, for a cell settled to σ = 3 cm on a 20% slope: ring 1 (10→5 cm) +2.1%, invisible; ring 2 (20→10 cm) +8.3%, visible; ring 3 (40→20 cm) +33%, visible. The theorem is untouched — what is quantised is the evidence for it — but a demo that shows variance rising on refinement must not be built on ring 1.*
+
 **Unit test.** Run the same sequence twice; assert byte-identical map hashes. Assert `σ²` decreases monotonically under repeated consistent measurements and increases under process noise alone.
 
 ---
@@ -450,7 +460,15 @@ Gradient by central differences over the four neighbours, scaled by the cell siz
 ∂z/∂x ≈ (z_{i+1,j} − z_{i−1,j}) / (2 c_L)                           (22)
 ```
 
-⚑ **Geometry decides, semantics filters.** A road with a 40 cm pothole has class `road` and is not drivable; a packed grass verge has class `vegetation` and often is. Class is one bit among six, not the decision. This is what the problem statement's Requirement 1 actually asks for, and it is also *evidence for* the grid: slope and step are finite differences over neighbours, which are trivial on a grid and effectively impossible on a raw point cloud without first building one.
+⚑ **Geometry decides, semantics filters.** A road with a 40 cm pothole has class `road` and is not drivable; a packed grass verge has class `vegetation` and often is. Class is one bit among six, not the decision.
+
+> **Note, 29 Aug — Aakash. Two things (22) needs that the section does not give it, plus a class that does not fit.**
+>
+> ***Neighbours stop at the ring window.*** *A central difference needs both neighbours. Rings are stored as `side × side` toroidal squares, so rolling the array wraps the far edge of the map onto the near one — a cell on the north edge would take its gradient against ground 100 m south. The border ring of cells therefore carries **bit 5 (confidence)** rather than a fabricated gradient: fail safe is already the rule for "not enough evidence", and an invented slope at the map edge is exactly the kind of plausible number that survives review.*
+>
+> ***Cross-ring neighbours are not computed.*** *A cell on the inner edge of ring 2 has neighbours in ring 1, at half the cell size. Resolving it means resampling across a ring boundary for a two-cell strip and interacts with both rings' toroidal offsets. Not done; the strip is caught by the border rule above, which is conservative in the right direction. **The ring seams are the one place the traversability layer is coarser than the map** — say so in the report rather than leaving it to be found.*
+>
+> ⚑ ***`terrain` is drivable and does not fit the cell.*** *`configs/thresholds.yaml` lists five drivable classes; `terrain` is learning id **17** and the cell's class nibble is 4 bits, holding 0–15. So one of the five classes this predicate consults on every cell cannot be stored in the map at all. This is the §10.2 class-width conflict arriving somewhere it cannot be deferred.* This is what the problem statement's Requirement 1 actually asks for, and it is also *evidence for* the grid: slope and step are finite differences over neighbours, which are trivial on a grid and effectively impossible on a raw point cloud without first building one.
 
 ### 7.2 The conservative pyramid
 
@@ -482,6 +500,16 @@ Symmetrically, if `AND_mask(B)` has bit `k` set, **every** cell fails condition 
 
 **Cost.** A 4-ary pyramid over `N` cells adds `N(1/4 + 1/16 + …) = N/3`. Built over ground, ceiling and the traversability byte (5 bytes of the 12): `745,000 × 5 / 3 ≈ 1.24 MB`.
 
+> **Implementation note, 29 Aug — Shrestha. The cost figure is low by about half, and the pyramid needs one field §7.2 does not list.** *Built as `src/gpu/pyramid.py`; three things to ratify, because two of them change a number and one changes what a caller is allowed to conclude.*
+>
+> ***The cost is 2.73 MB, not 1.24 MB.*** *Two independent errors, and they compound. A node does not store the source fields, it stores the* reductions*: ground contributes* both *`H_max` and `H_min`, so it is 4 bytes and not 2, and `n_min` adds a fifth — **8 bytes per node by §7.2's own list**, before anything is added. And `N` is the ring* windows*, which are the 910,000 allocated slots, not the 745,000 logical cells: the pyramid is built over what is stored, and §2.4 stores full squares. `910,000 × 9 / 3 = 2.73 MB`, measured by `pyramid_bytes()` and pinned in a test. The `N/3` claim itself is exactly right — measured ratio 3.00.*
+>
+> ***`OR_mask` is added, for 1 byte per node.*** *Without it the only available notion of SAFE is Theorem 3's, which covers bits 0, 2 and 5 —* three of the six*. A uniformly steep bank has every cell clear on clearance, step and confidence, so Theorem 3 reports SAFE while every cell fails bit 1, and a planner reading that as "drivable" drives onto the bank. `OR_mask == 0` says every cell is traversable on* all six*, which is what `api.QueryLOD.SAFE` already promises its callers. Theorem 3 is untouched and is still tested exactly as §7.3 states it; it keeps its own name, `theorem3_safe()`, so the weaker claim can never be mistaken for the stronger one.*
+>
+> ***Levels halve by ceiling, not floor.*** *Ring windows are 400 and 500 cells across and neither is a power of two. Floor-halving 500 gives 250, 125, **62** — silently dropping the last row and column of a 125-wide level, at the map edge, where nothing looks wrong. Ceiling-halving means edge blocks are 1 cell wide rather than 2, which is a correct reduction over a block of one. The partition property (exactly one block per cell per level) is asserted the same way §2.4(a) asserts it for the lattice.*
+>
+> *Measured, 910,000 slots: rebuild p50 **2.45 ms** / p99 3.10 ms, 32× headroom at 10 Hz, zero allocation per frame. Numbers from `scripts/bench_pyramid.py`. **Not switched on by default** — it takes the preallocated total from 29.06 MB to 32.17 MB, and that is a gate-review decision, not mine.*
+
 **Unit test.** Exhaustive: for 10⁴ random blocks, if `SAFE(B)` then assert every constituent cell is individually traversable. Any counterexample is a proof failure, not a tuning issue.
 
 ---
@@ -501,6 +529,16 @@ Plan regret:   R(S) = J_{M*}(π_S) − J_{M*}(π*)   ≥ 0                (23)
 ⚑ **The critical detail: both paths are scored on `M*`.** Scoring `π_S` on `M_S` measures self-consistency, not quality — a badly coarsened map will happily report that its own bad plan is cheap. Non-negativity of (23) follows because `π*` minimises `J_{M*}` by construction.
 
 Report alongside a purely geometric measure, the discrete Fréchet distance `d_F(π_S, π*)`, which catches the case where a detour costs the same but goes somewhere quite different.
+
+> **⚑⚑ Note, 29 Aug — Aakash. Three things eq. (23) needs that §8 does not give it. The third one can reverse the headline.**
+>
+> **(a) `w` is undefined.** §8.1 says "`w` derived from the traversability bitfield" and stops. Derived in `src/eval/plan_regret.py`, numbers in `configs/thresholds.yaml` under `plan:`. The split follows §7.1: clearance, slope and step are **impassable** (the vehicle cannot), roughness and class are **weights** (it would rather not). Geometry decides, semantics filters — now as numbers.
+>
+> **(b) Unknown cannot be impassable here, and that is a real concession.** Everywhere else in this project unknown fails safe. For a planner that rule makes R(S) *undefined*: at `P_fill < 2%` per frame most of the far field has never been observed, so no path exists for any schedule. Unknown is therefore passable at price `w_unknown`, and the fraction of each path crossing it is reported beside R(S). **Zero regret along a mostly-unknown path means the sequence was too short to fill the map, not that the coarsening was free.**
+>
+> **(c) ⚑ R(S) compared across schedules measures FILL RATE, not coarsening, unless it is restricted to ground every schedule observed.** Measured on the synthetic scene, one 11 × 11 m window: `5/10/20/40` scored **5.803** against uniform-20 cm's **0.146** — read naively, forty times worse. Nothing was impassable in either map. The 5 cm ring holds few returns per cell, so 65% of its cells sat below `n_min` against the uniform grid's 4%, paid `w_unknown`, and the planner routed around a map that was merely *sparse*. **A finer schedule is penalised for resolving finely, and the effect is large enough to reverse the result.** `common_support()` restricts both maps to cells every schedule observed; with it the same comparison reads 1.793 against 0.146 and the unknown fraction is 0%. Any ablation quoting R(S) without the unknown fraction beside it is not interpretable.
+>
+> **And one that is not a §8 defect but bites here first:** a planning cell must AGGREGATE over its footprint, not sample the map at its centre. A 25 cm planning cell over a 5 cm ring covers 25 map cells and at ring-0 fill rates the centre is usually a gap between beam tracks, so centre-sampling shows a map that is mostly holes — worse the finer the schedule, and it left the common support of six schedules disconnected, with no path at all. The combination rule is §7.2's: OR the bitfields, a block is safe only if every cell in it is. Done by sampling for now; it should call `query_conservative()` when the pyramid lands.
 
 ### 8.2 The money plot
 
@@ -570,6 +608,12 @@ by the standard bias–variance decomposition. `spread` is the **intrinsic** sub
 
 Report `ρ` per ring. It is the entire argument compressed to one dimensionless number, and it separates *what the representation costs* from *what the algorithm costs* — which nobody in the adaptive-mapping literature reports.
 
+> **Note, 29 Aug — Aakash. `ρ` per ring is a ratio of aggregates, and it has a floor.** *(27) and (28) define IL and spread per cell and the section asks for ρ per ring, which leaves the aggregation unstated. The two readings are not close.*
+>
+> ***Mean of per-cell ratios is dominated by nearly-flat footprints***, *where `spread → 0` and any error at all gives an enormous ratio. Measured on the synthetic scene with every ring cell written the* exact *mean of its footprint — bias identically zero, so ρ must be 1 by construction — the mean of ratios reports **4.8** and the ratio of aggregates `rms(IL)/rms(spread)` reports **1.0**. Implemented as the ratio of aggregates.*
+>
+> ***And ρ cannot beat the storage.*** *Heights are stored to 1 cm, so IL can never fall below the quantisation noise `q/√12 = 0.29 cm` however good the estimate. Where the terrain's own spread is finer than that — smooth asphalt — ρ is bounded below by roughly `0.29/spread` and is measuring the representation's own quantisation rather than the coarsening. **Read ρ on rough ground; on glass-smooth ground read RMSE.** Worth a line in the report before a reviewer notices it first.*
+
 ### 9.4 Dynamic removal — both directions
 
 ```
@@ -598,6 +642,10 @@ state = UNKNOWN   if n < n_min
 
 **Unknown is decided by observation count, not by log-odds.** "I looked and it's empty" and "I couldn't see" are different facts; a log-odds value near zero conflates them. Clamping prevents saturation — an unclamped cell that has seen 500 free observations needs 500 occupied ones to change its mind, which is why unclamped maps fail to register newly-appeared obstacles.
 
+> **Note, 29 Aug — Aakash. `l_occ` had no value anywhere.** *The state rule above is the only place it appears, and `configs/thresholds.yaml` never defined it, so `occupancy_state()` had nothing to compare against. Added as `occupancy.log_odds_occupied: 0` — the neutral reading, "more hits than misses" — and frozen with the rest of that file. Flagged rather than quietly chosen because it is a threshold, and thresholds are frozen before schedules are compared (flaw E6).*
+>
+> *Two further points the section leaves implicit, both now in code. `fuse()` applies* hits *only: a return is evidence of occupancy, but the* absence *of a return is not evidence of free space — at the 1–2% single-frame fill rate of §1.3 it is mostly just the sampling. Free-space evidence comes from beams that passed through, i.e. §10.4. And `FLAG_BLIND` short-circuits to UNKNOWN whatever the log-odds say, so a blind-cone cell cannot be argued into FREE by a later frame's geometry.*
+
 ### 10.2 Class fusion in one byte — Boyer–Moore majority ⚑
 
 A Dirichlet count vector over K classes needs K bytes; the cell budget allows one. Boyer–Moore streaming majority solves this in constant memory:
@@ -610,6 +658,16 @@ on observing class y:
 ```
 
 Packed as 4-bit candidate + 4-bit counter = 1 byte. **Guaranteed to return the true majority class whenever one exists** (>50% of observations), and the counter doubles as a confidence readout. Never average softmax vectors across frames — the mean of two confident, contradictory distributions is a confident-looking lie.
+
+> **⚑ Conflict, 29 Aug — Aakash. 19 classes do not fit in 4 bits, and three files currently assume three different class ranges.** *A 4-bit candidate holds 16. The project uses pretrained FRNet with **19** classes (CLAUDE.md, and the `moving-*` labels come from the raw `.label` files on top of that), while `gpu/kernels.py` packs its class key assuming ids `< 32`. Nothing has failed yet only because no real labels have reached the map.*
+>
+> *`boyer_moore_update()` rejects an id above 15 rather than wrapping: a silent `% 16` would relabel class 16 as 0, and 0 is `unlabeled`, so a chunk of the map would quietly become unlabelled ground — plausible-looking, and undetectable without the reference map. Loud failure at the seam is the safer of the two until the room decides.*
+>
+> **⚑ Update, 29 Aug — Aakash. The cost of this is now concrete, and it is worse than "some classes are missing".** *The semantic gate (master v4 §3.4) exists for thin structures whose geometry is smaller than the cell they land in past 25 m. The canonical two are **`pole` (id 18)** and **`traffic-sign` (id 19)**. Neither fits the 4-bit nibble, so no cell can ever report them and **the gate's class criterion is dead code that reads as working** — it matches against ids no cell can hold, fires on nothing, and nothing fails. `gate.unstorable_refine_classes()` names them rather than letting a `% 16` turn `pole` into `other-vehicle` and `traffic-sign` into `road`. It comes back empty by itself the day the byte is re-split.*
+>
+> *Separately, `terrain` (id 17) is in `drivable_classes` and does not fit either — so one of the five classes the traversability predicate consults on every cell is unstorable too (§7.1). Three independent places now, all from one byte.*
+>
+> *Cheapest fix that keeps the byte: **5-bit candidate + 3-bit counter**. That holds all 19 and caps the counter at 7 instead of 15; Boyer–Moore's majority guarantee does not depend on where the counter saturates, only the confidence readout gets coarser. The alternative — remapping 19 classes onto ≤16 — is a semantic decision with a report consequence, since `drivable_classes` is quoted by name in `configs/thresholds.yaml`. Either way it changes a frozen struct's semantics, so it is a whole-team call. Pinned in `test_nineteen_classes_do_not_fit`.*
 
 ### 10.3 Reflectivity normalisation
 

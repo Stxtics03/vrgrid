@@ -122,3 +122,25 @@ def validate(s: Schedule) -> None:
         import warnings as _w
 
         _w.warn("; ".join(warnings), stacklevel=2)
+
+
+_THRESHOLDS_CACHE: dict = {}
+
+
+def load_thresholds(path=None) -> dict:
+    """configs/thresholds.yaml, as a plain dict, cached.
+
+    One reader for the frozen thresholds, because two readers is how the file
+    and the running system start to disagree. Cached because this is startup
+    configuration and the frame loop must not touch the filesystem.
+
+    A dict rather than a dataclass on purpose: `gpu.allocators.allocate()`
+    already takes one, and the file is frozen before the schedule comparison
+    (flaw E6), so there is no schema to keep in sync -- only values.
+    """
+    p = Path(path) if path is not None else CONFIG_DIR / "thresholds.yaml"
+    key = str(p.resolve())
+    if key not in _THRESHOLDS_CACHE:
+        with open(p) as f:
+            _THRESHOLDS_CACHE[key] = yaml.safe_load(f) or {}
+    return _THRESHOLDS_CACHE[key]
