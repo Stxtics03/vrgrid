@@ -12,11 +12,11 @@ Ranges and gradients are float metres (suffix `_m`). Heights are int16 in 1 cm (
 
 | Frame | Symbol | Origin | Axes / Handedness | Units | Owner |
 |-------|--------|--------|-------------------|-------|-------|
-| **World** | W | First pose of sequence (sequence 00, frame 0), ENU | x East, y North, z Up **Right-handed** | metres (`_m`) | JP |
-| **Vehicle** | V | Vehicle center of gravity (ground projection), at sensor height | x **Forward**, y **Left**, z **Up** **Right-handed** | metres (`_m`) | JP |
-| **Sensor (Velodyne HDL-64E)** | S | Velodyne optical center | x **Forward**, y **Left**, z **Up** **Right-handed** | metres (`_m`) | JP |
+| **World** | W | Coincides with the Vehicle frame at frame 0 of the sequence; fixed thereafter | x **Forward**, y **Left**, z **Up** **Right-handed** | metres (`_m`) | JP |
+| **Vehicle** | V | On the road surface directly below the Velodyne | x **Forward**, y **Left**, z **Up** **Right-handed** | metres (`_m`) | JP |
+| **Sensor (Velodyne HDL-64E)** | S | Velodyne optical center, ~1.73 m above the road | x **Forward**, y **Left**, z **Up** **Right-handed** | metres (`_m`) | JP |
 
-**Note:** The HDL-64E sensor frame in KITTI convention matches the vehicle frame exactly (x forward, y left, z up). The `Tr` matrix in `calib.txt` transforms from Velodyne → Camera 0 (x right, y down, z forward), not to vehicle frame.
+**Note:** The HDL-64E sensor frame in KITTI convention matches the vehicle frame exactly (x forward, y left, z up); they differ only by the 1.73 m mounting height. The `Tr` matrix in `calib.txt` is Velodyne → Camera-0 (x right, y down, z forward); `poses.txt` is Camera-0 → World_cam in that same camera convention. Both are used inside `T_V_W` and the result is rotated once into the z-up World frame above, so **every downstream consumer sees x-forward, y-left, z-up**.
 
 ---
 
@@ -24,9 +24,9 @@ Ranges and gradients are float metres (suffix `_m`). Heights are int16 in 1 cm (
 
 | From → To | Notation | Defined by | Notes |
 |-----------|----------|------------|-------|
-| Sensor → Vehicle | `T_S_V` | **KITTI documented convention** (1.73 m HDL-64E mount height, identity rotation) | **Identity rotation**, translation only: sensor mounted at (0, 0, 1.73) m in vehicle frame. `T_S_V = [I | [0, 0, 1.73]^T]`. **NOT from calib.txt** — see note below. |
-| Vehicle → World | `T_V_W(k)` | `poses.txt` (KITTI poses) | Per-frame 4×4 pose from `poses.txt` (row-major 3×4, bottom row implied [0,0,0,1]). Pose is **Vehicle in World** (i.e., `T_V_W`). |
-| Sensor → World | `T_S_W(k)` | `T_S_W = T_V_W @ T_S_V` | Composed for each frame k. Used to transform points to world for mapping. |
+| Sensor → Vehicle | `T_S_V` | **KITTI documented convention** (1.73 m HDL-64E mount height, identity rotation) | **Identity rotation**, translation only: sensor at (0, 0, 1.73) m in vehicle frame. `T_S_V = [I \| [0, 0, 1.73]^T]`. **NOT from calib.txt** — see note below. |
+| Vehicle → World | `T_V_W(k)` | `R_flip · pose(k) · Tr · T_V_S` | Per-frame. `T_V_S` undoes the 1.73 m ground drop, `Tr` (calib.txt) is Velodyne→Camera-0, `pose(k)` (poses.txt) is Camera-0→World_cam, `R_flip` (`R_CAM0_TO_VEH`) rotates World_cam into the z-up World frame. See Transform Details. |
+| Sensor → World | `T_S_W(k)` | `T_S_W = T_V_W(k) @ T_S_V` | Composed per frame. The 1.73 m drop cancels, so this equals the textbook KITTI chain `R_flip · pose(k) · Tr` acting on raw Velodyne points. |
 
 ---
 
@@ -60,17 +60,36 @@ T_S_V = [[1, 0, 0, 0],
 
 ### Vehicle → World (`T_V_W(k)`)
 
-From `poses.txt` (KITTI odometry ground truth). Each line is a 3×4 matrix in row-major order:
+**KITTI `poses.txt` provides Camera-0 (left camera) → World_cam**, NOT Vehicle → World, and
+`calib.txt` `Tr` provides Velodyne → Camera-0. `T_V_W` chains through both and then
+rotates the camera-convention world into the z-up World frame.
 
+Constant axis permutation **Camera-0 → World (z-up)**:
 ```
-[R_00 R_01 R_02 t_x
- R_10 R_11 R_12 t_y
- R_20 R_21 R_22 t_z]
+R_CAM0_TO_VEH = [[ 0,  0,  1],
+                 [-1,  0,  0],
+                 [ 0, -1,  0]]   # world_x = cam_z, world_y = -cam_x, world_z = -cam_y
 ```
 
-Bottom row is `[0, 0, 0, 1]`. This is the **Vehicle pose in World frame** (i.e., transforms a point from Vehicle → World).
+Constant Vehicle → Velodyne (undo the ground drop): `T_V_S = [I | [0, 0, -1.73]^T]`.
 
-**Units:** metres. One per frame k.
+Per-frame composition (right-to-left on a Vehicle-frame point):
+```
+T_V_W(k) = R_flip · pose(k) · Tr · T_V_S
+
+  T_V_S     Vehicle  → Velodyne      (constant, +1.73 m removed)
+  Tr        Velodyne → Camera-0      (constant, calib.txt `Tr:`)
+  pose(k)   Camera-0 → World_cam     (poses.txt line k, [R|t] row-major, frame 0 = identity)
+  R_flip    World_cam → World (z-up) (constant, R_CAM0_TO_VEH as a 4×4)
+```
+
+**Units:** metres. One matrix per frame k. Implemented in `perception/transforms.py::vehicle_to_world`.
+
+**Note on GT poses:** `poses.txt` is the OXTS RTK-GPS/INS trajectory. It carries a few
+cm of its own drift over ~100 frames, so the static-wall test targets sub-degree /
+sub-decimetre stability, not zero. The offset *slope* across 100 frames (not its
+span) is the sensitive check for a `T_V_W` translation error — a bumpy facade
+contributes bounded span but no slope.
 
 ### Sensor → World (`T_S_W(k)`)
 
@@ -107,17 +126,23 @@ Raw points (Sensor frame, N×4: x, y, z, intensity)
 
 **Purpose:** Verify `T_S_V` and `T_V_W` are correct before any mapping runs.
 
-**Procedure:**
-1. Pick a flat building face in sequence 00 (e.g., frames 100–200).
-2. Transform points from each frame to World using `T_S_W(k)`.
-3. Fit a plane to wall points per frame.
-4. Assert plane normal and offset **do not drift** across frames.
+**Procedure** (`tests/test_static_wall.py`, three 100-frame segments of seq 00):
+1. Select wall points per frame by the SemanticKITTI `building` label (raw id 50)
+   inside a vehicle-relative lateral band, so the selection slides with the vehicle.
+2. Transform to World; accumulate all 100 frames and fit ONE verticality-constrained
+   RANSAC plane as the common reference.
+3. Per frame, check: normal drift vs the global normal; mean signed distance to the
+   global plane (its span **and its linear slope** across the 100 frames); plane RMS;
+   point count.
 
 **Failure modes:**
-- Slow **rotation** of wall normal → `T_S_V` (or sensor axes) is wrong
-- Slow **translation** of wall plane → `T_V_W` (or pose parsing) is wrong
+- **Rotation** drift of the wall normal → `T_S_V` / `R_flip` / `Tr` rotation is wrong
+- **Translation** slope of the wall offset → `pose(k)` parsing or composition is wrong
 
-**Pass criterion:** Wall plane parameters stable to < 1 cm / 0.1° over 100 frames.
+**Pass criteria (current):** global plane vertical to `|n·up| < 0.12`; normal drift
+mean < 2.6°, max < 4.8°; offset span < 0.30 m; **offset slope < 0.10 m / 100 frames**;
+plane RMS max < 0.22 m. Clean segments sit ~30× inside the slope gate. Measured:
+3150 → 0.87°/0.46 cm-per-100f; 2550 → 1.17°/−0.88; 600 → 2.32°/2.54.
 
 ---
 

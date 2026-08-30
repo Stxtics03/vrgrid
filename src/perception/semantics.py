@@ -19,7 +19,6 @@ import yaml
 from pathlib import Path
 
 from .frnet import FRNet
-from .range_image import project, load_sensor_config
 
 
 # FRNet model class names (from configs/_base_/datasets/semantickitti_seg.py)
@@ -183,8 +182,6 @@ class FRNetInference:
         """
         # Extract valid points from range image
         valid_mask = inverse_index >= 0
-        valid_pixels = np.where(valid_mask)
-        point_indices = inverse_index[valid_mask]
 
         # Reconstruct points from range_image (x, y, z are already there)
         points_xyz = range_image[valid_mask, 1:4]  # (M, 3)

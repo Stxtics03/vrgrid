@@ -12,7 +12,6 @@ Renders:
 import rerun as rr
 import numpy as np
 import yaml
-from pathlib import Path
 
 
 def load_schedule(config_path: str = "configs/schedule_5_10_20_40.yaml") -> dict:

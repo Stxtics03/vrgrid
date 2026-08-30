@@ -2,7 +2,7 @@
 
 import torch
 import torch.nn as nn
-from typing import List, Dict, Optional
+from typing import List, Dict
 
 from .frustum_encoder import FrustumFeatureEncoder
 from .frnet_backbone import FRNetBackbone

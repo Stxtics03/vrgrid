@@ -35,7 +35,6 @@ def project(points: np.ndarray, sensor_cfg: dict = None) -> tuple[np.ndarray, np
     H = sensor_cfg["num_rings"]      # 64
     W = sensor_cfg["num_azimuth"]    # 512
     phi_min = np.deg2rad(sensor_cfg["phi_min_deg"])
-    phi_max = np.deg2rad(sensor_cfg["phi_max_deg"])
     d_phi = np.deg2rad(sensor_cfg["d_phi_deg"])
     d_theta = np.deg2rad(sensor_cfg["d_theta_deg"])
 

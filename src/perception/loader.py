@@ -45,6 +45,35 @@ def _gt_poses_path(sequence: str) -> Path:
     return GT_POSES_DIR / f"{sequence}.txt"
 
 
+def _calib_path(sequence: str) -> Path:
+    """Calibration file for sequence (contains Tr_velo_to_cam0)."""
+    return VELODYNE_DIR / sequence / "calib.txt"
+
+
+def load_calib(sequence: str) -> dict:
+    """Load calibration from calib.txt.
+
+    Returns dict with 'Tr_velo_to_cam0' as 4x4 matrix (Velodyne → Camera-0).
+    By KITTI convention, Velodyne frame = Vehicle frame.
+    """
+    path = _calib_path(sequence)
+    if not path.exists():
+        raise FileNotFoundError(f"Calib not found: {path}")
+
+    calib = {}
+    with open(path) as f:
+        for line in f:
+            if line.startswith('Tr:'):
+                vals = list(map(float, line.split()[1:]))
+                Tr = np.eye(4, dtype=np.float64)
+                Tr[:3, :4] = np.array(vals, dtype=np.float64).reshape(3, 4)
+                calib['Tr_velo_to_cam0'] = Tr
+                break
+    if 'Tr_velo_to_cam0' not in calib:
+        raise ValueError(f"Tr not found in calib.txt: {path}")
+    return calib
+
+
 def load_gt_poses(sequence: str) -> np.ndarray:
     """Load official KITTI ground-truth poses for a sequence.
 
