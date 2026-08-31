@@ -23,6 +23,7 @@ what the "off" half of the Gate 3 demo is supposed to show.
 Everything is preallocated in `__init__`. The frame loop allocates nothing.
 """
 
+from contextlib import nullcontext
 from dataclasses import dataclass
 
 import numpy as np
@@ -79,7 +80,8 @@ class MapEngine:
 
     def __init__(self, schedule, thresholds=None, max_points: int = 150_000,
                  max_candidates: int | None = None, ghost_removal: bool = True,
-                 sensor: Sensor | None = None, clip_class_ids: bool = False):
+                 sensor: Sensor | None = None, clip_class_ids: bool = False,
+                 timer=None):
         self.sched = schedule
         self.thresholds = thresholds if thresholds is not None else load_thresholds()
         if max_candidates is not None:
@@ -91,6 +93,10 @@ class MapEngine:
             self.thresholds["visibility"]["max_candidate_cells"] = max_candidates
         self.ghost_removal = ghost_removal
         self.clip_class_ids = clip_class_ids
+        # Optional gpu.timing.Timer. Stage names are timing.STAGES', so one
+        # Timer shared with iter_pipeline covers the whole frame rather than
+        # the back end alone -- see scripts/timing_table.py --seq.
+        self.timer = timer
         self.sensor = sensor or Sensor.from_config(self.thresholds)
 
         # `with_visibility=True`: the cleanup's scratch is part of THIS loop's
@@ -211,6 +217,8 @@ class MapEngine:
     def step(self, frame) -> StepCounters:
         """Fold one `PerceptionFrame` into the map. See the module docstring
         for the stage order; everything here is bookkeeping around it."""
+        stage = (self.timer.stage if self.timer is not None
+                 else (lambda _name: nullcontext()))
         pts = frame.points_sensor
         n = min(len(pts), self.max_points)
         xs, ys, zs = pts[:n, 0], pts[:n, 1], pts[:n, 2]
@@ -219,8 +227,10 @@ class MapEngine:
         if self._origin is None:
             self._origin = ego.copy()
 
-        self._track_vehicle(ego)
-        idx = self.bin(xs, ys, world[:, 0], world[:, 1])
+        with stage("shift"):
+            self._track_vehicle(ego)
+        with stage("bin"):
+            idx = self.bin(xs, ys, world[:, 0], world[:, 1])
 
         semantic = np.asarray(frame.semantic)[:n]
         cls = np.where(semantic < 0, 0, semantic).astype(np.uint8)
@@ -238,24 +248,27 @@ class MapEngine:
             np.clip(cls, 0, CLASS_MAX, out=cls)
 
         rng_m = np.sqrt(xs * xs + ys * ys + (zs) * (zs))
-        aggregate = scatter_sorted(
-            idx,
-            quantise_height(world[:, 2]),
-            quantise_weight(measurement_variance_cm2(np.maximum(rng_m, 1e-3))),
-            np.asarray(frame.reflectivity8)[:n].astype(np.uint8),
-            cls,
-            np.asarray(frame.ground)[:n].astype(bool),
-            scratch=self.handle.scratch,
-        )
+        with stage("scatter"):
+            aggregate = scatter_sorted(
+                idx,
+                quantise_height(world[:, 2]),
+                quantise_weight(measurement_variance_cm2(np.maximum(rng_m, 1e-3))),
+                np.asarray(frame.reflectivity8)[:n].astype(np.uint8),
+                cls,
+                np.asarray(frame.ground)[:n].astype(bool),
+                scratch=self.handle.scratch,
+            )
         touched = np.asarray(aggregate.cells).copy()
-        fuse(self.handle.grid, aggregate, self.thresholds)
+        with stage("fuse"):
+            fuse(self.handle.grid, aggregate, self.thresholds)
 
         counters = StepCounters(
             index=frame.index, points=len(pts), binned=int((idx >= 0).sum()),
             cells_touched=len(touched), occupied=0, tested=0, cleared=0,
             protected=0, out_of_view=0)
         if self.ghost_removal:
-            self._cleanup(frame, touched, ego, counters)
+            with stage("cleanup"):
+                self._cleanup(frame, touched, ego, counters)
         return counters
 
     def _track_vehicle(self, ego_xy):

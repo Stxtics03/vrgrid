@@ -32,9 +32,21 @@ SENSOR_HZ = 10.0
 # The pipeline levels of master v4 §3.5, in order. Fixing the names here keeps
 # the dashboard's stage list stable and stops two modules inventing two
 # spellings of "range image".
+# `ground`, `reflectivity`, `bin` and `shift` were missing from the original
+# list, which was written before those stages existed as separately timeable
+# things. Adding a name is additive -- `summary()` omits stages with no
+# samples, and nothing outside this file reads the tuple -- but RENAMING one
+# would break the dashboard's stage list, which is what fixing the spellings
+# here was for.
+#
+# `bin` is the point-to-slot step. It has no owning module (see the Gate 3
+# review); the name exists here so the thing can at least be measured under
+# one spelling while that is settled.
 STAGES = (
     "load", "transform", "range_image", "semantics", "motion",
-    "scatter", "fuse", "split_merge", "cleanup", "pyramid", "total",
+    "ground", "reflectivity",
+    "bin", "scatter", "fuse", "split_merge", "cleanup", "pyramid", "shift",
+    "total",
 )
 
 

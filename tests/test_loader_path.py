@@ -133,3 +133,51 @@ def test_a_realistic_label_set_hits_the_four_bit_class_limit(sequence):
     assert np.asarray(frame.semantic).max() > 15, "the fixture stopped being realistic"
     with pytest.raises(ValueError, match="4-bit candidate"):
         engine.step(frame)
+
+
+def test_one_timer_covers_the_whole_frame(sequence):
+    """⚑ `total` must span perception AND the map, or the table lies.
+
+    The perception half runs inside the generator, during `next()`. Timing
+    only `engine.step` produced a FRAME row *smaller than several of its own
+    stages* and shares that summed to 156% -- a table that looks authoritative
+    and is arithmetically impossible. This asserts the containment directly:
+    the frame cannot be quicker than its slowest part.
+    """
+    import time
+
+    from vrgrid.gpu.timing import STAGES, Timer
+    from vrgrid.run.__main__ import iter_pipeline
+
+    t = Timer(stages=STAGES)
+    engine = MapEngine(load("5/10/20/40"), max_points=40_000,
+                       max_candidates=80_000, clip_class_ids=True, timer=t)
+
+    frames = iter(iter_pipeline(SEQ, 5, use_patchworkpp=False, timer=t))
+    while True:
+        t0 = time.perf_counter()
+        frame = next(frames, None)
+        if frame is None:
+            break
+        engine.step(frame)
+        t.record("total", (time.perf_counter() - t0) * 1e3)
+
+    summary = t.summary()
+    # Both halves of the pipeline reported, under the frozen STAGES spellings.
+    for name in ("load", "transform", "range_image", "semantics", "motion",
+                 "ground", "reflectivity", "bin", "scatter", "fuse",
+                 "cleanup", "shift", "total"):
+        assert name in summary, f"{name} recorded no samples"
+
+    # One sample per stage per frame -- a stage timed twice in a frame would
+    # mix two different operations into one p50. `ground` and `reflectivity`
+    # were folded under `semantics` in the first version of this, which did
+    # exactly that.
+    n = summary["total"]["n"]
+    for name, s in summary.items():
+        assert s["n"] == n, f"{name} recorded {s['n']} samples across {n} frames"
+
+    slowest = max(s["max_ms"] for name, s in summary.items() if name != "total")
+    assert summary["total"]["max_ms"] >= slowest, (
+        "the frame is quicker than its slowest stage, so `total` is not "
+        "wrapping the whole frame")

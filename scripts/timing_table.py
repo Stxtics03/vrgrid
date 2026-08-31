@@ -62,6 +62,7 @@ bench_scatter's exactly, and this is the reason.
 import argparse
 import platform
 import subprocess
+import time
 import tracemalloc
 
 import numpy as np
@@ -80,7 +81,7 @@ from vrgrid.gpu.shift import (
     new_slot_scratch,
     shift,
 )
-from vrgrid.gpu.timing import SENSOR_HZ, Timer
+from vrgrid.gpu.timing import SENSOR_HZ, STAGES, Timer
 from vrgrid.gpu.visibility import new_visibility_scratch, visibility_cleanup
 from vrgrid.grid.fusion import fuse
 from vrgrid.grid.lattice import i_ring, ring_of
@@ -402,6 +403,41 @@ class _Peak:
         return False
 
 
+def print_real_table(t):
+    """Every stage that produced a sample, in pipeline order, and a real total.
+
+    No MEASURED-is-a-lower-bound caveat here: with `--seq` there are no
+    unmeasured stages left except `split_merge`, which has no per-frame batch
+    entry point at all (see the Gate 3 review).
+    """
+    summary = t.summary()
+    budget = 1e3 / SENSOR_HZ
+    head = f"{'stage':<13}{'p50 ms':>9}{'p99 ms':>9}{'max ms':>9}{'share':>8}{'x10Hz':>8}"
+    print(head)
+    print("-" * len(head))
+    total = summary["total"]["p50_ms"]
+    for name in STAGES:
+        if name not in summary or name == "total":
+            continue
+        s = summary[name]
+        print(f"{name:<13}{s['p50_ms']:>9.2f}{s['p99_ms']:>9.2f}{s['max_ms']:>9.2f}"
+              f"{s['p50_ms'] / total:>7.0%}{budget / s['p99_ms']:>7.1f}x")
+    print("-" * len(head))
+    m, h = summary["total"], t.headroom("total")
+    print(f"{'FRAME':<13}{m['p50_ms']:>9.2f}{m['p99_ms']:>9.2f}{m['max_ms']:>9.2f}"
+          f"{1.0:>7.0%}{budget / m['p99_ms']:>7.1f}x")
+    print(f"\n{h['fps_p50']:.1f} FPS p50 ({h['headroom_p50']:.1f}x), "
+          f"{h['fps_p99']:.1f} FPS p99 ({h['headroom_p99']:.1f}x) against the "
+          f"{budget:.0f} ms budget at {SENSOR_HZ:.0f} Hz")
+    print("meets 10 Hz at p99" if h["meets_sensor_rate"] else "MISSES 10 Hz at p99")
+    print("\nsplit_merge is absent because it has no per-frame batch entry point; "
+          "it is\ndriven per cell by the refinement pool. Everything else in the "
+          "frame is above.")
+    print("Shares are p50/p50 and will not sum to exactly 100%: a percentile of "
+          "sums is\nnot the sum of percentiles. They are for reading the shape, "
+          "not for arithmetic.")
+
+
 def print_table(t, alloc, frame):
     summary = t.summary()
     budget_ms = 1e3 / SENSOR_HZ
@@ -453,6 +489,45 @@ def print_table(t, alloc, frame):
               f"problem together. See this script's docstring.")
 
 
+def run_real(args):
+    """Time a real sequence: every stage, front end included.
+
+    This is the table Day 6 asks for, and the one the synthetic path cannot
+    produce -- `iter_pipeline` and `MapEngine` both take the same Timer, and
+    the stage names are `timing.STAGES`, so the frame adds up instead of
+    being a back-end subtotal with a caveat attached.
+    """
+    from vrgrid.run.__main__ import iter_pipeline
+    from vrgrid.run.engine import MapEngine
+
+    t = Timer(stages=STAGES)
+    engine = MapEngine(load(args.schedule), max_points=args.points,
+                       clip_class_ids=args.clip_class_ids, timer=t)
+
+    # `total` has to span the WHOLE frame -- perception AND the map -- and the
+    # perception half happens inside the generator, during `next()`. Wrapping
+    # only `engine.step` gave a FRAME row smaller than several of its own
+    # stages and shares that summed to 156%.
+    frames = iter(iter_pipeline(args.seq, args.frames + 1,
+                                use_patchworkpp=not args.no_patchworkpp, timer=t))
+    n = 0
+    while True:
+        t0 = time.perf_counter()
+        frame = next(frames, None)
+        if frame is None:
+            break
+        engine.step(frame)
+        t.record("total", (time.perf_counter() - t0) * 1e3)
+        n += 1
+        # The first frame faults every page in and warms every cache; that is
+        # startup, not a frame, and it lands in the p99 the claim rests on.
+        if n == 1:
+            t.reset()
+    if n < 2:
+        raise SystemExit(f"sequence {args.seq} yielded {n} frames; need at least 2")
+    return t, engine, n - 1
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -467,6 +542,15 @@ def main() -> None:
                          "schedule's anisotropy v_ref")
     ap.add_argument("--no-pyramid", action="store_true",
                     help="drop the stretch-item pyramid row (§7.2)")
+    ap.add_argument("--seq", default=None,
+                    help="time a REAL SemanticKITTI sequence end to end (needs "
+                         "$VRGRID_DATA_ROOT). Without it, a synthetic sweep and "
+                         "the back end only")
+    ap.add_argument("--no-patchworkpp", action="store_true",
+                    help="--seq only: use the semantic-class ground proxy")
+    ap.add_argument("--clip-class-ids", action="store_true",
+                    help="--seq only: clip semantic ids to 15 so fusion's 4-bit "
+                         "candidate accepts them (math §10.2)")
     ap.add_argument("--alloc", action="store_true",
                     help="also report transient bytes per frame per stage "
                          "(separate pass; tracemalloc distorts latency)")
@@ -475,6 +559,17 @@ def main() -> None:
     sched = load(args.schedule)
     if args.speed_mps is None:
         args.speed_mps = sched.anisotropy.v_ref_ms
+
+    if args.seq is not None:
+        t, engine, frames = run_real(args)
+        print(f"CPU  {cpu_name()}")
+        print(f"GPU  {gpu_name()}")
+        print(f"numpy {np.__version__}, python {platform.python_version()}, "
+              f"{platform.system()}\n")
+        print(f"sequence {args.seq}, {frames} frames, schedule {args.schedule}, "
+              f"{engine.handle.allocated_slots:,} slots\n")
+        print_real_table(t)
+        return
 
     handle = allocate(sched, with_pyramid=not args.no_pyramid)
     rng = np.random.default_rng(0)
