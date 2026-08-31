@@ -9,7 +9,6 @@ check numbers, not the viewer, and must run in CI without the `[dash]` extra.
 
 import numpy as np
 import pytest
-
 from vrgrid.dash.cvd import (
     SIM,
     _palettes,
@@ -83,6 +82,6 @@ def test_semantickitti_class_map_limitation_is_unchanged():
     It is NOT colourblind-safe (19 saturated categories exceed any safe
     palette). This pins the worst pair so a change to the LUT is noticed; it is
     a regression sentinel, not a safety assertion."""
-    de, (kind, a, b) = min_delta_e(_palettes()["class (semantickitti)"])
+    de, (_kind, a, b) = min_delta_e(_palettes()["class (semantickitti)"])
     assert de < 3.0
     assert {a, b} == {"person", "traffic-sign"}  # both near-pure blue, collide even in normal vision

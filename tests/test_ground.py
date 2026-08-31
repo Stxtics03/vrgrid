@@ -6,10 +6,9 @@ proxy as the fallback and the sanity reference.
 
 import numpy as np
 import pytest
-
 from vrgrid.perception.ground import (
-    GROUND_CLASSES,
     _HAVE_PATCHWORKPP,
+    GROUND_CLASSES,
     ground_from_semantics,
     segment_ground,
 )

@@ -54,3 +54,7 @@ markers = [
 
 [tool.ruff]
 line-length = 100
+# src/perception/frnet is a NON-FUNCTIONAL port, deliberately frozen as a reference
+# for a possible mmdet3d swap (master-v4 3.6). Not ours to modernise -- excluded so
+# lint reflects code we actually build on.
+extend-exclude = ["src/perception/frnet"]

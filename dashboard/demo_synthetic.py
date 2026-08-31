@@ -9,8 +9,8 @@ Renders:
 - Ring boundaries from configs/schedule_5_10_20_40.yaml
 """
 
-import rerun as rr
 import numpy as np
+import rerun as rr
 import yaml
 
 # The 19-class colour table lives in `palettes.py`, which imports no rerun, so

@@ -7,7 +7,6 @@ step is not on this branch yet (Aakash's), so it is not exercised here.
 
 import numpy as np
 import pytest
-
 from vrgrid.perception.loader import _velodyne_path, verify_sequence_exists
 from vrgrid.perception.transforms import sensor_to_world
 from vrgrid.run.__main__ import PerceptionFrame, iter_pipeline
@@ -52,9 +51,8 @@ def test_ground_split_matches_semantics_roughly():
 
 def test_pipeline_view_builds_headless_and_colours(tmp_path):
     pytest.importorskip("rerun")
-    from vrgrid.grid import schedule as schedule_mod
-
     from vrgrid.dash.pipeline_view import COLOR_BY, PipelineView, _frame_colors
+    from vrgrid.grid import schedule as schedule_mod
 
     sched = schedule_mod.load("5/10/20/40")
     PipelineView(sched, spawn=False, save_path=str(tmp_path / "t.rrd"), color_by="class")
