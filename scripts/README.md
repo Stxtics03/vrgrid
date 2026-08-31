@@ -10,10 +10,10 @@ is not produced by something in this directory, it does not go on a slide.
 | `bench_scatter.py` | Scatter p50/p99 and scratch cost for both paths, and the hash proving they agree |
 | `bench_pyramid.py` | Conservative-pyramid rebuild p50/p99, node and scratch cost, and the SAFE/BLOCKED/MIXED split per level. Also prints the corrected §7.2 memory figure |
 | `memory_bound.py` | The itemised preallocated bound, read off the real allocation -- with and without the pyramid |
+| `timing_table.py` | The Day-6 per-stage latency table: p50/p99/max and headroom at p99, machine named. Covers the mapping back end only, and prints the unmeasured stages with their owner rather than dropping them |
 | `baseline_demo.py` | Our map beside the uniform 2.5D and dense 3D baselines, all three counters resident and ticking. `--dense` allocates the full 2.56 GB |
 
-To add: `timing_table.py` (the Day-6 latency table, GPU named, headroom =
-FPS/10), `ablation_table.py` (schedule comparison, thresholds frozen first),
+To add: `ablation_table.py` (schedule comparison, thresholds frozen first),
 `regret_plot.py`, `ghost_removal_figure.py`.
 
 Not a numbers script, but it lives here because it is run once and checked in:
