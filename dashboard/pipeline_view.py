@@ -30,7 +30,7 @@ they track the vehicle. Points are world-frame and accumulate on the timeline.
 import numpy as np
 import rerun as rr
 
-from .demo_synthetic import load_schedule
+from ._config import blind_cone_radius_m, schedule_legend_markdown
 
 # Every colour below is defined in `palettes.py`, which imports no rerun: the
 # CVD audit (`cvd.py`) and tests/test_cvd.py check these numbers in CI, where
@@ -117,10 +117,11 @@ def get_display_points(frame, ghost_removal: bool, color_by: str = "class",
 class PipelineView:
     def __init__(self, schedule, spawn: bool = False, save_path: str | None = None,
                  color_by: str = "class", ghost_removal: bool = True,
-                 palette: str = "semantickitti", schedule_yaml: str | None = None):
+                 palette: str = "semantickitti"):
         self.color_by = color_by
         self.ghost_removal = ghost_removal
         self.palette = palette
+        self.schedule = schedule
         rr.init("vrgrid_pipeline", spawn=spawn)
         if save_path:
             rr.save(save_path)
@@ -138,26 +139,33 @@ class PipelineView:
         )
         rr.log("legend", rr.TextDocument(legend_markdown(palette),
                                          media_type=rr.MediaType.MARKDOWN), static=True)
-        self._log_rings(load_schedule() if schedule_yaml is None else load_schedule(schedule_yaml))
-        self._log_blind_cone()
+        rr.log("schedules", rr.TextDocument(schedule_legend_markdown(schedule.name),
+                                            media_type=rr.MediaType.MARKDOWN), static=True)
+        self._log_rings(schedule)
+        self._log_blind_cone(blind_cone_radius_m())
 
-    def _log_rings(self, sched: dict):
-        for ring in sched.get("rings", []):
-            hw = ring["half_width_m"]
+    def _log_rings(self, schedule):
+        """Ring-boundary circles, straight from the passed `Schedule`. The ring
+        half-widths and cell sizes come from `configs/schedule_*.yaml` via
+        `grid.schedule.load` -- nothing here is hardcoded, and this draws the
+        same rings the engine bins into."""
+        for ring in schedule.rings:
+            hw = ring.half_width_m
             th = np.linspace(0, 2 * np.pi, 129)
             strip = np.stack([hw * np.cos(th), hw * np.sin(th), np.zeros_like(th)], axis=1)
             rr.log(
-                f"world/vehicle/rings/ring_{ring['ring']}",
+                f"world/vehicle/rings/ring_{ring.ring}_{ring.cell_m * 100:g}cm",
                 rr.LineStrips3D([strip.astype(np.float32)], colors=[220, 220, 220], radii=0.04),
                 static=True,
             )
 
-    def _log_blind_cone(self, radius_m: float = 3.74):
+    def _log_blind_cone(self, radius_m: float):
         th = np.linspace(0, 2 * np.pi, 65)
         strip = np.stack([radius_m * np.cos(th), radius_m * np.sin(th), np.zeros_like(th)], axis=1)
         rr.log(
             "world/vehicle/blind_cone",
-            rr.LineStrips3D([strip.astype(np.float32)], colors=[230, 60, 60], radii=0.05),
+            rr.LineStrips3D([strip.astype(np.float32)], colors=[230, 60, 60], radii=0.05,
+                            labels=[f"blind cone {radius_m:.2f} m (unknown, never free)"]),
             static=True,
         )
 

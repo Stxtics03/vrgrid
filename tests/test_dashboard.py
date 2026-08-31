@@ -1,8 +1,9 @@
-"""Ghost toggle -- get_display_points(). [JP]
+"""Dashboard controls: ghost toggle, blind cone, schedule selector. [JP]
 
-Placeholder for grid-based ghost removal: filters is_moving() points from the
-rendered cloud. The swap point when Aakash's grid lands is get_display_points's
-body only, not the toggle wiring.
+`get_display_points()` is the ghost-removal swap point -- it filters is_moving()
+points from the rendered cloud, and its body is the only thing that changes when
+the grid's transient layer is the source. The blind-cone radius and the schedule
+selector are read from `configs/` through `vrgrid.dash._config` (no rerun).
 """
 
 import numpy as np
@@ -10,7 +11,14 @@ import pytest
 
 pytest.importorskip("rerun")
 
+from vrgrid.dash._config import (
+    available_schedules,
+    blind_cone_radius_m,
+    schedule_legend_markdown,
+)
 from vrgrid.dash.pipeline_view import COLOR_BY, get_display_points
+from vrgrid.grid.schedule import CONFIG_DIR, load_thresholds
+from vrgrid.grid.schedule import load as load_schedule
 from vrgrid.perception.loader import _velodyne_path, verify_sequence_exists
 
 _HAS_DATA = verify_sequence_exists("00") and _velodyne_path("00", 10).exists()
@@ -106,3 +114,50 @@ def test_frame_10_ghost_toggle_removes_the_moving_objects():
     # the moving objects are near the vehicle, not scattered across the map
     ghosts = frame.points_world[frame.moving]
     assert np.linalg.norm(ghosts - frame.vehicle_xyz_world, axis=1).max() < 60
+
+
+# --------------------------------------------------------------------------
+# blind cone -- radius read from config, the corrected 3.74 m value
+# --------------------------------------------------------------------------
+
+
+def test_blind_cone_radius_is_374_and_comes_from_config():
+    from_config = load_thresholds()["sensor"]["blind_cone_m"]
+    assert from_config == pytest.approx(3.74)
+    assert blind_cone_radius_m() == pytest.approx(from_config)
+    # the corrected value -- master v4 flagged the earlier 1-2 m assumption
+    assert blind_cone_radius_m() > 3.0
+
+
+# --------------------------------------------------------------------------
+# schedule selector -- reads configs/schedule_*.yaml, no hardcoded ring sizes
+# --------------------------------------------------------------------------
+
+
+def test_available_schedules_are_discovered_from_config_dir():
+    got = available_schedules()
+    on_disk = sorted(p.stem.removeprefix("schedule_") for p in CONFIG_DIR.glob("schedule_*.yaml"))
+    assert got == on_disk
+    assert "5_10_20_40" in got and "5_10_50" in got
+
+
+def test_schedule_legend_matches_the_config_ring_boundaries():
+    md = schedule_legend_markdown("5_10_20_40")
+    assert "**(active)**" in md
+    for name in available_schedules():
+        s = load_schedule(name)
+        assert f"`{name}`" in md
+        for r in s.rings:
+            # half-width / cell-cm pair, straight from the yaml, appears verbatim
+            assert f"{r.half_width_m:g}/{r.cell_m * 100:g}" in md
+        assert f"{s.total_cells:,}" in md
+
+
+def test_pipeline_view_logs_rings_from_the_passed_schedule(tmp_path):
+    from vrgrid.dash.pipeline_view import PipelineView
+
+    # both schedules build without error and use their own ring count
+    for name, n_rings in [("5/10/20/40", 4), ("5/10/50", 3)]:
+        s = load_schedule(name)
+        assert len(s.rings) == n_rings
+        PipelineView(s, spawn=False, save_path=str(tmp_path / f"{n_rings}.rrd"))
