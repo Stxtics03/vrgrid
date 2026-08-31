@@ -10,6 +10,7 @@ import pytest
 from vrgrid.dash.cvd import (
     SIM,
     _palettes,
+    delta_e,
     ghost_vs_class_min_delta_e,
     min_delta_e,
     simulate,
@@ -33,15 +34,34 @@ def test_normal_is_identity_and_greyscale_is_cvd_invariant():
 # --- palettes that must be CVD-safe ---------------------------------------
 
 
-@pytest.mark.parametrize("name", ["motion", "ground", "intensity/reflectivity"])
+@pytest.mark.parametrize(
+    "name", ["class (groups)", "motion", "ground", "intensity/reflectivity"]
+)
 def test_palette_is_colourblind_safe(name):
     de, (kind, a, b) = min_delta_e(_palettes()[name])
     assert de >= SAFE, f"{name}: {a} vs {b} under {kind} -> Delta-E {de:.1f}"
 
 
+def test_group_palette_covers_all_19_classes_exactly_once():
+    from vrgrid.dash.pipeline_view import GROUP_MEMBERS, _GROUP_LUT
+
+    members = [c for names in GROUP_MEMBERS.values() for c in names]
+    assert len(members) == 20 and len(set(members)) == 20  # 19 classes + "unlabeled"
+    assert set(_GROUP_LUT.tolist()) == set(range(7))  # every group is used
+
+
 def test_ghost_highlight_is_distinct_from_every_class_colour():
     de, closest = ghost_vs_class_min_delta_e()
     assert de >= SAFE, f"ghost highlight collides with {closest} (Delta-E {de:.1f})"
+
+
+def test_ghost_highlight_is_distinct_from_every_group_colour():
+    from vrgrid.dash.pipeline_view import GHOST_RGB, GROUP_NAMES, GROUP_RGB
+
+    for i, name in enumerate(GROUP_NAMES):
+        de = min(delta_e(simulate(GHOST_RGB, k), simulate(GROUP_RGB[i], k))
+                 for k in ["normal", *SIM])
+        assert de >= SAFE, f"ghost vs {name}: Delta-E {de:.1f}"
 
 
 def test_ghost_is_not_red_or_green():
@@ -60,6 +80,6 @@ def test_semantickitti_class_map_limitation_is_unchanged():
     It is NOT colourblind-safe (19 saturated categories exceed any safe
     palette). This pins the worst pair so a change to the LUT is noticed; it is
     a regression sentinel, not a safety assertion."""
-    de, (kind, a, b) = min_delta_e(_palettes()["class"])
+    de, (kind, a, b) = min_delta_e(_palettes()["class (semantickitti)"])
     assert de < 3.0
     assert {a, b} == {"person", "traffic-sign"}  # both near-pure blue, collide even in normal vision

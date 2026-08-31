@@ -29,6 +29,8 @@ def main(argv=None) -> None:
         default="class",
         choices=["intensity", "class", "motion", "ground", "reflectivity"],
     )
+    p.add_argument("--palette", default="semantickitti", choices=["semantickitti", "groups"],
+                   help="class colours: the 19-class standard, or 7 colourblind-safe groups")
     p.add_argument("--save", default=None, help="write a .rrd recording instead of spawning a viewer")
     p.add_argument("--show-ghosts", action="store_true",
                    help="keep moving points in world/points (default: split to world/ghosts)")
@@ -48,7 +50,8 @@ def main(argv=None) -> None:
 
     sched = schedule_mod.load(args.schedule)
     view = PipelineView(sched, spawn=args.save is None, save_path=args.save,
-                        color_by=args.color_by, ghost_removal=not args.show_ghosts)
+                        color_by=args.color_by, ghost_removal=not args.show_ghosts,
+                        palette=args.palette)
     n = 0
     for frame in iter_pipeline(args.seq, args.frames, use_patchworkpp=not args.no_patchworkpp):
         view.log_frame(frame)

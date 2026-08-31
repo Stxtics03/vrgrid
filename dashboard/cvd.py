@@ -97,11 +97,12 @@ CLASS_NAMES = [
 
 def _palettes() -> dict[str, dict[str, list[int]]]:
     from .demo_synthetic import class_to_color
-    from .pipeline_view import GHOST_RGB
+    from .pipeline_view import GHOST_RGB, GROUP_NAMES, GROUP_RGB
 
     return {
-        "class": {n: class_to_color(i) for i, n in enumerate(CLASS_NAMES)}
+        "class (semantickitti)": {n: class_to_color(i) for i, n in enumerate(CLASS_NAMES)}
         | {"unknown": class_to_color(-1)},
+        "class (groups)": {n: list(GROUP_RGB[i]) for i, n in enumerate(GROUP_NAMES)},
         "motion": {"static": [90, 90, 90], "moving": list(GHOST_RGB)},
         "ground": {"ground": [170, 130, 90], "non-ground": [70, 130, 180]},
         "intensity/reflectivity": {f"v={v}": [v, v, v] for v in (0, 64, 128, 192, 255)},

@@ -101,6 +101,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--show-ghosts", action="store_true",
                    help="keep moving points in the main cloud (default: split to world/ghosts)")
+    p.add_argument("--palette", default="semantickitti", choices=["semantickitti", "groups"],
+                   help="class colours: the 19-class standard, or 7 colourblind-safe groups")
     p.add_argument("--no-patchworkpp", action="store_true", help="use the semantic-class ground proxy")
     return p
 
@@ -118,7 +120,8 @@ def main(argv=None) -> int:
         from vrgrid.dash.pipeline_view import PipelineView
 
         view = PipelineView(sched, spawn=args.viz, save_path=args.save,
-                            color_by=args.color_by, ghost_removal=not args.show_ghosts)
+                            color_by=args.color_by, ghost_removal=not args.show_ghosts,
+                            palette=args.palette)
 
     n = 0
     for frame in iter_pipeline(args.seq, args.frames, use_patchworkpp=not args.no_patchworkpp):
