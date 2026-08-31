@@ -9,15 +9,15 @@
 | # | Item | Who decides | Time |
 |---|---|---|---|
 | 1 | §10.4 has been written twice — one copy is a stub with Aakash's name on it | Aakash + me | 3 min |
-| 2 | The ghost toggle demonstrates a label filter, not the engine | JP + room | 5 min |
-| 3 | Point→slot binning is the largest stage in the frame and nobody owns it | Aakash + room | 5 min |
+| 2 | The ghost toggle demonstrates a label filter, not the engine — now wired, needs the map drawn | JP + room | 4 min |
+| 3 | Two per-frame allocations in `src/grid`, 15 MB between them; and binning has no owner | Aakash + room | 6 min |
 | 4 | 19 classes do not fit in 4 bits — the first real frame raises | Room | 3 min |
 | 5 | Visibility scratch: pick a cap, or accept it stays undeclared | Room | 4 min |
 | 6 | Two ratifications: eq (32)'s delta, and §7.2's memory figure | Room | 2 min |
 
 Items 1–4 are blockers. Item 5 moves a number on a slide. Item 6 is for the record.
 
-**Suite: 390 passed, 20 skipped. `ruff check .` clean. `main` is green.**
+**Suite: 396 passed, 20 skipped. `ruff check .` clean. `main` is green.**
 
 ---
 
@@ -52,7 +52,11 @@ Why this matters more than it looks: the trails a judge sees behind a moving car
 
 The gap is one wiring change, not new work — `visibility_cleanup` returns a `see_through` mask and `apply_miss()` applies it to `log_odds`. The frame loop has to call them. I am not going to wire it inside `dashboard/` because that is JP's directory and the run loop is the integration point, not the viewer.
 
-**What I want from the room:** agreement that the toggle drives the map path before it is demonstrated to anyone outside the team, and a decision on who wires it. I am volunteering for the `src/run/` side of it tomorrow if nobody objects.
+**Since drafting this I have wired it** — `src/run/engine.py`, the map stage order in one place, every computation still in its owner's module. `--show-ghosts` now switches both halves. On a synthetic sequence where a car sits for three frames and leaves for nine: **cleanup on, 0 of 396 of its cells remain occupied; cleanup off, 396 of 396.** That pair is `tests/test_engine.py`, and the second half is the negative control — without it, a test that passes because the car's cells were never occupied looks exactly like one that passes because the cleanup works.
+
+**What is still needed, and it is JP's:** the dashboard draws the point cloud, not the map. The toggle now changes the cells, and nothing on screen shows cells. Drawing the occupied set — `engine.occupied_slots()` returns it — is what turns this back into a demo.
+
+**Two defects the wiring found, both mine, and the first is the one to note.** `spherical_project` ran the azimuth axis backwards: JP's `range_image.py` is authoritative, and `u_mine + u_JP == W - 1` for every point. Eq (32) was comparing a cell in front of the vehicle against the beam behind it — ghosts survive, real structure gets cleared, and the map looks plausible throughout. All 21 existing tests in `test_visibility.py` build their own image and are structurally blind to the convention. Second: the cleanup projected cells at `ground_height`, which is 0 for any cell whose returns are all non-ground — so a parked car was aimed 1.73 m below the sensor, onto a different image row, and nothing cleared. Both are pinned now.
 
 ---
 
@@ -94,6 +98,38 @@ Two things make it worse than a tidiness complaint:
 **And it is easy to get wrong in a way that survives casual testing.** I got it wrong twice today. Ring membership is a question about distance from the *sensor*, so `ring_of` takes the vehicle-frame point; the lattice index is *global*, so `i_ring` takes the world-frame one. Feed world coordinates to `ring_of` and every point reads as OUTSIDE once the vehicle has driven past ring 3's half-width. Hold the sweep at the vehicle origin while the ring windows advance and by frame 13 everything bins to −1 — after which `scatter` and `fuse` post sub-millisecond p50s for doing nothing at all, and the latency table reads *better*. Both failure modes look correct for the first few seconds. Both are written up in `bin_points`' docstring.
 
 **My recommendation:** one vectorised `bin_points(xv, yv, xw, yw, schedule, …) -> idx` in `src/grid/`, next to `ring_of`, with a preallocated output like every other frame-path buffer, and the three call sites deleted. It is lattice semantics, so it is Aakash's directory by the ownership table — but I will write it as a same-day cross-directory PR if he would rather spend Day 4 on the regret curve. **That is the decision I want: whose, and today or tomorrow.**
+
+### And a second one, larger, found while wiring §10.4 into the frame loop
+
+`fusion.occupancy_state()` allocates **8.19 MB per call**, in full-grid
+temporaries over the 910,000 allocated slots — the `np.where` chain runs over
+int64 `log_odds`, and one int64 array across the grid is 7.28 MB on its own.
+The frame loop has to call it every frame: the cleanup's candidate set is the
+currently-OCCUPIED cells, and this is the only thing that computes them.
+
+So the two largest per-frame allocations in the system are now both in
+`src/grid`, and together they are **15.15 MB a frame**:
+
+| | per frame | scales with |
+|---|---|---|
+| `occupancy_state` | 8.19 MB | the grid — 910,000 slots, fixed |
+| `ring_of` | 6.96 MB | the sweep — at 120,000 points |
+| everything in `src/gpu` on the frame path | ~0.96 MB | preallocated at startup |
+
+I want to be careful about how this lands, because it is the third item in a
+row pointing at Aakash's directory and that is not the intent. **The reason
+these are visible at all is that his half is finished enough to run**, which is
+more than the perception front end can say. Preallocating both is a couple of
+hours of `out=` plumbing, not a redesign, and `gpu/kernels.py` already has the
+pattern to copy — the scatter scratch was exactly this defect and cost 19 MB a
+frame behind a docstring claiming the opposite.
+
+**What I want: agreement that both get an `out=`/scratch variant before Day 6**,
+and that the memory-bound script grows a per-frame transient line so this class
+of defect is visible in a number rather than found with a profiler. The
+headline preallocated figure is not affected — this is churn, not footprint —
+but "no allocation in the frame loop" is a hard invariant in CLAUDE.md and a
+sentence in the report, and right now it is false by 15 MB.
 
 ---
 
@@ -189,14 +225,15 @@ Two things worth saying about correctness specifically:
 |---|---|
 | Visibility scratch in `allocate()` | Blocked on a cap decision — item 4 |
 | Real-data latency numbers | Blocked — no SemanticKITTI on disk |
+| Map drawn in the dashboard | JP's — the toggle moves cells, the screen shows points |
 | GPU kernels (CuPy path) | Day 6. Everything today is the numpy CPU reference path |
 | `bin_points` in `src/grid/` | Blocked on an ownership decision — item 2 |
 | `ring_of`'s 6.96 MB/frame | `src/grid/lattice.py`, not mine to fix — item 2 |
 
 ## Tomorrow
 
-1. Wire `visibility_cleanup` + `apply_miss` into `src/run/` so the ghost toggle drives the map, if the room agrees in item 2
-2. `bin_points`, if it lands with me
-3. `ablation_table.py` — schedule comparison, thresholds frozen first
+1. `bin_points` and the two `out=` variants, if item 3 lands with me
+2. `ablation_table.py` — schedule comparison, thresholds frozen first
+3. Re-run every latency and memory figure I own the hour the data lands
 
 **One risk to say out loud:** every latency and fill number I have is against a synthetic sweep. The shapes are right — gamma-tailed range distribution, 47% of returns in ring 1, 6.6% in ring 3 — but the numbers are not reportable and I have been careful to label them that way in every script. The day the data lands, all of them get re-run before anything goes on a slide, and I would rather the room expects that than is surprised by a column of changed figures on Day 5.
