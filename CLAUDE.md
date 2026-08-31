@@ -62,7 +62,7 @@ Stay inside your own directory. Cross-directory changes go through a same-day PR
 - Do not weaken a test to make it pass. If a theorem test fails, the implementation is wrong — those are proofs, not tuning targets.
 
 ## Don't
-- Don't reimplement Patchwork++, KISS-ICP or FRNet. Wire them in.
-- Don't retrain anything. Pretrained FRNet 19-class; `moving-*` labels come from the raw `.label` files.
+- Don't reimplement Patchwork++ or KISS-ICP. Wire them in.
+- Don't retrain anything, and don't run inference for labels. Both the 19-class semantic label and the `moving-*` motion flag come straight from the SemanticKITTI raw `.label` files (`src/perception/semantics.py`). FRNet is not used — the only standalone port available does not reproduce the trained network and is flagged non-functional in `src/perception/frnet/`. Disclose plainly: the mapping contribution is evaluated independently of segmentation quality.
 - Don't add features after the Day 6 freeze.
 - Don't hardcode thresholds inline — they live in `configs/`, and they are frozen before schedules are compared.

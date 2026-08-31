@@ -1,19 +1,62 @@
-"""Rerun dashboard — `python -m vrgrid.dash`. [JP]
+"""Rerun dashboard -- `python -m vrgrid.dash`. [JP]
 
 Runs as a SEPARATE PROCESS from the pipeline. If the dashboard falls over two
 days before submission the framework must still run and still produce numbers.
 
-Build it against a mock grid on Day 0, before the real grid exists. It is one
-of the two things judges actually see.
+    python -m vrgrid.dash                       synthetic mock (Day 0, no data)
+    python -m vrgrid.dash --seq 00              real pipeline, colour by class
+    python -m vrgrid.dash --seq 00 --color-by ground --frames 60
+    python -m vrgrid.dash --seq 00 --save run.rrd      headless -> open with `rerun run.rrd`
 
-Shows: the map coloured by ring, the schedule selector, per-stage timings
-(median and p95), live memory against the preallocated bound, and the
-persistent-unknown fraction.
+Shows: the point cloud coloured by the chosen layer, ring boundaries and the
+blind cone tracking the vehicle, and the vehicle pose per frame on the timeline.
+
+Ghost toggle: the moving points are logged to `world/ghosts`; toggle that
+entity's visibility in the viewer. `--show-ghosts` puts them back in the main
+cloud instead (for a "raw pipeline output" view with nothing to toggle).
 """
 
+import argparse
 
-def main() -> None:
-    raise NotImplementedError("JP — Day 0/1, against a mock grid")
+
+def main(argv=None) -> None:
+    p = argparse.ArgumentParser(prog="vrgrid.dash")
+    p.add_argument("--seq", default=None, help="run the real pipeline on this sequence")
+    p.add_argument("--frames", type=int, default=None, help="stop after N frames")
+    p.add_argument("--schedule", default="5/10/20/40")
+    p.add_argument(
+        "--color-by",
+        default="class",
+        choices=["intensity", "class", "motion", "ground", "reflectivity"],
+    )
+    p.add_argument("--palette", default="semantickitti", choices=["semantickitti", "groups"],
+                   help="class colours: the 19-class standard, or 7 colourblind-safe groups")
+    p.add_argument("--save", default=None, help="write a .rrd recording instead of spawning a viewer")
+    p.add_argument("--show-ghosts", action="store_true",
+                   help="keep moving points in world/points (default: split to world/ghosts)")
+    p.add_argument("--no-patchworkpp", action="store_true")
+    args = p.parse_args(argv)
+
+    if args.seq is None:
+        from .demo_synthetic import main as mock_main
+
+        mock_main()
+        return
+
+    from vrgrid.grid import schedule as schedule_mod
+    from vrgrid.run.__main__ import iter_pipeline
+
+    from .pipeline_view import PipelineView
+
+    sched = schedule_mod.load(args.schedule)
+    view = PipelineView(sched, spawn=args.save is None, save_path=args.save,
+                        color_by=args.color_by, ghost_removal=not args.show_ghosts,
+                        palette=args.palette)
+    n = 0
+    for frame in iter_pipeline(args.seq, args.frames, use_patchworkpp=not args.no_patchworkpp):
+        view.log_frame(frame)
+        n += 1
+    print(f"{n} frames from sequence {args.seq}" + (f" -> {args.save}" if args.save else ""))
 
 
 if __name__ == "__main__":

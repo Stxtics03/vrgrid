@@ -11,6 +11,11 @@ dependencies = ["numpy>=1.24", "pyyaml>=6.0"]
 
 [project.optional-dependencies]
 dash = ["rerun-sdk>=0.16"]
+# Patchwork++ ground segmentation. A C++ extension -- install locally with
+# `pip install -e ".[perception]"`. ground.py falls back to a semantic-class
+# proxy when it is absent, so CI (which does not install it) still runs the
+# ground tests; the Patchwork++-specific tests skip.
+perception = ["pypatchworkpp>=1.2"]
 dev = ["pytest>=7.4", "ruff>=0.4"]
 
 # The repo is laid out by OWNER (src/grid = Aakash, src/gpu = Shrestha, ...) so

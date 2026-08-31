@@ -107,8 +107,8 @@ Split/merge mathematics (Aakash), segmentation (JP), metric definitions (Aakash/
 - Loader, cached preprocessing (start the 3-sequence download in hour one — it's the only critical-path item cleverness can't speed up).
 - **Coordinate transforms and the static-wall test.** Frame confusion is the single most common silent bug in this class of project: the map looks plausible and slowly rotates. Map a known wall across 100 frames, assert it doesn't move. Day 0.
 - Range-image projection at 64×512 with the inverse index (reversibility is mandatory — you must map a pixel back to its exact source point).
-- FRNet inference, pretrained 19-class, no retraining.
-- Motion labels read from the raw `.label` files (pending Hriday's Day 0 verification).
+- Semantic labels: 19-class, read straight from the raw `.label` files. FRNet was the plan but the available standalone port does not reproduce the trained network (~15% accuracy) — it is flagged non-functional; a real mmdet3d install is a possible later swap.
+- Motion labels read from the raw `.label` files (`moving-*` IDs 250–259). Both semantic and motion are ground truth — disclose it; it isolates the mapping contribution from segmentation error.
 - Patchwork++ for ground segmentation — use as-is, do not reimplement.
 - Reflectivity normalisation (§10.3): `ρ̂ = I·r²/cos θ_inc`. Lane markings and wet road, one byte, no extra sensor.
 - *Stretch:* residual-image MOS; instance clustering by connected components **on the range image**, not DBSCAN on raw points.
@@ -124,7 +124,7 @@ Split/merge mathematics (Aakash), segmentation (JP), metric definitions (Aakash/
 | Day | Exit criterion |
 |---|---|
 | 0 | Static-wall test passes. Dashboard renders a mock map. Download running. |
-| 1 | FRNet end-to-end on one frame. Range image + inverse index. |
+| 1 | Range image + inverse index. Semantic labels from `.label` files (FRNet dropped). |
 | 2 | Motion labels wired. Patchwork++ integrated. Reflectivity live. |
 | 3 | **Ghost toggle: off → trails behind moving cars. On → gone.** Cell boundaries visible. |
 | 4 | Full sequence runs without crashing. Instance clustering *(stretch)*. |

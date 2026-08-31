@@ -1,0 +1,58 @@
+# FRNet pretrained SemanticKITTI checkpoint (full frustum-point fusion model)
+# Checkpoint: frnet-semantickitti_seg.pth (73.3% mIoU on SemanticKITTI)
+# Source: Xu, Kong, Shuai & Liu, "FRNet: Frustum-Range Networks for Scalable LiDAR Segmentation," IEEE TIP 2025
+# Architecture: FRNet with FrustumFeatureEncoder + FRNetBackbone + FRHead
+# Input: Raw 3D points (x, y, z, intensity) + spherical projection to 64x512 frustum
+# Output: Per-point 20-class predictions (19 semantic + 1 ignore at index 19)
+
+model:
+  name: "FRNet"
+  num_classes: 20           # 19 semantic (0-18) + 1 ignore (19)
+  # FRNet is disabled (the standalone port is non-functional -- see
+  # src/perception/semantics.py). This path is only read if someone re-enables
+  # FRNetInference; override it with the VRGRID_FRNET_CHECKPOINT env var.
+  checkpoint: "checkpoints/frnet-semantickitti_seg.pth"
+  # Range image / frustum projection parameters (HDL-64E on KITTI)
+  input_height: 64
+  input_width: 512
+  fov_up_deg: 2.0
+  fov_down_deg: -24.8
+  ignore_index: 19
+
+  # FRNet class order (from configs/_base_/datasets/semantickitti_seg.py labels_map):
+  # Original SK label → FRNet class index
+  # 0,1,13,16,52,60,99,252,256,257,259 → 19 (ignore/unlabeled)
+  # 10→0, 11→1, 15→2, 18→3, 20→4, 30→5, 31→6, 32→7, 40→8, 44→9, 48→10, 49→11, 50→12, 51→13, 70→14, 71→15, 72→16, 80→17, 81→18
+  # Model outputs 0-18 = semantic classes, 19 = ignore
+  class_names:
+    - "car"             # 0
+    - "bicycle"         # 1
+    - "motorcycle"      # 2
+    - "truck"           # 3
+    - "other-vehicle"   # 4
+    - "person"          # 5
+    - "bicyclist"       # 6
+    - "motorcyclist"    # 7
+    - "road"            # 8
+    - "parking"         # 9
+    - "sidewalk"        # 10
+    - "other-ground"    # 11
+    - "building"        # 12
+    - "fence"           # 13
+    - "vegetation"      # 14
+    - "trunk"           # 15
+    - "terrain"         # 16
+    - "pole"            # 17
+    - "traffic-sign"    # 18
+    - "unlabeled"       # 19 (ignore)
+
+# Sensor configuration for HDL-64E (KITTI)
+sensor:
+  height_m: 1.73
+  phi_min_deg: -24.8       # vertical FOV, bottom ring
+  phi_max_deg: 2.0         # vertical FOV, top ring
+  num_rings: 64            # range-image height H
+  num_azimuth: 512         # range-image width W
+  # range_image.py derives the bin widths: d_theta = 2*pi/W,
+  # d_phi = (phi_max - phi_min)/H. The old fixed d_theta_deg: 0.2 /
+  # d_phi_deg: 0.427 keys implied an 1800-wide image and are no longer read.
