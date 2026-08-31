@@ -17,6 +17,10 @@ dash = ["rerun-sdk>=0.16"]
 # ground tests; the Patchwork++-specific tests skip.
 perception = ["pypatchworkpp>=1.2"]
 dev = ["pytest>=7.4", "ruff>=0.4"]
+# Figures only. Deliberately NOT in `dev`: CI does not draw, and a plotting
+# stack in the test image buys nothing. `regret_plot.py` writes its CSV
+# either way and says so when the figure is skipped.
+report = ["matplotlib>=3.7"]
 
 # The repo is laid out by OWNER (src/grid = Aakash, src/gpu = Shrestha, ...) so
 # that two people rarely touch the same file. These mappings make that layout
