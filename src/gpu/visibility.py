@@ -143,12 +143,23 @@ def spherical_project(x_m, y_m, z_m, shape, sensor: "Sensor | None" = None, xp=n
     xp.sqrt(r, out=r)
 
     # Azimuth wraps, so u is always in view; only elevation can leave the image.
+    #
+    # Column 0 is azimuth -pi and u INCREASES with atan2(y, x). That is JP's
+    # convention, documented at the head of `perception/range_image.py`, and it
+    # is authoritative because the image this kernel gathers out of is his:
+    #     u = floor((azimuth + pi) / d_theta) % W,  d_theta = 2 pi / W
+    # This function ran the axis the other way until it was checked against his
+    # projection -- u_here + u_JP == W - 1 for every point, a clean mirror. The
+    # consequence was not a crash: the gather read the pixel diametrically
+    # opposite the cell, so eq (32) compared a cell in front of the vehicle
+    # against the beam behind it. Ghosts would survive and real structure would
+    # be cleared, and the map would look entirely plausible while it happened.
+    # `test_columns_match_jp_projection` pins the two together.
     xp.arctan2(y, x, out=t1)
-    xp.divide(t1, xp.pi, out=t1)
-    xp.subtract(1.0, t1, out=t1)
-    xp.multiply(t1, 0.5 * width, out=t1)
+    xp.add(t1, xp.pi, out=t1)
+    xp.multiply(t1, width / (2.0 * xp.pi), out=t1)
     xp.floor(t1, out=t1)
-    xp.clip(t1, 0, width - 1, out=t1)
+    xp.mod(t1, width, out=t1)
     xp.copyto(u, t1, casting="unsafe")
 
     phi_min = xp.radians(sensor.phi_min_deg)

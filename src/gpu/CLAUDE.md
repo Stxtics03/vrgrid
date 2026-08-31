@@ -163,6 +163,29 @@
   implementation where SAFE is never true, and on a uniform-random map SAFE
   fires ~150 times in 120 maps, so the test asserts a floor on how often it
   saw its own antecedent and generates terrain-shaped maps to get there.
+- **`spherical_project` ran the azimuth axis backwards for three days.** JP's
+  `perception/range_image.py` is authoritative -- column 0 is azimuth -pi and u
+  INCREASES with `atan2(y, x)` -- and this kernel gathers out of his image, so
+  a mirrored axis meant eq (32) compared a cell in front of the vehicle against
+  the beam behind it. `u_here + u_JP == W - 1` for every point, exactly. Every
+  other test in `test_visibility.py` builds its own image and is therefore
+  blind to the convention; `test_columns_match_jp_projection` is the only one
+  that can see it, and it was written after the fact. Two projections in one
+  system is what `docs/frames.md` exists to prevent, and the second one was
+  mine.
+- **A cell's visibility height is `ceiling_height`, not `ground_height`.** A
+  cell whose returns are all non-ground has `w_sum == 0` and reads
+  `ground_height == 0`, and 0 cm is the datum, not "no information". Projecting
+  a parked car at 0 aims the ray 1.73 m below the sensor and lands it on a
+  different image row. Measured on the Gate 3 scene: all 379 car cells read
+  ground 0 while the ceiling carried the real 34 cm, and not one ghost cleared.
+  `ceiling_height` is the lowest thing overhead, which is the surface that
+  actually stops the beam.
+- **⚑ `occupancy_state()` allocates 8.19 MB per call** -- full-grid temporaries
+  over 910,000 slots -- and the frame loop needs it every frame to find the
+  cleanup's candidates. That is `src/grid/fusion.py`, not mine, and it is the
+  largest single per-frame allocation in the system, ahead of `ring_of`'s 6.96
+  MB. Both are in the Gate 3 review.
 - **No OptiX / RT cores.** Unsupported on Jetson; visibility cleanup is already
   O(1) per cell by range-image comparison. Future-work line only.
 

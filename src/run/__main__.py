@@ -13,10 +13,19 @@ Stages (all JP's, `src/perception/`):
     ground.segment_ground() Patchwork++ ground / non-ground mask
     reflectivity.normalise() rho_hat -> one byte  (KITTI: rho_hat = I; the
                              eq-31 r^2/cos terms are firmware-redundant here)
-    grid.scatter()          << STUB on this branch -- Aakash's grid is not here yet
+
+then the map back end, in `engine.MapEngine` (see that file for the order):
+
+    bin -> scatter -> fuse -> visibility cleanup -> shift
 
 The dashboard (`--viz` / `--save`) renders the real per-frame output, replacing
 the Day-0 synthetic plane/boxes/slope one layer at a time via `--color-by`.
+
+⚑ `--show-ghosts` is the Gate 3 toggle and it now drives BOTH halves: the
+  viewer keeps the moving returns in the main cloud, AND the map stops running
+  §10.4, so the ghost trails stay in the cells. Until the engine existed it
+  drove only the first, which filters the input cloud on the ground-truth
+  `moving-*` label and demonstrates nothing about the mapping engine.
 """
 
 import argparse
@@ -24,6 +33,7 @@ from dataclasses import dataclass
 
 import numpy as np
 from vrgrid.grid import schedule as schedule_mod
+from vrgrid.run.engine import MapEngine
 
 
 @dataclass
@@ -99,7 +109,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="how the dashboard colours the point cloud",
     )
     p.add_argument("--show-ghosts", action="store_true",
-                   help="keep moving points in the main cloud (default: split to world/ghosts)")
+                   help="Gate 3 toggle OFF: keep moving points in the main cloud "
+                        "and stop running the map's visibility cleanup, so ghost "
+                        "trails stay in the cells (default: both on)")
+    p.add_argument("--no-map", action="store_true",
+                   help="perception only; skip the map back end entirely")
+    p.add_argument("--clip-class-ids", action="store_true",
+                   help="clip semantic ids to 15 so fusion's 4-bit candidate "
+                        "accepts them (math §10.2). Corrupts the class layer; "
+                        "the real fix is the 5/3 split, a room decision")
     p.add_argument("--palette", default="semantickitti", choices=["semantickitti", "groups"],
                    help="class colours: the 19-class standard, or 7 colourblind-safe groups")
     p.add_argument("--no-patchworkpp", action="store_true", help="use the semantic-class ground proxy")
@@ -122,15 +140,35 @@ def main(argv=None) -> int:
                             color_by=args.color_by, ghost_removal=not args.show_ghosts,
                             palette=args.palette)
 
-    n = 0
+    engine = None
+    if not args.no_map:
+        engine = MapEngine(sched, ghost_removal=not args.show_ghosts,
+                           clip_class_ids=args.clip_class_ids)
+        print(f"map: {engine.handle.allocated_slots:,} slots preallocated, "
+              f"ghost removal {'OFF' if args.show_ghosts else 'ON'}")
+
+    n, cleared, protected = 0, 0, 0
     for frame in iter_pipeline(args.seq, args.frames, use_patchworkpp=not args.no_patchworkpp):
+        counters = engine.step(frame) if engine is not None else None
+        if counters is not None:
+            cleared += counters.cleared
+            protected += counters.protected
         if view is not None:
             view.log_frame(frame)
         n += 1
         if n % 20 == 0:
-            print(f"  frame {frame.index}: {len(frame.points_sensor):,} pts")
+            msg = f"  frame {frame.index}: {len(frame.points_sensor):,} pts"
+            if counters is not None:
+                msg += (f", {counters.occupied:,} occupied cells, "
+                        f"{counters.cleared:,} cleared, {counters.protected:,} protected")
+            print(msg)
 
     print(f"done: {n} frames, sequence {args.seq}")
+    if engine is not None:
+        # The number the Gate 3 demo is actually about. With --show-ghosts it
+        # is zero by construction, which is the point of printing it.
+        print(f"ghost removal: {cleared:,} cells cleared, {protected:,} spared by "
+              f"the current-return guard")
     if args.save:
         print(f"recording written to {args.save}")
     return 0

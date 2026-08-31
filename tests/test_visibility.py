@@ -8,6 +8,7 @@ second is the negative control that proves the first is testing something.
 import numpy as np
 import pytest
 from vrgrid.gpu.visibility import (
+    HDL64E,
     NO_RETURN,
     Sensor,
     apply_miss,
@@ -335,3 +336,50 @@ def test_the_scratch_path_matches_the_readable_one():
     fast = np.zeros_like(r)
     _delta_into(fast, r, np.zeros_like(r), SENSOR, floor_m=0.30)
     assert np.allclose(fast, clear_tolerance_m(r, SENSOR, floor_m=0.30))
+
+
+# --- the two projections in this system must agree ---------------------------
+
+def test_columns_match_jp_projection():
+    """`spherical_project` and `perception.range_image.project` must land a
+    point in the same pixel, or eq (32) compares a cell against the wrong beam.
+
+    This kernel gathers out of JP's range image, so his convention is the
+    authoritative one: column 0 is azimuth -pi and u increases with
+    atan2(y, x). This function ran the axis backwards until this test existed
+    -- u_here + u_JP == W - 1 for every point, a clean mirror -- and nothing
+    caught it, because every other test in this file builds its own image and
+    is therefore blind to the convention. The failure it would have produced
+    is the dangerous kind: the gather reads the pixel diametrically opposite
+    the cell, so ghosts survive, real structure is cleared, and the map still
+    looks plausible.
+    """
+    ri_mod = pytest.importorskip("vrgrid.perception.range_image")
+
+    rng = np.random.default_rng(0)
+    n = 20_000
+    r = rng.uniform(5.0, 80.0, n)
+    az = rng.uniform(-np.pi, np.pi, n)
+    el = rng.uniform(np.radians(-24.0), np.radians(1.5), n)
+    x = r * np.cos(el) * np.cos(az)
+    y = r * np.cos(el) * np.sin(az)
+    z = r * np.sin(el)                      # sensor frame
+
+    image, inverse = ri_mod.project(np.column_stack([x, y, z, np.ones(n)]))
+    height, width = image.shape[:2]
+
+    # Vehicle frame is the sensor frame lifted by the sensor height.
+    u, v, _, _ = spherical_project(x, y, z + HDL64E.height_m, (height, width))
+
+    # The inverse index names the point that won each pixel; only those points
+    # can be compared, since a losing return legitimately has no pixel.
+    jp_u = np.full(n, -1)
+    jp_v = np.full(n, -1)
+    rows, cols = np.nonzero(inverse >= 0)
+    jp_u[inverse[rows, cols]] = cols
+    jp_v[inverse[rows, cols]] = rows
+    won = jp_u >= 0
+
+    assert won.sum() > n // 2, "too few winning returns to be a real comparison"
+    assert np.array_equal(np.asarray(u)[won], jp_u[won])
+    assert np.array_equal(np.asarray(v)[won], jp_v[won])
