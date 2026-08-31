@@ -489,8 +489,12 @@ def print_table(t, alloc, frame):
               f"problem together. See this script's docstring.")
 
 
-def run_real(args):
+def run_real(args, sched=None):
     """Time a real sequence: every stage, front end included.
+
+    `sched` overrides `args.schedule`, so a caller sweeping schedules --
+    `ablation_table.py --seq` -- can pass a constructed uniform baseline that
+    has no config name to load.
 
     This is the table Day 6 asks for, and the one the synthetic path cannot
     produce -- `iter_pipeline` and `MapEngine` both take the same Timer, and
@@ -501,7 +505,8 @@ def run_real(args):
     from vrgrid.run.engine import MapEngine
 
     t = Timer(stages=STAGES)
-    engine = MapEngine(load(args.schedule), max_points=args.points,
+    engine = MapEngine(load(args.schedule) if sched is None else sched,
+                       max_points=args.points,
                        clip_class_ids=args.clip_class_ids, timer=t)
 
     # `total` has to span the WHOLE frame -- perception AND the map -- and the

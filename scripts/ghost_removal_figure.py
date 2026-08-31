@@ -153,20 +153,22 @@ def draw(panels, counts, path, frames, car_x_now):
         return False
 
     fig, axes = plt.subplots(1, 2, figsize=(11.0, 5.0), sharex=True, sharey=True)
-    for ax, (title, (x, y)), n_trail in zip(axes, panels, counts):
-        keep = (x > -2.0) & (x < WALL_X + 2.0) & (np.abs(y) < 10.0)
-        ghost = trail_mask(x, y, car_x_now) & keep
+    for ax, (title, (x, y), ghost_mask), n_trail in zip(axes, panels, counts):
+        keep = np.ones(len(x), bool) if car_x_now is None else (
+            (x > -2.0) & (x < WALL_X + 2.0) & (np.abs(y) < 10.0))
+        ghost = ghost_mask & keep
         ax.scatter(x[keep & ~ghost], y[keep & ~ghost], s=1.4, c="#8A8F98",
                    linewidths=0, label="static map")
         if ghost.any():
             ax.scatter(x[ghost], y[ghost], s=3.2, c="#C44E52", linewidths=0,
                        label=f"ghost cells ({n_trail:,})")
-        ax.add_patch(Rectangle((car_x_now - CAR_HALF, CAR_Y - CAR_HALF),
-                               2 * CAR_HALF, 2 * CAR_HALF, fill=False,
-                               edgecolor="#3B7DD8", linewidth=1.4, zorder=5))
-        ax.annotate("car now", (car_x_now, CAR_Y + CAR_HALF),
-                    textcoords="offset points", xytext=(0, 6), ha="center",
-                    fontsize=8, color="#3B7DD8")
+        if car_x_now is not None:
+            ax.add_patch(Rectangle((car_x_now - CAR_HALF, CAR_Y - CAR_HALF),
+                                   2 * CAR_HALF, 2 * CAR_HALF, fill=False,
+                                   edgecolor="#3B7DD8", linewidth=1.4, zorder=5))
+            ax.annotate("car now", (car_x_now, CAR_Y + CAR_HALF),
+                        textcoords="offset points", xytext=(0, 6), ha="center",
+                        fontsize=8, color="#3B7DD8")
         ax.set_title(title, fontsize=10.5)
         ax.set_xlabel("x (m, world)")
         ax.set_aspect("equal")
@@ -176,31 +178,88 @@ def draw(panels, counts, path, frames, car_x_now):
     fig.suptitle("Ghost removal in the MAP, not the point cloud (math §10.4)",
                  fontsize=12)
     fig.text(0.5, 0.015, CAVEAT, ha="center", fontsize=7.5, color="#B4342F")
-    fig.text(0.995, 0.015, f"{frames} frames, car {CAR_START_X:.0f} m -> "
-             f"{CAR_END_X:.0f} m", ha="right", fontsize=7.5, color="0.5")
-    fig.tight_layout(rect=(0, 0.05, 1, 0.99))
+    tail = (f"car {CAR_START_X:.0f} m -> {CAR_END_X:.0f} m" if car_x_now is not None
+            else "ghosts identified by the GT moving-* label")
+    # Inside the right-hand axes rather than in the figure footer: at this
+    # aspect ratio two footer lines and the x-labels all land on top of each
+    # other.
+    axes[1].text(0.995, 0.02, f"{frames} frames, {tail}",
+                 transform=axes[1].transAxes, ha="right", va="bottom",
+                 fontsize=7.5, color="0.5")
+    fig.tight_layout(rect=(0, 0.07, 1, 0.99))
     fig.savefig(path, bbox_inches="tight")
     fig.savefig(path.with_suffix(".png"), dpi=200, bbox_inches="tight")
     plt.close(fig)
     return True
 
 
+def run_real(seq, frames, ghost_removal, clip_class_ids, no_patchworkpp):
+    """Replay a real sequence and return the map plus the cells moving returns
+    ever touched.
+
+    On real data there is no known car lane to count, so a ghost is defined the
+    only way ground truth allows: a cell some `moving-*` return was binned into.
+    Whether it is STILL occupied at the end is the question the figure asks.
+    """
+    from vrgrid.run.__main__ import iter_pipeline
+
+    engine = MapEngine(load("5/10/20/40"), ghost_removal=ghost_removal,
+                       clip_class_ids=clip_class_ids)
+    counters, ever, current = [], set(), set()
+    for frame in iter_pipeline(seq, frames, use_patchworkpp=not no_patchworkpp):
+        counters.append(engine.step(frame))
+
+        # After step(), because step() shifts the ring windows before it bins;
+        # binning against the pre-shift windows would name different slots.
+        moving = np.asarray(frame.moving)[:engine.max_points]
+        current = set()
+        if moving.any():
+            pts = frame.points_sensor[:engine.max_points]
+            world = frame.points_world[:engine.max_points]
+            idx = engine.bin(pts[moving, 0], pts[moving, 1],
+                             world[moving, 0], world[moving, 1])
+            current = {int(i) for i in idx[idx >= 0]}
+            ever |= current
+
+    # A ghost is a cell some moving return passed through and then LEFT. Cells
+    # the object still occupies in the final frame are not a trail, they are an
+    # object, and the current-return guard is supposed to protect them.
+    trail = ever - current
+    slots, x, y, _ = engine.occupied_cells()
+    ghost = np.fromiter((int(s) in trail for s in slots), bool, len(slots))
+    return engine, (x, y), ghost, counters
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--frames", type=int, default=14)
+    ap.add_argument("--seq", default=None,
+                    help="draw a REAL sequence (needs $VRGRID_DATA_ROOT); "
+                         "ghosts are the cells moving-* returns touched")
+    ap.add_argument("--no-patchworkpp", action="store_true")
+    ap.add_argument("--clip-class-ids", action="store_true",
+                    help="--seq only: clip semantic ids to 15 (math §10.2)")
     ap.add_argument("--out", default="docs/figures")
     args = ap.parse_args()
 
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
 
-    off_engine, off_xy, off_counters, track = run(args.frames, ghost_removal=False)
-    on_engine, on_xy, on_counters, _ = run(args.frames, ghost_removal=True)
-    car_now = track[-1]
+    if args.seq:
+        off_engine, off_xy, off_ghost, off_counters = run_real(
+            args.seq, args.frames, False, args.clip_class_ids, args.no_patchworkpp)
+        on_engine, on_xy, on_ghost, on_counters = run_real(
+            args.seq, args.frames, True, args.clip_class_ids, args.no_patchworkpp)
+        car_now, track = None, []
+    else:
+        off_engine, off_xy, off_counters, track = run(args.frames, ghost_removal=False)
+        on_engine, on_xy, on_counters, _ = run(args.frames, ghost_removal=True)
+        car_now = track[-1]
+        off_ghost = trail_mask(*off_xy, car_now)
+        on_ghost = trail_mask(*on_xy, car_now)
 
-    n_off = int(trail_mask(*off_xy, car_now).sum())
-    n_on = int(trail_mask(*on_xy, car_now).sum())
+    n_off, n_on = int(off_ghost.sum()), int(on_ghost.sum())
 
     print(f"{'':<22}{'occupied':>10}{'ghost cells':>13}{'cleared':>9}{'protected':>11}")
     print("-" * 65)
@@ -214,8 +273,8 @@ def main() -> None:
           f"were spared by the current-return\nguard -- the wall and the ground, which the "
           f"cleanup must not eat.")
 
-    off_m, on_m = trail_mask(*off_xy, car_now), trail_mask(*on_xy, car_now)
-    if on_m.any() and off_m.any():
+    off_m, on_m = off_ghost, on_ghost
+    if car_now is not None and on_m.any() and off_m.any():
         ox, mx = off_xy[0][off_m], on_xy[0][on_m]
         print(f"\nThe residual is the FRESH end of the trail: with the cleanup on it "
               f"spans\n{mx.min():.1f}-{mx.max():.1f} m against {ox.min():.1f}-{ox.max():.1f} m "
@@ -233,8 +292,8 @@ def main() -> None:
                 w.writerow([c.index, f"{car_x:.2f}", mode, c.occupied, c.tested,
                             c.cleared, c.protected])
 
-    panels = [(f"ghost removal OFF  --  {n_off:,} ghost cells", off_xy),
-              (f"ghost removal ON  --  {n_on:,} ghost cells", on_xy)]
+    panels = [(f"ghost removal OFF  --  {n_off:,} ghost cells", off_xy, off_ghost),
+              (f"ghost removal ON  --  {n_on:,} ghost cells", on_xy, on_ghost)]
     if draw(panels, (n_off, n_on), out / "ghost_removal.svg", args.frames, car_now):
         print(f"\nwrote {out / 'ghost_removal.csv'}, {out / 'ghost_removal.svg'} "
               f"and {out / 'ghost_removal.png'}")

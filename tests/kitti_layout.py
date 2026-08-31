@@ -146,12 +146,22 @@ def street_scan(rng, n_ground=6000, n_wall=9000, n_pole=1200, car_x=None):
 
 
 def write_sequence(root, sequence: str = "99", n_frames: int = 6,
-                   step_m: float = 2.0, seed: int = 0, moving_car: bool = True):
+                   step_m: float = 2.0, seed: int = 0, moving_car: bool = True,
+                   car_step_m: float = 4.0):
     """Write `n_frames` in the layout `perception.loader` reads.
 
     The vehicle drives along +x in the world at `step_m` per frame, and the
     scene is regenerated in the SENSOR frame each frame -- which is what a real
     sensor gives you, and what makes the poses do any work.
+
+    ⚑ The car has to move in the WORLD, not just in the sensor frame. The first
+      version put it at sensor-frame `14 - i * step_m`, which exactly cancels
+      the vehicle's own motion: a car labelled `moving-car` that sat at world
+      x 13-15 m for the whole sequence. It was a parked car wearing a moving
+      label, so ghost removal had nothing to remove and
+      `ghost_removal_figure.py --seq` cleared 1.0% of it -- correct behaviour,
+      measured against a fixture that lied. `car_step_m` is the car's world
+      speed; it pulls away at `car_step_m - step_m` in the sensor frame.
     """
     root = Path(root)
     seq_dir = root / "sequences" / sequence
@@ -168,7 +178,8 @@ def write_sequence(root, sequence: str = "99", n_frames: int = 6,
     rng = np.random.default_rng(seed)
     poses = []
     for i in range(n_frames):
-        car_x = (14.0 - i * step_m) if moving_car else None
+        # sensor-frame x, so that world x = 14 + i * car_step_m
+        car_x = (14.0 + i * (car_step_m - step_m)) if moving_car else None
         points, labels = street_scan(rng, car_x=car_x)
         points.tofile(seq_dir / "velodyne" / f"{i:06d}.bin")
         labels.tofile(seq_dir / "labels" / f"{i:06d}.label")

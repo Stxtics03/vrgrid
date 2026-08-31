@@ -54,6 +54,15 @@ UNIFORM_CELLS_M = [0.05, 0.10, 0.20, 0.40, 0.80]
 # be comparing a different system.
 STAGES = ("bin", "scatter", "fuse", "cleanup", "shift", "measured")
 
+# With --seq the front end is measured too, so the per-stage table widens.
+REAL_STAGES = ("load", "transform", "range_image", "semantics", "motion",
+               "ground", "reflectivity", "bin", "scatter", "fuse", "cleanup",
+               "shift")
+
+# Perception: the same work whatever schedule sits under it.
+PERCEPTION_STAGES = ("load", "transform", "range_image", "semantics", "motion",
+                     "ground", "reflectivity")
+
 
 def thresholds_digest(path: Path = CONFIG):
     """SHA-256 of the config as bytes, not of the parsed dict.
@@ -70,6 +79,46 @@ def schedules():
         yield load(name), False
     for cell in UNIFORM_CELLS_M:
         yield uniform_schedule(cell), True
+
+
+def measure_real(sched, args, repeats):
+    """The same row, timed on a real sequence instead of a synthetic sweep.
+
+    Every schedule replays the SAME frames, so the comparison stays fair -- the
+    sequence is the fixed input and the schedule is the only thing varying,
+    which is what makes this an ablation rather than seven measurements.
+    """
+    from types import SimpleNamespace as NS
+
+    per_run, handle = [], None
+    for _ in range(repeats):
+        run_args = NS(seq=args.seq, frames=args.frames, points=args.points,
+                      schedule=None, clip_class_ids=args.clip_class_ids,
+                      no_patchworkpp=args.no_patchworkpp)
+        t, engine, _ = tt.run_real(run_args, sched=sched)
+        per_run.append(t.summary())
+        handle = engine.handle
+
+    def across(stage, key):
+        vals = [r[stage][key] for r in per_run if stage in r]
+        return float(np.median(vals)) if vals else float("nan")
+
+    row = {
+        "schedule": sched.name,
+        "logical_cells": handle.logical_cells,
+        "allocated_slots": handle.allocated_slots,
+        "map_mb": handle.logical_cells * 12 / 1e6,
+        "total_mb": bytes_allocated(handle) / 1e6,
+        "repeats": repeats,
+    }
+    for stage in REAL_STAGES:
+        row[f"{stage}_p50_ms"] = across(stage, "p50_ms")
+        row[f"{stage}_p99_ms"] = across(stage, "p99_ms")
+    row["measured_p50_ms"] = across("total", "p50_ms")
+    row["measured_p99_ms"] = across("total", "p99_ms")
+    totals = [r["total"]["p50_ms"] for r in per_run if "total" in r]
+    row["measured_p50_lo"], row["measured_p50_hi"] = min(totals), max(totals)
+    return row
 
 
 def measure(sched, thresholds, args, repeats):
@@ -124,6 +173,14 @@ def main() -> None:
     ap.add_argument("--cells", type=int, default=150_000,
                     help="candidate cells for the §10.4 cleanup row")
     ap.add_argument("--out", default="docs/figures")
+    ap.add_argument("--seq", default=None,
+                    help="ablate on a REAL sequence (needs $VRGRID_DATA_ROOT); "
+                         "every schedule replays the same frames")
+    ap.add_argument("--no-patchworkpp", action="store_true",
+                    help="--seq only: use the semantic-class ground proxy")
+    ap.add_argument("--clip-class-ids", action="store_true",
+                    help="--seq only: clip semantic ids to 15 for fusion's "
+                         "4-bit candidate (math §10.2)")
     ap.add_argument("--expect-thresholds", default=None,
                     help="fail unless configs/thresholds.yaml has this sha256")
     args = ap.parse_args()
@@ -139,7 +196,8 @@ def main() -> None:
                                cells=args.cells, speed_mps=15.0)
     rows = []
     for sched, is_uniform in schedules():
-        row = measure(sched, thresholds, run_args, args.repeats)
+        row = (measure_real(sched, args, args.repeats) if args.seq
+               else measure(sched, thresholds, run_args, args.repeats))
         row["uniform"] = is_uniform
         rows.append(row)
 
@@ -148,9 +206,10 @@ def main() -> None:
 
     print(f"CPU  {tt.cpu_name()}")
     print(f"thresholds  sha256 {digest[:16]}...  ({CONFIG})")
-    print(f"{args.frames} frames x {args.repeats} repeats, {args.points:,} "
-          f"returns/sweep, {args.cells:,} candidate cells,\none sweep shared by "
-          f"every row\n")
+    source = (f"sequence {args.seq}" if args.seq
+              else f"{args.points:,} returns/sweep, {args.cells:,} candidate cells")
+    print(f"{args.frames} frames x {args.repeats} repeats, {source},\n"
+          f"the same input replayed for every row\n")
 
     head = (f"{'schedule':<14}{'cells':>11}{'map MB':>9}{'total MB':>10}"
             f"{'x ours':>8}{'p50 ms':>9}{'range':>15}")
@@ -166,13 +225,30 @@ def main() -> None:
     print("\n* = a frozen ring schedule. The rest are uniform grids at the same "
           "100 m half-width.")
 
-    print("\nper-stage p50 ms")
-    sub = [s for s in STAGES if s != "measured"]
+    # Only the stages that VARY with the schedule. `range_image`,
+    # `reflectivity` and the rest of perception cost the same whatever the map
+    # underneath is, so a column of seven near-identical numbers would be
+    # noise; the fixed cost is reported once, below, and it IS included in the
+    # frame totals above.
+    print("\nper-stage p50 ms (schedule-dependent stages only)")
+    sub = [x for x in STAGES if x != "measured"]
     print(f"{'schedule':<14}" + "".join(f"{s:>10}" for s in sub))
     print("-" * (14 + 10 * len(sub)))
     for r in rows:
         print(f"{r['schedule']:<14}"
               + "".join(f"{r.get(f'{s}_p50_ms', float('nan')):>10.2f}" for s in sub))
+
+    if args.seq:
+        fixed = [x for x in PERCEPTION_STAGES
+                 if any(f"{x}_p50_ms" in r for r in rows)]
+        parts = []
+        for name in fixed:
+            vals = [r[f"{name}_p50_ms"] for r in rows if f"{name}_p50_ms" in r]
+            parts.append(f"{name} {np.median(vals):.2f}")
+        if parts:
+            print(f"\nperception, identical for every row: {', '.join(parts)} ms p50. "
+                  f"Included in\nthe frame totals above, excluded from the columns "
+                  f"because it does not vary.")
 
     # The two things in the per-stage table that a reader should not have to
     # spot for themselves.

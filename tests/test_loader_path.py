@@ -181,3 +181,31 @@ def test_one_timer_covers_the_whole_frame(sequence):
     assert summary["total"]["max_ms"] >= slowest, (
         "the frame is quicker than its slowest stage, so `total` is not "
         "wrapping the whole frame")
+
+
+def test_the_moving_car_actually_moves_in_the_world(sequence):
+    """⚑ A `moving-car` label on a parked car is worse than no car at all.
+
+    The fixture generates the scene in the SENSOR frame, so a car placed at
+    `14 - i * step_m` cancels the vehicle's own motion exactly and sits at
+    world x 13-15 m for the whole sequence: labelled moving, never moves.
+    Ghost removal then has nothing to remove, and
+    `ghost_removal_figure.py --seq` reported clearing 1.0% of the trail --
+    correct behaviour, measured against a fixture that lied. Fixing the car's
+    world speed took the same number to 69.1%.
+
+    A benchmark that quietly measures nothing is the expensive kind of wrong,
+    so this asserts the car is somewhere else every frame.
+    """
+    from vrgrid.run.__main__ import iter_pipeline
+
+    seen = []
+    for frame in iter_pipeline(SEQ, 5, use_patchworkpp=False):
+        moving = np.asarray(frame.moving)
+        assert moving.any(), f"frame {frame.index} has no moving returns"
+        seen.append(float(np.median(frame.points_world[moving, 0])))
+
+    steps = np.diff(seen)
+    assert (steps > 1.0).all(), (
+        f"the moving car advanced {steps} m/frame in the world -- a label "
+        "that says moving on geometry that does not")
