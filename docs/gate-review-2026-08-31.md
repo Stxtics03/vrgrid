@@ -224,11 +224,38 @@ Two things worth saying about correctness specifically:
 | Item | Status |
 |---|---|
 | Visibility scratch in `allocate()` | Blocked on a cap decision — item 4 |
-| Real-data latency numbers | Blocked — no SemanticKITTI on disk |
+| Real-data latency numbers | Blocked — no SemanticKITTI on disk, but the PATH is now tested: `tests/test_loader_path.py` |
 | Map drawn in the dashboard | JP's — the toggle moves cells, the screen shows points |
 | GPU kernels (CuPy path) | Day 6. Everything today is the numpy CPU reference path |
 | `bin_points` in `src/grid/` | Blocked on an ownership decision — item 2 |
 | `ring_of`'s 6.96 MB/frame | `src/grid/lattice.py`, not mine to fix — item 2 |
+
+### One more, found after the meeting was drafted
+
+**`eval/synthetic.py` writes a sequence the real loader cannot read**, and its
+docstring promises the opposite — *"swap `read_sequence` for
+`perception.loader` and sequence 07 when the download lands, and the same
+script prints reportable numbers"*. Two files are in the wrong place: the
+poses go to `sequences/<seq>/poses.txt`, which is exactly the file loader.py's
+header says it ignores in favour of the official `poses/<seq>.txt`, and there
+is no `calib.txt` at all. Nothing had caught it because twelve of the suite's
+twenty skips are "KITTI not present", so that path had never run.
+
+It would have surfaced on Day 5, with the download in, looking like a data
+problem rather than a layout one.
+
+`tests/kitti_layout.py` now writes the layout the loader wants, and
+`tests/test_loader_path.py` runs the whole chain over it —
+loader → transforms → range image → semantics → ground → reflectivity →
+bin/scatter/fuse/cleanup/shift, with warnings as errors. Six tests, and the
+frame chain is pinned: dropping `T_S_V` from `sensor_to_world` fails two of
+them rather than quietly putting the map 1.73 m underground.
+
+**Aakash — the two-line fix belongs in your `write_sequence`** (poses to
+`poses/<seq>.txt`, add a `calib.txt`), and then your docstring's promise is
+true and my fixture can be deleted. I have not touched the file.
+
+---
 
 ## Tomorrow
 
