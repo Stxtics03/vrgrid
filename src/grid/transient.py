@@ -96,7 +96,7 @@ def ingest(gm, points_m, class_id, moving_mask, points_world_m=None) -> int:
     Returns the number of points written.
     """
     from vrgrid.gpu.kernels import quantise_height
-    from vrgrid.grid.lattice import OUTSIDE, i_ring, ring_of
+    from vrgrid.grid.lattice import bin_points
 
     moving_mask = np.asarray(moving_mask, dtype=bool)
     if not np.any(moving_mask):
@@ -106,17 +106,13 @@ def ingest(gm, points_m, class_id, moving_mask, points_world_m=None) -> int:
     world = pts if points_world_m is None else np.asarray(
         points_world_m, dtype=np.float64)[moving_mask]
 
-    rings = ring_of(pts[:, 0], pts[:, 1], gm.schedule, gm.speed_ms)
-    slots = np.full(pts.shape[0], -1, dtype=np.int64)
-    c0 = gm.schedule.base_cell_m
-    for level in range(len(gm.schedule.rings)):
-        sel = rings == level
-        if not np.any(sel):
-            continue
-        k = gm.schedule.k(level)
-        slots[sel] = gm.buffers[level].flat_slot(
-            i_ring(world[sel, 0], c0, k), i_ring(world[sel, 1], c0, k))
-    slots = np.where(rings == OUTSIDE, -1, slots)
+    # The third spelling of the binning stage, now the same one as the other
+    # two. `bin_points` already returns -1 for OUTSIDE, so the separate
+    # `np.where(rings == OUTSIDE, ...)` mask this used to need is gone with it.
+    scratch, out = gm.bin_scratch(pts.shape[0])
+    slots = bin_points(pts[:, 0], pts[:, 1], world[:, 0], world[:, 1],
+                       gm.schedule, gm.buffers, out, scratch,
+                       gm.speed_ms).copy()
 
     keep = (slots >= 0) & (slots < gm.transient["flags"].size)
     if not np.any(keep):

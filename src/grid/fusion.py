@@ -297,7 +297,15 @@ def boyer_moore_update(packed, observed):
 # --- §10.1: three-state occupancy --------------------------------------------
 
 
-def occupancy_state(soa, thresholds=None, slots=None):
+def new_occupancy_scratch(n_slots: int) -> dict:
+    """Working set for `occupancy_state(out=...)`. 2 B per slot -- 1.82 MB over
+    the 910,000 allocated slots, against 8.19 MB of churn per call."""
+    return {"mask": np.zeros(n_slots, np.bool_),
+            "byte": np.zeros(n_slots, np.uint8),
+            "n_slots": int(n_slots)}
+
+
+def occupancy_state(soa, thresholds=None, slots=None, out=None, scratch=None):
     """UNKNOWN / FREE / OCCUPIED for every cell, or for `slots`. Math §10.1.
 
         UNKNOWN   if n < n_min          <- observation count, NOT log-odds
@@ -312,6 +320,21 @@ def occupancy_state(soa, thresholds=None, slots=None):
     cone is 3.74 m of ground the sensor cannot see in any single frame (§1.4),
     and a cell there accumulating free-space evidence from a later frame's
     geometry must not be allowed to report FREE on the strength of it.
+
+    ⚑ Pass `out` and `scratch` on the frame path. Without them this allocates
+      **8.19 MB per call** over 910,000 slots, and the frame loop calls it
+      every frame: the visibility cleanup's candidate set is the currently
+      OCCUPIED cells, and this is the only thing that computes them.
+
+      The cost is not obvious from reading it. `np.where(cond, OCC, FREE)`
+      picks between two Python ints, so numpy chooses int64 -- one int64 array
+      across the grid is 7.28 MB on its own -- and the chain built three of
+      them plus a bool and two uint8 casts, for a uint8 answer. Writing
+      through `out` keeps every intermediate at its natural width.
+
+      `new_occupancy_scratch(n_slots)` sizes the scratch; `out` is uint8 of
+      the same length as the selection. Both optional, because hundreds of
+      unit tests call this once on a throwaway grid and should not have to.
     """
     th = thresholds if thresholds is not None else load_thresholds()
     occ = th["occupancy"]
@@ -322,10 +345,32 @@ def occupancy_state(soa, thresholds=None, slots=None):
     log_odds = soa["log_odds"][sel]
     flags = soa["flags"][sel]
 
-    state = np.where(log_odds > l_occ, OCC_OCCUPIED, OCC_FREE).astype(np.uint8)
-    state = np.where(n < occ["unknown_below_obs"], OCC_UNKNOWN, state)
-    state = np.where(flags & FLAG_BLIND, OCC_UNKNOWN, state)
-    return state.astype(np.uint8)
+    size = len(n)
+    if out is None:
+        out = np.empty(size, np.uint8)
+    elif len(out) < size:
+        raise ValueError(f"out holds {len(out)} of {size} slots")
+    out = out[:size]
+
+    if scratch is None or scratch["n_slots"] < size:
+        mask = np.empty(size, np.bool_)
+        byte = np.empty(size, np.uint8)
+    else:
+        mask, byte = scratch["mask"][:size], scratch["byte"][:size]
+
+    # Order matters and is the section's, not an optimisation: the count wins
+    # over the log-odds, and the blind flag wins over both.
+    out[:] = OCC_FREE
+    np.greater(log_odds, l_occ, out=mask)
+    np.copyto(out, OCC_OCCUPIED, where=mask)
+
+    np.less(n, occ["unknown_below_obs"], out=mask)
+    np.copyto(out, OCC_UNKNOWN, where=mask)
+
+    np.bitwise_and(flags, FLAG_BLIND, out=byte)
+    np.not_equal(byte, 0, out=mask)
+    np.copyto(out, OCC_UNKNOWN, where=mask)
+    return out
 
 
 def is_blind(x_m, y_m, thresholds=None):
@@ -390,7 +435,7 @@ def scatter(gm, points_m, class_id, is_ground, reflectivity=None,
         scatter_atomic,
         scatter_sorted,
     )
-    from vrgrid.grid.lattice import OUTSIDE, i_ring, ring_of
+    from vrgrid.grid.lattice import bin_points
 
     pts = np.asarray(points_m, dtype=np.float64)
     if pts.ndim != 2 or pts.shape[1] != 3:
@@ -402,23 +447,18 @@ def scatter(gm, points_m, class_id, is_ground, reflectivity=None,
         raise ValueError(f"world points {world.shape} do not match {pts.shape}")
     wx, wy = world[:, 0], world[:, 1]
 
-    rings = ring_of(x, y, gm.schedule, gm.speed_ms)
-    slots = np.full(pts.shape[0], -1, dtype=np.int64)
-
-    c0 = gm.schedule.base_cell_m
-    for level in range(len(gm.schedule.rings)):
-        sel = rings == level
-        if not np.any(sel):
-            continue
-        k = gm.schedule.k(level)
-        ix = i_ring(wx[sel], c0, k)      # world: cell identity is absolute
-        iy = i_ring(wy[sel], c0, k)
-        slots[sel] = gm.buffers[level].flat_slot(ix, iy)
+    # One binning function, in the lattice, where the semantics live. This
+    # was composed by hand here -- ring_of, then i_ring per ring, then
+    # flat_slot -- and in three other places, and the four spellings agreeing
+    # was luck rather than design. See `lattice.bin_points`.
+    scratch, out = gm.bin_scratch(pts.shape[0])
+    slots = bin_points(x, y, wx, wy, gm.schedule, gm.buffers, out, scratch,
+                       gm.speed_ms).copy()
 
     # OUTSIDE and out-of-window both come through as -1, which the kernel
     # drops. It must be -1 and not 0: numpy would write cell 0 and pile the
-    # far field onto the origin.
-    slots = np.where(rings == OUTSIDE, -1, slots)
+    # far field onto the origin. `bin_points` returns -1 for both cases, so
+    # the separate OUTSIDE mask this used to apply is gone with it.
 
     ranges = np.linalg.norm(pts, axis=1)
     w_q = quantise_weight(measurement_variance_cm2(ranges))

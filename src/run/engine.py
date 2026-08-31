@@ -36,7 +36,7 @@ from vrgrid.gpu.kernels import (
     quantise_weight,
     scatter_sorted,
 )
-from vrgrid.gpu.shift import RingBuffer, flat_slot_into, new_slot_scratch, shift
+from vrgrid.gpu.shift import RingBuffer, shift
 from vrgrid.gpu.visibility import Sensor, apply_miss, visibility_cleanup
 
 # fusion packs the semantic class into 5 bits since 1 Sep (math §10.2, Gate 3
@@ -45,8 +45,13 @@ from vrgrid.gpu.visibility import Sensor, apply_miss, visibility_cleanup
 # 19, so every real frame now fits and nothing on this path clips. Imported
 # rather than restated: this file held its own `CLASS_MAX = 15` and would have
 # gone on clipping perfectly storable ids after the split landed.
-from vrgrid.grid.fusion import CLASS_MAX, fuse, occupancy_state
-from vrgrid.grid.lattice import i_ring, ring_of
+from vrgrid.grid.fusion import (
+    CLASS_MAX,
+    fuse,
+    new_occupancy_scratch,
+    occupancy_state,
+)
+from vrgrid.grid.lattice import bin_points, new_bin_scratch
 from vrgrid.grid.schedule import load_thresholds
 
 
@@ -122,9 +127,18 @@ class MapEngine:
         self._k = [round(r.cell_m / schedule.base_cell_m) for r in self.handle.rings]
         self._origin = None          # world xy of the vehicle at frame 0
 
-        self.slot_scratch = new_slot_scratch(max_points)
-        self.slot_scratch["out"] = np.zeros(max_points, np.int64)
+        # The frame loop allocates its binning scratch up front rather than on
+        # first use: this object exists to run frames, so there is no case
+        # where paying for it lazily is the better trade.
+        self.bin_scratch = new_bin_scratch(max_points, schedule)
         self.idx = np.zeros(max_points, np.int64)
+
+        # §10.1 over the whole grid, every frame: the cleanup's candidate set
+        # is the currently-OCCUPIED cells and this is the only thing that
+        # computes them. Unpreallocated it allocated 8.19 MB a call.
+        n_slots = self.handle.grid["log_odds"].size
+        self.occ_scratch = new_occupancy_scratch(n_slots)
+        self.occ_state = np.zeros(n_slots, np.uint8)
 
         # From the allocation, not a fresh one: the range image is JP's and it
         # is float32, and `allocate()` sizes the gather buffer to match --
@@ -150,22 +164,8 @@ class MapEngine:
         last ring's half-width; feed vehicle coordinates to `i_ring` and the
         map slides along under the vehicle. Both look right for a few seconds.
         """
-        n = len(xs)
-        level = ring_of(xs, ys, self.sched)
-        idx = self.idx[:n]
-        idx[:] = -1
-        for layout, buf, k in zip(self.handle.rings, self.buffers, self._k):
-            sel = level == layout.ring
-            m = int(np.count_nonzero(sel))
-            if not m:
-                continue
-            idx[sel] = flat_slot_into(
-                buf,
-                i_ring(xw[sel], self.sched.base_cell_m, k),
-                i_ring(yw[sel], self.sched.base_cell_m, k),
-                self.slot_scratch["out"][:m], self.slot_scratch,
-            )
-        return idx
+        return bin_points(xs, ys, xw, yw, self.sched, self.buffers,
+                          self.idx, self.bin_scratch)
 
     # -- the inverse, for the cleanup ---------------------------------------
 
@@ -287,7 +287,8 @@ class MapEngine:
     def _cleanup(self, frame, touched, ego_xy, counters):
         """§10.4 against this frame's range image, then fold the misses into
         occupancy. This is the half the Gate 3 toggle is supposed to switch."""
-        state = occupancy_state(self.handle.grid, self.thresholds)
+        state = occupancy_state(self.handle.grid, self.thresholds,
+                                out=self.occ_state, scratch=self.occ_scratch)
         occupied = np.flatnonzero(state == OCC_OCCUPIED)
         counters.occupied = len(occupied)
         if not len(occupied):
@@ -333,7 +334,9 @@ class MapEngine:
         """Flat slots the map currently calls OCCUPIED. What a 2.5D map view
         should draw, and what the ghost trails live in."""
         return np.flatnonzero(
-            occupancy_state(self.handle.grid, self.thresholds) == OCC_OCCUPIED)
+            occupancy_state(self.handle.grid, self.thresholds,
+                            out=self.occ_state,
+                            scratch=self.occ_scratch) == OCC_OCCUPIED)
 
     def occupied_cells(self):
         """`(slots, x, y, z)` for every OCCUPIED cell, in the WORLD frame.

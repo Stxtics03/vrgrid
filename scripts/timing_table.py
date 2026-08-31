@@ -32,21 +32,35 @@ Whatever load, transform, range_image, semantics and motion cost has to fit
 in the remaining ~41 ms, so the 10 Hz claim is not yet demonstrated; it is
 bounded. Stable to within about 10% across three runs of 200 frames.
 
-**⚑ `bin` is the single largest stage, and nobody owns it.** Turning points
-into flat slots -- `ring_of` for membership, then `i_ring` per ring, then
-`flat_slot` -- is a stage the frame loop must run every frame, and no module
-exports it: it is composed here out of Aakash's lattice functions and my
-storage ones, the same way `scripts/baseline_demo.py` composes a ring-0-only
-version and `src/grid/transient.py` composes another. Three hand-rolled
-copies of the step between perception and scatter is an integration defect
-waiting for the day the three disagree -- and `bin_points` below documents
-two ways to get it wrong that both look correct for the first few seconds.
-It belongs in `src/grid` next to `ring_of`, as one vectorised function over
-the whole sweep. Three measurements for that conversation: 16.2 ms p50,
-21.3 ms p99, and 6.96 MB allocated per frame in masks and fancy-index copies
--- which violates "no allocation in the frame loop" as squarely as the
-scatter scratch did before it was preallocated, and costs more than twice as
-much per frame as the scratch did.
+**✔ `bin` has an owner: `grid.lattice.bin_points`.** Gate 3, item 2. It was
+composed by hand in four places -- here, `fusion.scatter`, `grid/transient.py`
+and `run/engine.py` -- four spellings of one step across three directories,
+agreeing by luck rather than by design. A binning bug does not crash; it
+produces a plausible map.
+
+The rewrite is one vectorised pass with no ring loop at all. The obvious shape
+is a pass per ring over the points that fall in it, and that is what all four
+copies did; it needs the selected world coordinates compacted into a buffer,
+and numpy will not do that without allocating -- `np.compress(..., out=)`
+still built 1.54 MB of internal index at 96,000 selected points. So the ring
+became a per-POINT attribute: `k`, `side`, `x0`, `y0` and `offset` are
+gathered by ring index, and the whole sweep is binned in one pass of
+full-length ufuncs.
+
+Measured here, 120,000 returns, same machine, before and after:
+
+    hand-rolled     6.962 MB/frame    13.64 ms p50
+    bin_points      0.002 MB/frame    12.35 ms p50
+
+The allocation is gone -- that was the point, "no allocation in the frame
+loop" is a hard invariant and a sentence in the report -- and it is 9% faster
+as well, because one pass over the sweep beats four plus four compacting
+copies.
+
+⚑ The last two allocations to go are worth knowing about, because neither
+  appears in a profile as a named allocation: `np.take(table, idx, out=)`
+  builds a full-length bounds-check array in its default `mode="raise"`, and
+  `int64 += bool` casts through numpy's fixed 64 kB internal buffer.
 
 **Real geometry is not random indices.** `bench_scatter.py` draws `idx`
 uniformly over the slots; a LiDAR sweep binned through the ring schedule is
@@ -77,14 +91,12 @@ from vrgrid.gpu.pyramid import build
 from vrgrid.gpu.shift import (
     RingBuffer,
     cells_per_shift,
-    flat_slot_into,
-    new_slot_scratch,
     shift,
 )
 from vrgrid.gpu.timing import SENSOR_HZ, STAGES, Timer
 from vrgrid.gpu.visibility import new_visibility_scratch, visibility_cleanup
 from vrgrid.grid.fusion import fuse
-from vrgrid.grid.lattice import i_ring, ring_of
+from vrgrid.grid.lattice import bin_points, new_bin_scratch
 from vrgrid.grid.schedule import load
 
 # Range image geometry is locked to 64x512 sub-clouds (FLARES; research log
@@ -100,7 +112,7 @@ MAX_RANGE_M = 99.0
 STAGE_OWNER = {
     "load": "JP", "transform": "JP", "range_image": "JP",
     "semantics": "JP", "motion": "JP",
-    "bin": "⚑ nobody", "scatter": "Shrestha", "fuse": "Aakash",
+    "bin": "Aakash", "scatter": "Shrestha", "fuse": "Aakash",
     "split_merge": "Aakash", "cleanup": "Shrestha", "pyramid": "Shrestha",
     "shift": "Shrestha",
 }
@@ -175,40 +187,10 @@ def ring_buffers(handle):
             for r in handle.rings]
 
 
-def bin_points(xv, yv, xw, yw, sched, handle, buffers, scratch, out):
-    """Points -> flat slots. ⚑ The stage no module owns; see the docstring.
-
-    **Two frames, and mixing them is the whole difficulty.** Ring MEMBERSHIP
-    is a question about distance from the sensor, so `ring_of` takes the
-    VEHICLE-frame point (§6.1). The lattice INDEX is global -- the map does
-    not move when the vehicle does -- so `i_ring` takes the WORLD-frame point
-    (§2.1: derived from the base lattice by integer division, never a second
-    float lattice). `flat_slot` then maps that to storage in the ring's
-    toroidal window.
-
-    Feed world coordinates to `ring_of` and every point past the last ring's
-    half-width reads as OUTSIDE once the vehicle has driven that far; feed
-    vehicle coordinates to `i_ring` and the map slides along under the
-    vehicle instead of staying put. Both failures look like a map that works
-    for the first few seconds, which is why this belongs in one reviewed
-    function rather than in three call sites.
-    """
-    level = ring_of(xv, yv, sched)
-    idx = out[:len(xv)]
-    idx[:] = -1
-    for layout, buf in zip(handle.rings, buffers):
-        sel = level == layout.ring
-        n = int(np.count_nonzero(sel))
-        if not n:
-            continue
-        k = round(layout.cell_m / sched.base_cell_m)
-        idx[sel] = flat_slot_into(
-            buf,
-            i_ring(xw[sel], sched.base_cell_m, k),
-            i_ring(yw[sel], sched.base_cell_m, k),
-            scratch["out"][:n], scratch,
-        )
-    return idx
+# `bin_points` used to be defined here, by hand, and the docstring said so:
+# "the stage no module owns". It has an owner now -- `grid.lattice.bin_points`,
+# one vectorised pass with every intermediate preallocated -- and this script
+# times that rather than a fourth private copy of it. Gate 3, item 2.
 
 
 def payload(z_m, range_m, rng, n):
@@ -325,8 +307,7 @@ class Frame:
         # `transforms` hands the frame loop world-frame points -- and it is
         # JP's stage, so the add happens outside the timed region.
         self.ego = np.zeros(args.points, np.float64)
-        self.slot_scratch = new_slot_scratch(args.points)
-        self.slot_scratch["out"] = np.zeros(args.points, np.int64)
+        self.bin_scratch = new_bin_scratch(args.points, self.sched)
         self.idx = np.zeros(args.points, np.int64)
 
     def cells_shifted(self) -> int:
@@ -339,8 +320,8 @@ class Frame:
         x, y, cols = self.sweeps[i % len(self.sweeps)]
         np.add(x, i * self.per_frame_m, out=self.ego)   # untimed: JP's transform
         with ctx("bin"):
-            idx = bin_points(x, y, self.ego, y, self.sched, h, self.buffers,
-                             self.slot_scratch, self.idx)
+            idx = bin_points(x, y, self.ego, y, self.sched, self.buffers,
+                             self.idx, self.bin_scratch)
         with ctx("scatter"):
             agg = scatter_sorted(idx, **cols, scratch=h.scratch)
         with ctx("fuse"):
@@ -480,12 +461,10 @@ def print_table(t, alloc, frame):
           f"perception. The honest\n  sentence is \"the mapping back end costs "
           f"{m['p99_ms']:.1f} ms at p99\", never \"we run at {h['fps_p99']:.0f} FPS\".")
     if wide and alloc.get("bin", 0) > 1e6:
-        print(f"\n⚑ `bin` allocates {alloc['bin'] / 1e6:.2f} MB per frame and is "
-              f"{summary['bin']['p50_ms']:.1f} ms p50. No module owns it -- it is "
-              f"composed\n  here, and again in baseline_demo.py, and again in "
-              f"grid/transient.py. One\n  vectorised binning function in src/grid "
-              f"would fix the latency, the allocation\n  and the three-copies "
-              f"problem together. See this script's docstring.")
+        print(f"\n⚑ `bin` allocates {alloc['bin'] / 1e6:.2f} MB per frame. It is "
+              f"`grid.lattice.bin_points`,\n  which is supposed to allocate "
+              f"nothing -- so this is a regression, not a\n  known gap. Check "
+              f"for a `np.take` without mode=\"clip\" or a mixed-dtype ufunc.")
 
 
 def run_real(args, sched=None):

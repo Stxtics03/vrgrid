@@ -145,3 +145,18 @@ Format:
 **Source:** `src/grid/fusion.py` (§10.2 header), `docs/sih-math.md` §10.2 and §7.1, `tests/test_fusion.py::test_saturation_is_what_bounds_the_guarantee`.
 
 **So what:** Unblocks the first end-to-end frame on JP's GT labels — 19-class frames now fuse without clipping (`test_a_realistic_label_set_fuses_without_clipping`, on the real loader path). Revives the semantic gate's class criterion and makes `terrain` storable for §7.1. **The report must not say "guaranteed majority" without the running-excess condition attached**; the honest sentence is the time-constant one. Cell struct unchanged at 12 bytes, so no memory figure moves.
+
+---
+## 2026-09-01 — Aakash
+**Module:** D1 — Grid, lattice, fusion
+**Finding:** Gate 3 item 2 closed. Point→slot binning now has one owner, `grid.lattice.bin_points`, and the four hand-rolled copies (`fusion.scatter`, `grid/transient.py`, `run/engine.py`, `scripts/timing_table.py` — four spellings across three directories) are deleted. **The rewrite has no ring loop at all.** The obvious shape is a pass per ring over the points falling in it, which is what all four copies did; it needs the selected world coordinates compacted into a preallocated buffer, and numpy will not do that without allocating — `np.compress(..., out=)` still built 1.54 MB of internal index at 96,000 selected points. So the ring became a per-*point* attribute: `k`, `side`, `x0`, `y0`, `offset` are gathered by ring index and the whole sweep is binned in one pass of full-length ufuncs.
+
+Measured, 120,000 returns, same machine: **6.962 MB/frame → 0.002 MB/frame, and 13.64 → 12.35 ms p50** (9% faster — one pass beats four plus four compacting copies). `fusion.occupancy_state` gained an `out=`/`scratch=` path: **8.19 MB/call → 0**, and even the unpreallocated path fell to 2.73 MB, because `np.where` picking between two Python ints chooses int64 and one int64 array over 910,000 slots is 7.28 MB — for a uint8 answer.
+
+Whole frame, from `scripts/timing_table.py --alloc`: **8.15 → 1.31 MB/frame**, p99 **74.7 → 49.4 ms**. `engine.step()` peaks at 1.15 MB and is now under a flat cap rather than one that subtracted the two grid allocations.
+
+**⚑ Two allocations that no profile names.** `np.take(table, idx, out=)` builds a full-length bounds-check array under its default `mode="raise"` — 0.96 MB a call, six calls a frame; `mode="clip"` is allocation-free and 5× faster, and is safe here only because the ring index is explicitly clamped first. And `int64 += bool` casts through numpy's fixed 64 kB internal buffer; a masked scalar increment avoids it.
+
+**Source:** `src/grid/lattice.py`, `src/grid/fusion.py`, `tests/test_bin_points.py` (32 tests), `tests/test_engine.py::test_the_two_grid_allocations_stay_fixed`.
+
+**So what:** "No allocation inside the frame loop" is a hard invariant in CLAUDE.md and a sentence in the report; it was false by 15.15 MB a frame and is now true to within ~1 MB of per-call bookkeeping. `bin_points` is pinned bit-identical to `ring_of` + `i_ring` + `RingBuffer.flat_slot` over both frozen schedules and four speeds — including `5/10/50`, whose ratios are 2 and 5 and which is the only thing that catches a power-of-two assumption. The new declared footprint is 3.75 MB of binning scratch, replacing scratch the frame loop already held.

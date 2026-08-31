@@ -685,3 +685,77 @@ def test_the_rest_of_the_cell_still_updates_without_ground_evidence():
     assert soa["reflectivity"][3] == 100       # 600 // 6
     assert soa["frames_since_seen"][3] == 0
     assert soa["obs_count"][3] == 6
+
+
+def test_occupancy_state_out_path_matches_the_allocating_one():
+    """§10.1 has one answer, whether or not the caller preallocated.
+
+    The `out=`/`scratch=` path exists because the frame loop calls this every
+    frame -- the visibility cleanup's candidate set is the currently-OCCUPIED
+    cells and this is the only thing that computes them -- and it allocated
+    8.19 MB a call over 910,000 slots. Two code paths through one section is
+    how the fast one drifts, so this pins them equal over a grid containing
+    every combination the three rules can produce.
+    """
+    from vrgrid.gpu.allocators import allocate
+    from vrgrid.grid.fusion import new_occupancy_scratch
+    from vrgrid.grid.schedule import load
+
+    th = load_thresholds()
+    handle = allocate(load("5/10/20/40"), th, commit_pages=False)
+    grid = handle.grid
+    rng = np.random.default_rng(0)
+    n = grid["log_odds"].size
+
+    # spanning, not random: below/above the occupancy threshold, below/above
+    # the observation floor, and blind cells among both
+    grid["log_odds"][:] = rng.integers(-20, 20, n)
+    grid["obs_count"][:] = rng.integers(0, 12, n)
+    grid["flags"][:] = rng.integers(0, 4, n).astype(np.uint8)
+
+    want = occupancy_state(grid, th)
+    out = np.zeros(n, np.uint8)
+    got = occupancy_state(grid, th, out=out, scratch=new_occupancy_scratch(n))
+
+    assert np.array_equal(want, got)
+    # a length-`size` view of the caller's buffer, not a fresh array -- which
+    # is the point, and is also what `bin_points` returns
+    assert got.base is out or got is out, "the caller's buffer was not written"
+    assert np.shares_memory(got, out)
+    assert set(np.unique(want).tolist()) == {OCC_UNKNOWN, OCC_FREE, OCC_OCCUPIED}, (
+        "the fixture did not produce all three states, so this proves little"
+    )
+
+
+def test_unknown_beats_free_and_blind_beats_everything():
+    """The precedence in §10.1, which the `out=` rewrite had to preserve
+    because it applies the three rules as successive masked writes rather than
+    as one nested `np.where`.
+
+    Order is the section's, not an optimisation: the observation count wins
+    over the log-odds, because "I looked and it's empty" and "I couldn't see"
+    are different facts; and FLAG_BLIND wins over both, because the blind cone
+    is ground the sensor cannot see in any single frame and a cell there must
+    never report FREE on the strength of a later frame's geometry.
+    """
+    from vrgrid.gpu.allocators import allocate
+    from vrgrid.grid.fusion import new_occupancy_scratch
+    from vrgrid.grid.schedule import load
+
+    th = load_thresholds()
+    n_min = th["occupancy"]["unknown_below_obs"]
+    l_occ = th["occupancy"].get("log_odds_occupied", 0)
+
+    handle = allocate(load("5/10/20/40"), th, commit_pages=False)
+    grid = handle.grid
+    grid["log_odds"][:4] = [l_occ + 5, l_occ + 5, -5, l_occ + 5]
+    grid["obs_count"][:4] = [n_min + 3, 0, n_min + 3, n_min + 3]
+    grid["flags"][:4] = [0, 0, 0, FLAG_BLIND]
+
+    for kwargs in ({}, {"out": np.zeros(grid["log_odds"].size, np.uint8),
+                        "scratch": new_occupancy_scratch(grid["log_odds"].size)}):
+        s = occupancy_state(grid, th, **kwargs)
+        assert s[0] == OCC_OCCUPIED, "well-observed and above threshold"
+        assert s[1] == OCC_UNKNOWN, "unobserved must not read OCCUPIED"
+        assert s[2] == OCC_FREE, "observed and below threshold"
+        assert s[3] == OCC_UNKNOWN, "a blind cell is never anything else"

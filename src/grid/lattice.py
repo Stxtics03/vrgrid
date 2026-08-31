@@ -211,6 +211,342 @@ def migrate_ring(x, y, schedule, current_ring, speed_ms: float = 0.0):
     return cur
 
 
+# --- the frame path: zero-allocation binning, math §2.1 + §6.1 --------------
+#
+# `ring_of`, `d_aniso` and `i_ring` above are the reference implementations:
+# scalars or arrays in, allocate freely, and they are what every test compares
+# against. Everything below is their frame-loop twin -- the same arithmetic in
+# the same order, with every intermediate preallocated. Bit-identity is pinned
+# by `test_ring_of_into_matches_ring_of` and
+# `test_bin_points_matches_the_reference_path` over both frozen schedules,
+# several speeds, and both ring parities.
+#
+# ⚑ Why the twin exists, and it is not tidiness. `ring_of` allocates roughly
+#   seven full-length float64 temporaries per call -- 6.96 MB per
+#   120,000-point sweep, measured by `scripts/timing_table.py --alloc` --
+#   against CLAUDE.md's "no allocation inside the frame loop", which is a hard
+#   invariant and a sentence in the report. Binning is also the largest single
+#   stage in the frame, larger than `fuse` and larger than `cleanup`.
+
+
+def _bin_geometry(schedule):
+    """Per-schedule constants `bin_points` would otherwise rebuild every frame:
+    ring radii as one array, the integer k per ring, and the rear-floor ring.
+
+    Small allocations, but they are allocations in the frame loop, and
+    `_rear_floor_ring` builds a list comprehension per call. Baked into the
+    scratch at startup instead.
+    """
+    radii = np.array([r.half_width_m for r in schedule.rings], dtype=np.float64)
+    ks = []
+    for r in schedule.rings:
+        k = round(r.cell_m / schedule.base_cell_m)
+        if abs(k * schedule.base_cell_m - r.cell_m) > 1e-9 or k < 1:
+            raise ValueError(
+                f"ring {r.ring}: cell {r.cell_m} m is not a positive integer "
+                f"multiple of the base {schedule.base_cell_m} m (math §2.1). "
+                "schedule.validate() should have rejected this."
+            )
+        ks.append(int(k))
+    return radii, ks, _rear_floor_ring(schedule)
+
+
+def new_bin_scratch(max_points: int, schedule) -> dict:
+    """Working set for `bin_points`, sized at startup like every other
+    frame-path buffer.
+
+    Five int64 lanes, one float64 and two bool: **50 B per point**, 7.50 MB at
+    the 150,000-point cap in
+    `configs/thresholds.yaml: scatter.max_points_per_frame`. Of that, 3.75 MB
+    is the `new_slot_scratch` the frame loop already allocates and which this
+    replaces, so the new declared footprint is 3.75 MB.
+
+    That is the trade, stated plainly: ~4 MB of declared startup footprint to
+    remove 6.96 MB of undeclared per-frame churn. It is the trade
+    `scatter_sorted` already made, and it is the right way round -- churn is
+    invisible until someone profiles it, footprint is a number on a slide.
+
+    The lanes are reused aggressively and the comments in `bin_points` say
+    where, because five buffers doing eleven jobs is only safe if the handover
+    points are written down. The caller's `out` array is used as a sixth lane
+    until the final write, for the same reason.
+    """
+    radii, ks, floor_ring = _bin_geometry(schedule)
+    n_rings = len(schedule.rings)
+    return {
+        "f0": np.zeros(max_points, np.float64),   # d_aniso temp, then xw/yw scaling
+        "f1": np.zeros(max_points, np.float64),   # cheb, then d_aniso
+        "level": np.zeros(max_points, np.int64),  # ring per point, whole pass
+        "a": np.zeros(max_points, np.int64),      # clipped ring, then gathers
+        "b": np.zeros(max_points, np.int64),      # k, then side
+        "c": np.zeros(max_points, np.int64),      # ix, then col
+        "d": np.zeros(max_points, np.int64),      # iy, then row, then the slot
+        "live": np.zeros(max_points, np.bool_),
+        "tmp": np.zeros(max_points, np.bool_),
+        # per-ring tables, gathered per point. x0/y0 move with the vehicle
+        # every frame, so they are refilled per call -- into these arrays,
+        # never rebuilt.
+        "t_k": np.array(ks, dtype=np.int64),
+        "t_side": np.zeros(n_rings, np.int64),
+        "t_x0": np.zeros(n_rings, np.int64),
+        "t_y0": np.zeros(n_rings, np.int64),
+        "t_off": np.zeros(n_rings, np.int64),
+        "t_dx": np.zeros(n_rings, np.int64),      # x0 mod side, the wrap offset
+        "t_dy": np.zeros(n_rings, np.int64),
+        # per-schedule constants, so the frame loop never rebuilds them
+        "radii": radii,
+        "ks": ks,
+        "floor_ring": floor_ring,
+        "max_points": int(max_points),
+    }
+
+
+def _count_at_or_below(values, radii, out, mask) -> None:
+    """`np.searchsorted(radii, values, side="right")` without the allocation.
+
+    searchsorted has no `out=`, and it runs twice per frame over a full-length
+    array -- 1.92 MB at 120,000 points. Its result is the count of radii that
+    are `<= v`, so over four rings a branch-free accumulate is allocation-free
+    and, at this length, no slower than a binary search per element.
+    """
+    out[:] = 0
+    for r in radii:
+        np.greater_equal(values, r, out=mask)
+        # `np.add(out, mask, out=out)` reads more naturally and costs 64 kB a
+        # call: adding a bool array to an int64 one is a mixed-dtype ufunc, so
+        # numpy casts through its fixed internal buffer. Bounded rather than
+        # per-point, but it is the last allocation on this path. A masked
+        # scalar increment does the same arithmetic with no cast at all.
+        np.add(out, 1, out=out, where=mask)
+
+
+def d_aniso_into(x, y, schedule, speed_ms, out, tmp):
+    """`d_aniso` with both temporaries supplied. Math §6.2 eq. (20).
+
+    The three terms are combined in the same order as the reference, so the
+    float64 result is bit-identical rather than merely close. That matters:
+    the value is compared against a ring radius, and a point exactly on a
+    boundary has to land in the same ring on both paths or the partition test
+    is measuring two different maps.
+    """
+    a_f, a_s, a_r = stretch_factors(schedule, speed_ms)
+    np.maximum(x, 0.0, out=out)                  # forward
+    np.divide(out, a_f, out=out)
+    np.negative(x, out=tmp)                      # rear
+    np.maximum(tmp, 0.0, out=tmp)
+    np.divide(tmp, a_r, out=tmp)
+    np.maximum(out, tmp, out=out)
+    np.abs(y, out=tmp)                           # side
+    np.divide(tmp, a_s, out=tmp)
+    np.maximum(out, tmp, out=out)
+    return out
+
+
+def ring_of_into(x, y, schedule, speed_ms, out, scratch):
+    """`ring_of` over a whole sweep, allocation-free. Math §6.1 eq. (18).
+
+    `x`, `y` are VEHICLE frame -- ring membership is a question about distance
+    from the sensor. `out` is int64 and receives OUTSIDE (-1) beyond the last
+    ring, exactly as the reference does; callers must check it.
+
+    Every rule the reference applies is applied here, in the same order and for
+    the same reason: containment (never finer than geometry allows), the rear
+    floor (§6.2, and only where the point fits in the floor ring), and the
+    keep-what-fits clamp. `ring_of`'s docstring is the one that explains why
+    each exists; this is the one that runs.
+    """
+    n = len(x)
+    radii, floor_ring = scratch["radii"], scratch["floor_ring"]
+    f0, f1 = scratch["f0"][:n], scratch["f1"][:n]
+    # Lane "a" holds the geometric ring here; `bin_points` reuses it for the
+    # clamped ring index only after this function has returned.
+    geom, mask, aux = scratch["a"][:n], scratch["tmp"][:n], scratch["live"][:n]
+
+    # Geometry first and consumed into an integer, which frees f1 for d_aniso.
+    np.abs(x, out=f1)
+    np.abs(y, out=f0)
+    np.maximum(f1, f0, out=f1)                       # eq. (18), unstretched
+    _count_at_or_below(f1, radii, geom, mask)
+
+    d_aniso_into(x, y, schedule, speed_ms, f1, f0)   # eq. (20)
+    _count_at_or_below(f1, radii, out, mask)
+
+    np.maximum(out, geom, out=out)                   # containment
+
+    if floor_ring is not None:
+        np.less(x, 0.0, out=mask)
+        np.abs(x, out=f0)
+        np.less(f0, REAR_FLOOR_RANGE_M, out=aux)
+        np.logical_and(mask, aux, out=mask)
+        np.less_equal(geom, floor_ring, out=aux)
+        np.logical_and(mask, aux, out=mask)
+        np.minimum(out, floor_ring, out=out, where=mask)
+
+    np.minimum(out, len(radii) - 1, out=out)
+    np.greater_equal(geom, len(radii), out=mask)
+    np.copyto(out, OUTSIDE, where=mask)
+    return out
+
+
+def _fill_ring_tables(buffers, scratch) -> None:
+    """Per-ring constants as arrays indexed by ring, refreshed every call.
+
+    `x0`/`y0` are the only state a toroidal shift changes (§2.4), so they move
+    under us every frame and cannot be baked at startup like `k`. Written into
+    preallocated arrays element by element -- a four-element Python loop, no
+    array construction.
+    """
+    for L, buf in enumerate(buffers):
+        W = buf.side
+        scratch["t_side"][L] = W
+        scratch["t_x0"][L] = buf.x0
+        scratch["t_y0"][L] = buf.y0
+        scratch["t_off"][L] = buf.offset
+        scratch["t_dx"][L] = buf.x0 % W
+        scratch["t_dy"][L] = buf.y0 % W
+
+
+def bin_points(xv, yv, xw, yw, schedule, buffers, out, scratch,
+               speed_ms: float = 0.0):
+    """Points -> flat storage slots, in one place. Math §2.1, §2.4, §6.1.
+
+    The stage between perception and the grid: ring membership, then the
+    lattice index, then the slot in that ring's toroidal window. It runs every
+    frame on every return, it is the largest single stage in the frame, and
+    until now no module exported it -- it was composed by hand in
+    `fusion.scatter`, `grid/transient.py`, `run/engine.py` and
+    `scripts/timing_table.py`. Four spellings of one step in three
+    directories, which will disagree eventually, and a binning bug does not
+    crash: it produces a plausible map.
+
+    ⚑ TWO frames, and mixing them is the whole difficulty -- the same trap
+      `scatter` warns about, arriving one layer earlier.
+
+      `xv, yv`  VEHICLE frame. Decides the RING, because foveation follows the
+                vehicle and ring membership is distance from the sensor (§6.1).
+      `xw, yw`  WORLD frame. Decides the CELL, because cell identity is
+                absolute -- that is the entire reason the toroidal shift
+                exists (§2.4).
+
+      Feed world coordinates to `ring_of` and every point reads as OUTSIDE once
+      the vehicle has driven past the last ring's half-width. Feed vehicle
+      coordinates to `i_ring` and the map slides along under the vehicle
+      instead of staying put. Both look correct for the first few seconds, and
+      the first makes the latency table read BETTER -- everything bins to -1,
+      so scatter and fuse post sub-millisecond medians for doing nothing.
+
+    **No ring loop.** The obvious shape is a pass per ring over the points that
+    fall in it, and that is what all four hand-rolled copies did. It needs the
+    selected world coordinates compacted into a buffer, and numpy will not do
+    that without allocating: `np.compress(..., out=)` still built 1.54 MB of
+    internal index at 96,000 selected points. So every per-ring constant --
+    `k`, `side`, `x0`, `y0`, `offset` -- is instead gathered per POINT by ring
+    index, and the sweep is binned in one pass of full-length ufuncs. That is
+    allocation-free, and it is also less arithmetic than four iterations plus
+    four compacting copies.
+
+    Bit-identical to `ring_of` + `i_ring` + `RingBuffer.flat_slot`, pinned by
+    `test_bin_points_matches_the_reference_path` over both frozen schedules and
+    four speeds. It has to be: those are what the partition test proves things
+    about, and a second lattice is what this module's header forbids.
+
+    Returns a view of `out` of length len(xv): the flat slot per point, and -1
+    for anything outside the map or outside its ring's window. Allocates
+    nothing; `scratch` comes from `new_bin_scratch`.
+    """
+    n = len(xv)
+    if n > scratch["max_points"]:
+        raise ValueError(
+            f"{n} points exceeds the {scratch['max_points']} this scratch was "
+            "built for (configs/thresholds.yaml: scatter.max_points_per_frame). "
+            "Sizing the frame path at startup is the point -- growing it here "
+            "would allocate inside the frame loop."
+        )
+    _fill_ring_tables(buffers, scratch)
+
+    level = scratch["level"][:n]
+    ring_of_into(xv, yv, schedule, speed_ms, level, scratch)
+
+    c0 = schedule.base_cell_m
+    f = scratch["f0"][:n]
+    lv, kk = scratch["a"][:n], scratch["b"][:n]
+    ix, iy = scratch["c"][:n], scratch["d"][:n]
+    live, aux = scratch["live"][:n], scratch["tmp"][:n]
+    gather = out[:n]                 # the sixth lane, free until the last write
+
+    # OUTSIDE (-1) would index the tables from the back, so clamp for the
+    # gather and mask those points out at the end instead.
+    #
+    # ⚑ Every `np.take` below passes `mode="clip"`, and not for the clipping.
+    #   numpy's default `mode="raise"` performs its bounds check by building a
+    #   full-length index array -- 0.96 MB per call, six calls a frame, which
+    #   is most of what this rewrite exists to remove. `clip` skips that and is
+    #   also 5x faster. It is safe only because `lv` is clamped to [0, n_rings)
+    #   on the line above, so no index is ever out of range and clipping never
+    #   actually clips; if that clamp is ever removed, this silently reads the
+    #   wrong ring instead of raising.
+    np.maximum(level, 0, out=lv)
+    np.take(scratch["t_k"], lv, out=kk, mode="clip")
+
+    # §2.1 eq. (9): floor to the ONE base lattice, then integer-divide by k.
+    # Never floor(x / (k*c0)) -- see this module's header.
+    np.floor_divide(xw, c0, out=f)
+    np.copyto(ix, f, casting="unsafe")          # integer-valued float -> int64
+    np.floor_divide(ix, kk, out=ix)
+    np.floor_divide(yw, c0, out=f)
+    np.copyto(iy, f, casting="unsafe")
+    np.floor_divide(iy, kk, out=iy)
+
+    # k is spent; the lane becomes the ring side, which is needed to the end.
+    W = kk
+    np.take(scratch["t_side"], lv, out=W, mode="clip")
+
+    # in_view: x0 <= ix < x0 + W, and the same for iy (§2.4). Computed as
+    # col = ix - x0 in [0, W), which is also what the wrap below needs.
+    np.take(scratch["t_x0"], lv, out=gather, mode="clip")
+    np.subtract(ix, gather, out=ix)
+    np.greater_equal(ix, 0, out=live)
+    np.less(ix, W, out=aux)
+    np.logical_and(live, aux, out=live)
+
+    np.take(scratch["t_y0"], lv, out=gather, mode="clip")
+    np.subtract(iy, gather, out=iy)
+    np.greater_equal(iy, 0, out=aux)
+    np.logical_and(live, aux, out=live)
+    np.less(iy, W, out=aux)
+    np.logical_and(live, aux, out=live)
+
+    # The wrap, division-free, exactly as `flat_slot_into` argues it: in view,
+    # (x0 + col) mod W == (x0 mod W) + col, minus W once if that overflowed,
+    # since both terms are in [0, W) and their sum is in [0, 2W).
+    np.take(scratch["t_dx"], lv, out=gather, mode="clip")
+    np.add(ix, gather, out=ix)
+    np.greater_equal(ix, W, out=aux)
+    np.subtract(ix, W, out=ix, where=aux)
+
+    np.take(scratch["t_dy"], lv, out=gather, mode="clip")
+    np.add(iy, gather, out=iy)
+    np.greater_equal(iy, W, out=aux)
+    np.subtract(iy, W, out=iy, where=aux)
+
+    np.multiply(iy, W, out=iy)
+    np.add(iy, ix, out=iy)
+    np.take(scratch["t_off"], lv, out=gather, mode="clip")
+    np.add(iy, gather, out=iy)
+
+    # A point past the last ring is not in ring 0, and must not take ring 0's
+    # slot -- silently clamping it there is how a 100 m return ends up written
+    # into a 5 cm cell at the origin.
+    np.greater_equal(level, 0, out=aux)
+    np.logical_and(live, aux, out=live)
+
+    idx = out[:n]
+    np.copyto(idx, iy, where=live)
+    np.logical_not(live, out=aux)
+    np.copyto(idx, -1, where=aux)
+    return idx
+
+
 # --- toroidal ring buffers, math §2.4 ---------------------------------------
 
 

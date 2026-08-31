@@ -80,6 +80,27 @@ class GridMap:
     # (0, 0) for a stationary map, which is what the unit tests use.
     vehicle_xy_m: tuple = (0.0, 0.0)
 
+    # Working set for `lattice.bin_points`, built on first use and then reused
+    # for the life of the map. Deliberately NOT part of `allocate()`: a GridMap
+    # is built by hundreds of unit tests that never bin a point, and 7.5 MB
+    # each would be paid by all of them. The frame loop pays it once, on its
+    # first sweep; `run/engine.py` allocates its own up front instead.
+    _bin: object = None
+
+    def bin_scratch(self, n: int):
+        """(scratch, out) sized for at least `n` points.
+
+        Growing means rebuilding, which allocates -- so it happens on frame 0
+        and then never again, which is the shape "no allocation in the frame
+        loop" actually asks for.
+        """
+        from vrgrid.grid.lattice import new_bin_scratch
+
+        if self._bin is None or self._bin[0]["max_points"] < n:
+            self._bin = (new_bin_scratch(n, self.schedule),
+                         np.zeros(n, dtype=np.int64))
+        return self._bin
+
 
 def slot_of(gm: GridMap, x_m: float, y_m: float):
     """(ring, flat slot) for a point in vehicle frame, or (OUTSIDE, -1).

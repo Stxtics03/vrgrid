@@ -16,7 +16,6 @@ import numpy as np
 import pytest
 from vrgrid.cell import OCC_OCCUPIED
 from vrgrid.grid.fusion import CLASS_MAX, occupancy_state, unpack_class
-from vrgrid.grid.lattice import ring_of
 from vrgrid.grid.schedule import load
 from vrgrid.run.engine import MapEngine, class_ids_fit
 
@@ -176,17 +175,20 @@ def test_the_guard_protects_the_wall():
 
 def test_the_frame_loop_allocates_almost_nothing():
     """`No allocation in the frame loop` is the invariant the memory claim
-    rests on, and this asserts it of THIS FILE rather than of the whole stack.
+    rests on, and this asserts it of the WHOLE step.
 
-    Two functions in `src/grid` allocate per call, and neither is mine to fix:
+    It used to subtract two allocations in `src/grid` that were not this
+    file's to fix -- `occupancy_state` at 8.19 MB a call and `ring_of` at
+    ~7 MB per 120,000-point sweep -- and its own docstring named the weakness
+    that created: "once grid is fixed, keep passing while a megabyte crept
+    back in here". Both are fixed (Gate 3, item 2), so the subtraction is gone
+    and this is a flat cap on the real thing.
 
-        occupancy_state   8.19 MB   full-grid temporaries over 910,000 slots
-        ring_of           0.87 MB   at this scene's 15,000 points; ~7 MB at 120,000
-
-    So the test measures a step, subtracts what those two cost on the same
-    frame, and requires the remainder to be small. Written as a flat cap on
-    the step it would either fail for someone else's reason or, once grid is
-    fixed, keep passing while a megabyte crept back in here.
+    The cap is deliberately close to the measurement. A frame that allocated
+    one more full-grid int64 temporary would add 7.28 MB and a per-sweep
+    float64 one would add ~1 MB; there is no room for either. What remains is
+    small per-call bookkeeping -- numpy's fixed casting buffer, the
+    `np.flatnonzero` of the occupied set, a few Python objects.
     """
     import tracemalloc
 
@@ -211,15 +213,60 @@ def test_the_frame_loop_allocates_almost_nothing():
     for f in frames[:2]:
         engine.step(f)                       # warm up
 
-    frame = frames[3]
-    pts = frame.points_sensor
-    step = peak(lambda: engine.step(frame))
-    grid_side = (peak(lambda: occupancy_state(engine.handle.grid, engine.thresholds))
-                 + peak(lambda: ring_of(pts[:, 0], pts[:, 1], engine.sched)))
+    step = peak(lambda: engine.step(frames[3]))
+    assert step < 2_000_000, (
+        f"engine.step() allocates {step:,} B a frame -- something on the "
+        "frame path is not preallocated"
+    )
 
-    assert step - grid_side < 1_000_000, (
-        f"the engine itself allocates {step - grid_side:,} B a frame on top of "
-        f"grid's {grid_side:,} B — something here is not preallocated")
+
+def test_the_two_grid_allocations_stay_fixed():
+    """⚑ Regression guard for Gate 3, item 2, asserted at the source.
+
+    `occupancy_state` allocated 8.19 MB per call in full-grid int64
+    temporaries -- `np.where` picking between two Python ints chooses int64,
+    and one int64 array over 910,000 slots is 7.28 MB on its own, for a uint8
+    answer. `ring_of` allocated 6.96 MB per 120,000-point sweep in seven
+    float64 temporaries. Together they were 15.15 MB a frame, and the frame
+    loop called both every frame.
+
+    Neither is visible in a latency table, which is why this is a test and not
+    a note in a doc.
+    """
+    import tracemalloc
+
+    from vrgrid.grid.fusion import new_occupancy_scratch, occupancy_state
+    from vrgrid.grid.lattice import new_bin_scratch, ring_of_into
+
+    engine = MapEngine(load("5/10/20/40"), max_points=40_000,
+                       max_candidates=80_000)
+    grid = engine.handle.grid
+    n_slots = grid["log_odds"].size
+    occ_out = np.zeros(n_slots, np.uint8)
+    occ_scratch = new_occupancy_scratch(n_slots)
+
+    rng = np.random.default_rng(0)
+    x = rng.uniform(-100, 100, 40_000)
+    y = rng.uniform(-100, 100, 40_000)
+    bin_scratch = new_bin_scratch(len(x), engine.sched)
+    level = bin_scratch["level"][:len(x)]
+
+    def peak(fn):
+        for _ in range(3):
+            fn()
+        tracemalloc.start()
+        before = tracemalloc.get_traced_memory()[0]
+        fn()
+        out = tracemalloc.get_traced_memory()[1] - before
+        tracemalloc.stop()
+        return out
+
+    occ = peak(lambda: occupancy_state(grid, engine.thresholds,
+                                       out=occ_out, scratch=occ_scratch))
+    ring = peak(lambda: ring_of_into(x, y, engine.sched, 0.0, level, bin_scratch))
+
+    assert occ < 16_000, f"occupancy_state allocates {occ:,} B over {n_slots:,} slots"
+    assert ring < 16_000, f"ring_of_into allocates {ring:,} B over {len(x):,} points"
 
 
 def test_the_whole_label_set_now_fuses_and_raw_ids_still_raise():
