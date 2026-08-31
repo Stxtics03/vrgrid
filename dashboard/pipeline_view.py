@@ -34,6 +34,15 @@ from .demo_synthetic import class_to_color, load_schedule
 
 _CLASS_LUT = np.array([class_to_color(c) for c in range(-1, 19)], dtype=np.uint8)  # index c+1
 
+# Highlight for moving points (motion layer + the world/ghosts overlay).
+# Okabe & Ito (2008) "reddish purple" -- chosen because it is the one hue that
+# stays >= Delta-E 16 from every colour in the SemanticKITTI class map AND from
+# the motion-static grey, under normal vision and simulated protanopia,
+# deuteranopia and tritanopia (see dashboard/cvd.py). Red would collide with
+# `vegetation` under deuteranopia (Delta-E 3) and with `other-vehicle`; this
+# does not. The 3x point radius is the redundant, colour-independent cue.
+GHOST_RGB = (204, 121, 167)  # #CC79A7
+
 
 def _frame_colors(frame, color_by: str) -> np.ndarray:
     """(N, 3) uint8 colour per point of `frame`, for the chosen layer."""
@@ -43,10 +52,12 @@ def _frame_colors(frame, color_by: str) -> np.ndarray:
     if color_by == "class":
         return _CLASS_LUT[np.clip(frame.semantic + 1, 0, 19)]
     if color_by == "motion":
-        c = np.full((len(frame.moving), 3), 90, dtype=np.uint8)
-        c[frame.moving] = (255, 40, 40)
+        c = np.full((len(frame.moving), 3), 90, dtype=np.uint8)  # static: neutral grey
+        c[frame.moving] = GHOST_RGB
         return c
     if color_by == "ground":
+        # tan vs steel-blue -- an orange/blue pair, the axis all three CVD types
+        # preserve; min Delta-E 55 under every simulation (dashboard/cvd.py).
         c = np.empty((len(frame.ground), 3), dtype=np.uint8)
         c[frame.ground] = (170, 130, 90)
         c[~frame.ground] = (70, 130, 180)
@@ -132,7 +143,7 @@ class PipelineView:
 
         # The removed set, on its own entity -- this is what the demo toggles.
         ghosts = frame.points_world[frame.moving].astype(np.float32)
-        rr.log("world/ghosts", rr.Points3D(ghosts, colors=[255, 45, 45], radii=0.09))
+        rr.log("world/ghosts", rr.Points3D(ghosts, colors=list(GHOST_RGB), radii=0.09))
 
         # vehicle transform: origin + heading from the GT pose (world-frame yaw)
         fwd_world = frame.pose[:3, :3] @ np.array([0.0, 0.0, 1.0])  # camera z = forward
