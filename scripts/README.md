@@ -12,10 +12,10 @@ is not produced by something in this directory, it does not go on a slide.
 | `memory_bound.py` | The itemised preallocated bound, read off the real allocation -- with and without the pyramid |
 | `timing_table.py` | The Day-6 per-stage latency table: p50/p99/max and headroom at p99, machine named, `--alloc` for transient bytes per frame. Drives the real lattice, scatter, fuse, cleanup, pyramid and shift off a synthetic sweep. Covers the mapping back end only, and prints the unmeasured stages with their owner rather than dropping them |
 | `regret_plot.py` | The Day-4 headline figure -- memory against plan regret (§8.2) -- as `regret.csv` plus `regret.svg`/`.png`. Runs `eval_synthetic`'s sweep by importing it, and refuses to draw a monotone story over non-monotone rows: it prints which step violates the claim |
+| `ghost_removal_figure.py` | The Gate 3 figure -- the same map with and without §10.4, drawn as occupied CELLS rather than returns -- plus the per-frame counters as CSV |
 | `baseline_demo.py` | Our map beside the uniform 2.5D and dense 3D baselines, all three counters resident and ticking. `--dense` allocates the full 2.56 GB |
 
-To add: `ablation_table.py` (schedule comparison, thresholds frozen first),
-`ghost_removal_figure.py`.
+To add: `ablation_table.py` (schedule comparison, thresholds frozen first).
 
 Not a numbers script, but it lives here because it is run once and checked in:
 

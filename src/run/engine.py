@@ -161,8 +161,12 @@ class MapEngine:
 
     # -- the inverse, for the cleanup ---------------------------------------
 
-    def _centres_vehicle(self, slots, ego_xy, out_x, out_y, out_z):
-        """Occupied slots -> cell centres in the VEHICLE frame.
+    def _centres(self, slots, ego_xy, out_x, out_y, out_z):
+        """Occupied slots -> cell centres, minus `ego_xy`.
+
+        Pass the vehicle's world xy for vehicle-frame centres, which is what
+        the cleanup needs; pass zeros for world-frame ones, which is what a
+        map view needs.
 
         The cleanup projects cell centres into JP's range image, so it needs
         them where the sensor is, not where the lattice origin is. Slot to
@@ -280,7 +284,7 @@ class MapEngine:
 
         m = len(occupied)
         self._cand_slots[:m] = occupied
-        cx, cy, cz = self._centres_vehicle(occupied, ego_xy, self._cand["x"],
+        cx, cy, cz = self._centres(occupied, ego_xy, self._cand["x"],
                                            self._cand["y"], self._cand["z"])
 
         image = np.asarray(frame.range_image)
@@ -315,3 +319,27 @@ class MapEngine:
         should draw, and what the ghost trails live in."""
         return np.flatnonzero(
             occupancy_state(self.handle.grid, self.thresholds) == OCC_OCCUPIED)
+
+    def occupied_cells(self):
+        """`(slots, x, y, z)` for every OCCUPIED cell, in the WORLD frame.
+
+        The readout a 2.5D map view needs, and the one thing the Gate 3 demo
+        is missing: the dashboard draws returns, and the ghost toggle moves
+        cells. `z` is the cell's visibility height -- its ceiling where one was
+        ever seen, its ground height otherwise -- which is the same height the
+        cleanup tests against, so what is drawn and what is reasoned about
+        cannot disagree.
+
+        This allocates, deliberately: it is a readout, called by a viewer or a
+        figure at its own rate, and sizing it to `max_candidate_cells` would
+        make the drawing silently truncate at the cleanup's cap. Nothing on the
+        frame path calls it.
+        """
+        slots = self.occupied_slots()
+        n = len(slots)
+        x, y, z = (np.zeros(n), np.zeros(n), np.zeros(n))
+        if n:
+            # ego (0, 0) leaves the centres in the world frame -- the lattice
+            # is global, and it is the subtraction that makes them vehicle.
+            self._centres(slots, np.zeros(2), x, y, z)
+        return slots, x, y, z
