@@ -33,6 +33,10 @@ import yaml
 # ground-truth label path (semantic_labels / is_moving) is pure numpy, so this
 # module must import with neither torch nor the frnet package present.
 
+# Resolved from this file, not the CWD -- matches src/grid/schedule.py.
+CONFIG_DIR = Path(__file__).resolve().parents[2] / "configs"
+_FRNET_YAML = CONFIG_DIR / "frnet.yaml"
+
 # Raw SemanticKITTI id (lower 16 bits of the .label word) -> 19-class index.
 # 19 = unlabeled/ignore. moving-* ids (252-259) fold onto their static class
 # for the SEMANTIC label; motion is a separate signal (is_moving / loader.py).
@@ -115,7 +119,7 @@ MODEL_TO_SEMANTIC = {i: i for i in range(19)}  # 0->0, 1->1, ..., 18->18
 class FRNetInference:
     """FRNet 20-class (19 semantic) semantic segmentation inference."""
 
-    def __init__(self, config_path: str = "configs/frnet.yaml"):
+    def __init__(self, config_path: str | Path = _FRNET_YAML):
         import torch  # lazy: the GT-label path must import without torch
 
         with open(config_path, "r") as f:
@@ -269,12 +273,12 @@ class FRNetInference:
         return range_labels
 
 
-def get_frnet(config_path: str = "configs/frnet.yaml") -> FRNetInference:
+def get_frnet(config_path: str | Path = _FRNET_YAML) -> FRNetInference:
     """Disabled -- the standalone FRNet port is non-functional. See _PORT_BROKEN."""
     raise RuntimeError(_PORT_BROKEN)
 
 
-def segment(points: np.ndarray, config_path: str = "configs/frnet.yaml") -> np.ndarray:
+def segment(points: np.ndarray, config_path: str | Path = _FRNET_YAML) -> np.ndarray:
     """Disabled -- use semantic_labels(raw_labels). See _PORT_BROKEN."""
     raise RuntimeError(_PORT_BROKEN)
 
@@ -282,14 +286,14 @@ def segment(points: np.ndarray, config_path: str = "configs/frnet.yaml") -> np.n
 def segment_range_image(
     range_image: np.ndarray,
     inverse_index: np.ndarray,
-    config_path: str = "configs/frnet.yaml",
+    config_path: str | Path = _FRNET_YAML,
 ) -> np.ndarray:
     """Disabled -- use semantic_labels(raw_labels). See _PORT_BROKEN."""
     raise RuntimeError(_PORT_BROKEN)
 
 
 def segment_with_probs(
-    points: np.ndarray, config_path: str = "configs/frnet.yaml"
+    points: np.ndarray, config_path: str | Path = _FRNET_YAML
 ) -> tuple[np.ndarray, np.ndarray]:
     """Disabled -- ground-truth .label files carry no probabilities. See _PORT_BROKEN."""
     raise RuntimeError(_PORT_BROKEN)

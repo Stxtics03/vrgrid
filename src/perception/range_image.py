@@ -44,14 +44,18 @@ On KITTI 00 the clamp-above fraction is ~4-7%; a warning fires above 15%.
 """
 
 import warnings
+from pathlib import Path
 
 import numpy as np
 import yaml
 
 OUT_OF_FOV_WARN_FRAC = 0.15
 
+# Resolved from this file, not the CWD -- matches src/grid/schedule.py.
+CONFIG_DIR = Path(__file__).resolve().parents[2] / "configs"
 
-def load_sensor_config(config_path: str = "configs/frnet.yaml") -> dict:
+
+def load_sensor_config(config_path: str | Path = CONFIG_DIR / "frnet.yaml") -> dict:
     with open(config_path, "r") as f:
         cfg = yaml.safe_load(f)
     return cfg["sensor"]
