@@ -188,7 +188,8 @@ def _wall_frame(index: int):
     gmask = np.zeros(len(pts), bool)
     gmask[:5000] = True
     return SimpleNamespace(
-        index=index, points_sensor=p4, points_world=pts + [0.0, 0.0, 1.73],
+        index=index, points_sensor=p4,
+        points_world=pts + np.array([0.0, 0.0, 1.73]),
         pose=np.eye(4)[:3], vehicle_xyz_world=np.zeros(3),
         semantic=np.zeros(len(pts), np.int8), moving=np.zeros(len(pts), bool),
         ground=gmask, reflectivity8=np.full(len(pts), 90, np.uint8),
@@ -223,6 +224,37 @@ def test_pipeline_view_draws_the_engine_occupied_surface(tmp_path):
     # colour tracks height and is a valid uint8 triple per cell
     c = _height_ramp(z)
     assert c.shape == (len(z), 3) and c.dtype == np.uint8
+
+
+def test_pipeline_view_separates_occupied_free_unknown(tmp_path):
+    """math §10.1 / CLAUDE.md: unknown is not free. The view must keep the
+    three occupancy states on distinct entities, driven only by the engine's
+    occ_state (refreshed by the occupied_cells() call log_frame already makes)."""
+    from vrgrid.cell import OCC_FREE, OCC_OCCUPIED, OCC_UNKNOWN
+    from vrgrid.dash.pipeline_view import PipelineView
+    from vrgrid.run.engine import MapEngine
+
+    sched = load_schedule("5/10/20/40")
+    engine = MapEngine(sched, ghost_removal=True)
+    view = PipelineView(sched, spawn=False, save_path=str(tmp_path / "occ.rrd"),
+                        engine=engine)
+    for i in range(4):
+        f = _wall_frame(i)
+        engine.step(f)
+        view.log_frame(f)   # logs world/map/{occupied,free,unknown}, must not raise
+
+    st = engine.occ_state
+    assert set(np.unique(st)) <= {OCC_UNKNOWN, OCC_FREE, OCC_OCCUPIED}
+    assert (st == OCC_OCCUPIED).sum() > 100
+    # centres for the free set resolve through the engine's own inverse, no NaN
+    free = np.flatnonzero(st == OCC_FREE)
+    fx, fy, fz = view._centres_world(free)
+    assert np.isfinite(np.concatenate([fx, fy, fz])).all()
+    # never-observed slots are UNKNOWN and are NOT handed to the renderer
+    obs = engine.handle.grid["obs_count"]
+    assert ((st == OCC_UNKNOWN) & (obs == 0)).sum() > 0
+    drawn_unknown = np.flatnonzero((st == OCC_UNKNOWN) & (obs > 0))
+    assert len(drawn_unknown) < (st == OCC_UNKNOWN).sum()   # the bulk is left undrawn
 
 
 def test_pipeline_view_without_engine_skips_the_surface(tmp_path):
