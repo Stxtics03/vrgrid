@@ -118,7 +118,7 @@ def _real(seq, frame):
     raw = load_labels(_label_path(seq, frame))
     moving = semantics.is_moving(raw)
     ri, inv = range_image.project(pts)
-    return pts, raw, moving, ri, inv
+    return raw, moving, ri, inv
 
 
 @pytest.mark.skipif(not _HAS_07, reason="KITTI seq 07 not present -- set VRGRID_DATA_ROOT")
@@ -126,7 +126,7 @@ def test_seq07_frame30_splits_the_two_pedestrians():
     """Two GT moving-person instances (181 pts near-left, 22 pts far-right).
     The clusterer must return exactly two, at the two GT centroids -- not one
     blob spanning 30 m of the scene."""
-    pts, raw, moving, ri, inv = _real("07", 30)
+    raw, moving, ri, inv = _real("07", 30)
     insts = cluster_moving(ri, inv, moving)
 
     # GT: raw id 254 (person), two distinct instance ids in the upper bits
@@ -147,7 +147,7 @@ def test_seq07_frame30_splits_the_two_pedestrians():
 def test_seq07_frame628_splits_pedestrian_from_the_large_vehicle():
     """A moving lorry (~1500 pts, right) and a pedestrian (~38 pts, left-behind).
     Different sizes, ~30 m apart -- must not merge."""
-    pts, raw, moving, ri, inv = _real("07", 628)
+    _raw, moving, ri, inv = _real("07", 628)
     insts = cluster_moving(ri, inv, moving)
     assert len(insts) == 2
 
@@ -164,7 +164,7 @@ def test_seq00_frame10_recovers_the_motorcyclist():
     and a pedestrian -- but the pedestrian is only *2* points at 20 m, below
     what a 64x512 range image can resolve as an instance, so the honest result
     is one instance (the motorcyclist) at ~(29, 1.4)."""
-    pts, raw, moving, ri, inv = _real("00", 10)
+    _raw, moving, ri, inv = _real("00", 10)
     insts = cluster_moving(ri, inv, moving)
 
     assert len(insts) == 1
