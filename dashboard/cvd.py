@@ -9,12 +9,16 @@ Delta-E 1976 (Euclidean in CIELAB) between the simulated colours of every pair
 in a palette; below ~12 the two are hard to tell apart, below ~6 they are
 effectively the same.
 
-Source of the palettes under test: dashboard/pipeline_view.py (`_frame_colors`,
-motion / ground) and dashboard/demo_synthetic.py (`class_to_color`, the
-SemanticKITTI standard 19-class map).
+Source of the palettes under test: dashboard/palettes.py -- `class_to_color`
+(the SemanticKITTI standard 19-class map), the `GROUP_*` tables and the ghost
+highlight, plus the motion / ground pairs hard-coded in `_frame_colors`. That
+module imports no rerun, so this audit and its tests run in CI, where the
+viewer (the optional `[dash]` extra) is not installed.
 """
 
 import numpy as np
+
+from .palettes import GHOST_RGB, GROUP_NAMES, GROUP_RGB, class_to_color
 
 # Machado et al. 2009, severity 1.0. Applied to linear RGB.
 SIM = {
@@ -96,9 +100,6 @@ CLASS_NAMES = [
 
 
 def _palettes() -> dict[str, dict[str, list[int]]]:
-    from .demo_synthetic import class_to_color
-    from .pipeline_view import GHOST_RGB, GROUP_NAMES, GROUP_RGB
-
     return {
         "class (semantickitti)": {n: class_to_color(i) for i, n in enumerate(CLASS_NAMES)}
         | {"unknown": class_to_color(-1)},
@@ -112,9 +113,6 @@ def _palettes() -> dict[str, dict[str, list[int]]]:
 def ghost_vs_class_min_delta_e() -> tuple[float, str]:
     """Min Delta-E of the ghost highlight against every class colour + the
     motion-static grey, across all four simulations. Returns (min, closest)."""
-    from .demo_synthetic import class_to_color
-    from .pipeline_view import GHOST_RGB
-
     targets = {n: class_to_color(i) for i, n in enumerate(CLASS_NAMES)}
     targets["unknown"] = class_to_color(-1)
     targets["static-grey"] = [90, 90, 90]
