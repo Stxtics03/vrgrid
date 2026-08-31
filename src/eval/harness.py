@@ -173,11 +173,101 @@ class RunStats:
                                self.static_points, self.static_points)
 
 
+class FrameConventionError(AssertionError):
+    """The world-frame points are not in the convention the lattice needs."""
+
+
+def assert_world_is_z_up(world, ground, tolerance_m: float = 2.0) -> None:
+    """Ground returns must sit near z = 0 in the world frame. Math §2.1.
+
+    ⚑ This exists because frame confusion is the most common silent bug in
+      this project (CLAUDE.md) and this is the exact seam it enters through.
+
+    `run_sequence` takes a 4x4 **vehicle -> world** transform and hands the
+    result to `i_ring`, which decides cell identity. A raw KITTI `poses.txt`
+    row is NOT that transform. It is Camera-0 -> World_cam, in the camera
+    convention (x right, y down, z forward), and it needs `Tr` from calib.txt
+    on the right and the axis permutation on the left before it means anything
+    to this map:
+
+        T_vehicle_to_world = R_CAM0_TO_VEH @ pose_4x4 @ Tr
+
+    which is exactly what `perception.transforms.vehicle_to_world()` returns.
+    Pass the raw row instead and every return is rotated into a different
+    world: the elevation map fills, the metrics compute, nothing raises, and
+    the map slowly rotates. There is no downstream assertion that would catch
+    it, because a wrong cell is a perfectly valid cell.
+
+    The check is on the DATA rather than on the matrix, deliberately. At frame
+    0 a camera-convention pose and a vehicle-convention pose are both close to
+    the identity and cannot be told apart by inspecting the rotation; the
+    ground plane tells them apart immediately, because in the camera
+    convention the ground is a plane of constant y, not constant z.
+
+    Checked once per run, on the first frame, over ground-flagged returns only.
+    """
+    g = np.asarray(ground, dtype=bool)
+    if not g.any():
+        return
+    z = np.asarray(world, dtype=np.float64)[g, 2]
+    median = float(np.median(z))
+    if abs(median) <= tolerance_m:
+        return
+    raise FrameConventionError(
+        f"ground returns have a median world z of {median:.2f} m, not ~0 -- "
+        f"the world points are not z-up.\n"
+        f"  Most likely: a raw `poses.txt` row was passed as the pose. That is "
+        f"Camera-0 -> World_cam (x right, y down, z forward), not "
+        f"vehicle -> world.\n"
+        f"  Fix: pass `perception.transforms.vehicle_to_world(pose, sequence)`, "
+        f"which composes the axis permutation and `Tr` from calib.txt.\n"
+        f"  If this really is z-up terrain, raise `tolerance_m`."
+    )
+
+
+def learning_ids(raw_labels):
+    """RAW SemanticKITTI ids -> 0-19 learning ids, or pass through if already
+    mapped. Math §10.2.
+
+    The synthetic sequences already write learning ids, and the real loader
+    writes raw ones (10 = car, 40 = road, 252 = moving-car). Both reach this
+    harness, so it detects rather than assumes: anything already inside the
+    class field is left alone, and anything above it is mapped.
+
+    ⚑ Order matters and is the reason this is not done earlier. The learning
+      map collapses every `moving-*` id onto its static counterpart, so a scan
+      already through it cannot be separated into static and dynamic at all.
+      `separate()` must see the raw ids; this runs after it, on what survived.
+    """
+    import numpy as _np
+    from vrgrid.grid.fusion import CLASS_MAX
+
+    ids = _np.asarray(raw_labels, dtype=_np.int64) & 0xFFFF
+    if ids.size and int(ids.max()) <= CLASS_MAX:
+        return ids.astype(_np.uint8)
+
+    from vrgrid.perception.semantics import semantic_labels
+
+    return _np.asarray(semantic_labels(ids), dtype=_np.uint8)
+
+
 def run_sequence(gm: GridMap, scans, recentre: bool = True,
                  tracks: TrackList | None = None) -> RunStats:
     """Drive the map through a sequence. Returns what it did.
 
-    `scans` yields (points in VEHICLE frame, RAW label ids, is_ground, pose).
+    `scans` yields (points in VEHICLE frame, RAW label ids, is_ground, T).
+
+    ⚑ `T` is a **vehicle -> world** transform (3x4 or 4x4), z-up, NOT a raw
+      KITTI `poses.txt` row. A `poses.txt` row is Camera-0 -> World_cam and
+      needs `Tr` and the axis permutation applied first --
+      `perception.transforms.vehicle_to_world(pose, sequence)` is that
+      composition and is the only thing that should be building it. Two
+      implementations of one convention is how a map ends up slowly rotating,
+      so there is one, it is JP's, and this consumes it.
+
+      `assert_world_is_z_up` checks the first frame and raises rather than
+      letting the wrong convention through, because the failure downstream is
+      a full, plausible-looking map in the wrong cells.
 
     ⚑ RAW label ids, not learning ids. `moving-*` (250-259) is what separates
       dynamic from static, and the 19-class learning map collapses every
@@ -201,11 +291,15 @@ def run_sequence(gm: GridMap, scans, recentre: bool = True,
     stats = RunStats()
     speed = 0.0
     last_xy = None
+    checked = False
 
     for pts, labels, ground, pose in scans:
         pose = np.asarray(pose, dtype=np.float64)
         pts = np.asarray(pts, dtype=np.float64)
         world = pts @ pose[:3, :3].T + pose[:3, 3]
+        if not checked:
+            assert_world_is_z_up(world, ground)
+            checked = True
         xy = (float(pose[0, 3]), float(pose[1, 3]))
         if last_xy is not None:
             dt = gm.thresholds.get("fusion", {}).get("frame_dt_s", 0.1)
@@ -224,7 +318,13 @@ def run_sequence(gm: GridMap, scans, recentre: bool = True,
         stats.dynamic_to_transient += written
         stats.tracks = n_tracks
 
-        agg = scatter(gm, pts[static], np.asarray(labels)[static] % 16,
+        # Learning ids, not `% 16`. The modulo was a stand-in for the 4-bit
+        # class field and it was not a harmless one: it mapped `terrain` (17)
+        # onto `car` (1), so drivable ground arrived in the map as a blocked
+        # class and the §7.1 predicate marked it untraversable. `pole` and
+        # `traffic-sign` became `bicycle` and `motorcycle` the same way. The
+        # field is 5 bits since 1 Sep and holds the whole set.
+        agg = scatter(gm, pts[static], learning_ids(np.asarray(labels)[static]),
                       np.asarray(ground, dtype=bool)[static],
                       points_world_m=world[static])
         fuse(gm.soa, agg, gm.thresholds)
