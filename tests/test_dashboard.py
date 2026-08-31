@@ -209,7 +209,7 @@ def test_pipeline_view_draws_the_engine_occupied_surface(tmp_path):
         engine.step(f)
         view.log_frame(f)          # must not raise -- draws world/map/occupied
 
-    slots, x, y, z = engine.occupied_cells()
+    slots, _x, _y, z = engine.occupied_cells()
     assert len(slots) > 100, "the wall + ground should occupy cells"
 
     # per-slot cell size comes from the ring: near cells are 5 cm, the wall at
