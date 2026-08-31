@@ -211,3 +211,42 @@ def test_poses_are_applied_so_the_map_is_world_anchored(sequence):
     if 0 <= i < ref.shape[0] and 0 <= j < ref.shape[1] and ref.count[i, j]:
         assert ref.height_cm[i, j] / 100.0 == pytest.approx(
             terrain_height_m(x, 0.0), abs=0.05)
+
+
+def test_one_definition_of_moving():
+    """⚑ `is_moving` was written out three times: `perception/semantics.py`,
+    `grid/transient.py` and here. `perception/loader.py` states the id range a
+    fourth time as a bare constant. JP found them while wiring the front end.
+
+    They agree today, which is the only reason nothing has failed. They are
+    also the predicate that decides which returns never enter the persistent
+    map (§3.6) AND the predicate the reference map removes by (§9.1) -- so if
+    two of them ever drift, the ghost-removal metric is scored against a
+    reference that still contains the ghosts, and the number moves in the
+    direction that looks like success.
+
+    This file's copy now imports the transient layer's. The perception copies
+    are a cross-directory change and stay pinned here rather than edited.
+    """
+    import numpy as np
+    from vrgrid.eval import reference_map
+    from vrgrid.grid import transient
+
+    ids = np.arange(0, 400, dtype=np.uint32)
+    core = transient.is_moving(ids)
+
+    assert reference_map.is_moving is transient.is_moving, (
+        "eval re-declared is_moving instead of importing it"
+    )
+    assert ids[core].tolist() == list(range(250, 260))
+
+    semantics = pytest.importorskip("vrgrid.perception.semantics")
+    assert np.array_equal(semantics.is_moving(ids), core), (
+        "perception/semantics.py and grid/transient.py disagree about which "
+        "raw label ids are moving -- consolidate before this reaches a metric"
+    )
+
+    loader = pytest.importorskip("vrgrid.perception.loader")
+    assert list(loader.MOVING_LABEL_IDS) == list(range(250, 260)), (
+        "perception/loader.py's MOVING_LABEL_IDS has drifted from the predicate"
+    )

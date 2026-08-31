@@ -32,13 +32,20 @@ from pathlib import Path
 
 import numpy as np
 
-MOVING_ID_LO, MOVING_ID_HI = 250, 259
+# §9.1's removal rule -- raw ids 250-259, straight from the `.label` file --
+# is the same predicate the transient layer separates on, so it is imported
+# rather than restated. It had been restated, and the reference map and the map
+# under test disagreeing about which returns are dynamic is a way to score a
+# ghost-removal metric against a reference that has the ghosts in it.
+#
+# ⚑ There are still two more copies: `perception/semantics.py: is_moving` and
+#   the bare `MOVING_LABEL_IDS` in `perception/loader.py`. They agree with this
+#   one today -- 250..259 inclusive, both spellings -- and consolidating them
+#   is a cross-directory call, so it is proposed rather than done. See
+#   `test_reference_map.py::test_one_definition_of_moving`.
+from vrgrid.grid.transient import MOVING_ID_HI, MOVING_ID_LO, is_moving
 
-
-def is_moving(label_id) -> np.ndarray:
-    """§9.1's removal rule. Raw ids 250-259, straight from the `.label` file."""
-    lid = np.asarray(label_id, dtype=np.int64) & 0xFFFF
-    return (lid >= MOVING_ID_LO) & (lid <= MOVING_ID_HI)
+__all__ = ["MOVING_ID_HI", "MOVING_ID_LO", "ReferenceMap", "is_moving"]
 
 
 class ReferenceMap:
