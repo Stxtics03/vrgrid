@@ -43,6 +43,7 @@ from vrgrid.gpu.kernels import (
 )
 from vrgrid.gpu.pyramid import NODE_BYTES, allocate_pyramid, pyramid_bytes
 from vrgrid.gpu.pyramid import scratch_bytes as pyramid_scratch_bytes
+from vrgrid.gpu.visibility import new_visibility_scratch, visibility_scratch_bytes
 
 # --- the state of a cell nothing has been written into yet ---------------------
 #
@@ -417,6 +418,7 @@ class Allocation:
     max_tracks: int
     device: str = "cpu"
     pyramid: object = None     # None unless allocate(with_pyramid=True); §7.2
+    visibility: dict | None = None  # None unless allocate(with_visibility=True); §10.4
     _budget: dict = field(default_factory=dict)
     _resident_delta: int = 0
 
@@ -471,7 +473,8 @@ class Allocation:
 def allocate(schedule, thresholds: dict | None = None, device: str = "cpu",
              transient_rings: int | None = None, max_tracks: int = 256,
              storage: str = "toroidal", commit_pages: bool = True,
-             with_pyramid: bool = False) -> Allocation:
+             with_pyramid: bool = False,
+             with_visibility: bool = False) -> Allocation:
     """Preallocate the grid, the transient layer, the refinement pool and the
     tracked-object list. Called once at startup.
 
@@ -488,6 +491,23 @@ def allocate(schedule, thresholds: dict | None = None, device: str = "cpu",
     headline from inside my directory, which is the thing the Day-0 gate
     review said not to do. §7.2's own figure of 1.24 MB is low by about half
     and is wrong for a second reason too -- see the note in gpu/pyramid.py.
+
+    `with_visibility` adds the §10.4 cleanup's scratch, sized by
+    `visibility.max_candidate_cells`. **Off by default for the same reason the
+    pyramid is**, and only that reason: it costs 9.60 MB at the provisional cap
+    of 150,000 cells, which takes the total from 29.06 MB to 38.66 MB and moves
+    the number the dashboard counter shows. The cap itself is a team decision
+    -- it is a bound on how many occupied cells a frame may test, and nobody
+    can pick it honestly until the occupied set has been measured on real data
+    -- so what is settled here is the MECHANISM, not the value. When the room
+    picks a number, this becomes a one-line config change rather than a code
+    change, and the budget line appears in `report()` with it.
+
+    Until it is switched on the cleanup allocates its own scratch per call,
+    which is correct and is what `visibility_cleanup(scratch=None)` does, but
+    it is a per-frame allocation the memory bound does not declare. The
+    report's cell-count ratios are unaffected either way: they are computed
+    over map memory, and this is working memory.
     """
     xp = array_module(device)
     rings = derive_ring_layouts(schedule, storage)
@@ -517,6 +537,16 @@ def allocate(schedule, thresholds: dict | None = None, device: str = "cpu",
                else new_dense_scratch(n_cells))
     pyramid = allocate_pyramid(rings) if with_pyramid else None
 
+    # float32 because that is what JP's `perception/range_image.py` produces,
+    # and the gather buffer's dtype has to MATCH the image it gathers out of --
+    # np.take does not widen into `out`. Converting the image per frame instead
+    # would copy the whole thing, which is the allocation this scratch exists
+    # to avoid.
+    vis_cfg = (thresholds or {}).get("visibility", {})
+    max_candidates = vis_cfg.get("max_candidate_cells", 150_000)
+    visibility = (new_visibility_scratch(max_candidates, np.float32)
+                  if with_visibility else None)
+
     # The grid and the pool hold cells, so they get the empty-cell state rather
     # than raw zeros. The pool matters as much as the grid: a block handed out
     # by `pool.acquire()` is a set of brand-new cells, and one that boots with
@@ -527,7 +557,10 @@ def allocate(schedule, thresholds: dict | None = None, device: str = "cpu",
     # Fault every page in now rather than during frame 1. Only meaningful on
     # host memory; a cupy allocation is device-side and this does not apply.
     if commit_pages and device == "cpu":
-        for group in (grid, transient, pool, scratch):
+        groups = [grid, transient, pool, scratch]
+        if visibility is not None:
+            groups.append(visibility)
+        for group in groups:
             for arr in group.values():
                 commit(arr)
         commit(tracks)
@@ -538,6 +571,7 @@ def allocate(schedule, thresholds: dict | None = None, device: str = "cpu",
         storage=storage, pool_blocks=blocks,
         pool_cells_per_block=cells_per_block, max_tracks=max_tracks, device=device,
         pyramid=pyramid,
+        visibility=visibility,
     )
     alloc._resident_delta = (resident_bytes() - resident_before) if device == "cpu" else 0
     alloc._budget = {
@@ -554,6 +588,9 @@ def allocate(schedule, thresholds: dict | None = None, device: str = "cpu",
         alloc._budget[f"conservative pyramid ({NODE_BYTES} B/node)"] = \
             pyramid_bytes(rings)
         alloc._budget["pyramid reduction scratch"] = pyramid_scratch_bytes(rings)
+    if visibility is not None:
+        alloc._budget[f"visibility scratch (cap {max_candidates:,})"] = \
+            visibility_scratch_bytes(max_candidates, np.float32)
     return alloc
 
 
@@ -568,9 +605,24 @@ def measured_bytes(handle: Allocation) -> int:
     Kept separate from `bytes_allocated()` on purpose: the budget is what we
     claim, this is what we allocated, and the test that they match is the
     difference between a bound we assert and a bound we can demonstrate.
+
+    **Every optional group has to be counted here too, or the check quietly
+    stops checking.** It covered only the always-on groups until the visibility
+    scratch was added, which meant the pyramid had a budget line that nothing
+    ever weighed -- `bytes_allocated() == measured_bytes()` passed for the
+    default allocation and was never asserted with `with_pyramid=True` at all.
     """
     total = sum(a.nbytes for a in handle.grid.values())
     total += sum(a.nbytes for a in handle.transient.values())
     total += sum(a.nbytes for a in handle.pool.values())
     total += sum(a.nbytes for a in handle.scratch.values())
-    return total + handle.tracks.nbytes
+    total += handle.tracks.nbytes
+    if handle.pyramid is not None:
+        total += sum(a.nbytes
+                     for ring_levels in handle.pyramid.levels
+                     for level in ring_levels
+                     for a in level.values())
+        total += sum(a.nbytes for a in handle.pyramid.tmp.values())
+    if handle.visibility is not None:
+        total += sum(a.nbytes for a in handle.visibility.values())
+    return total

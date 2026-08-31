@@ -21,6 +21,7 @@ from vrgrid.gpu.allocators import (
     measured_bytes,
 )
 from vrgrid.gpu.kernels import CEILING_NONE
+from vrgrid.gpu.visibility import visibility_scratch_bytes
 from vrgrid.grid.schedule import load
 
 
@@ -274,3 +275,63 @@ def test_every_other_field_really_is_empty_at_zero(alloc):
         if name in EMPTY_CELL:
             continue
         assert not np.any(alloc.grid[name]), name
+
+
+# --- the §10.4 cleanup scratch, as a declared line item ----------------------
+
+def test_visibility_scratch_is_off_by_default():
+    """Same rule as the pyramid: switching it on moves the preallocated total,
+    and a number already on a slide does not get to move because a default
+    did. The cap is a team decision; the mechanism is not."""
+    a = allocate(load("5/10/20/40"))
+    assert a.visibility is None
+    assert not any("visibility" in k for k in a.budget)
+
+
+def test_visibility_scratch_is_declared_when_switched_on():
+    a = allocate(load("5/10/20/40"), with_visibility=True)
+    assert a.visibility is not None
+    line = [k for k in a.budget if k.startswith("visibility scratch")]
+    assert len(line) == 1
+    assert a.budget[line[0]] == sum(x.nbytes for x in a.visibility.values())
+
+
+@pytest.mark.parametrize("cap", [50_000, 150_000, 200_000])
+def test_the_cap_sizes_the_scratch_and_the_budget_together(cap):
+    """The declared line and the array that is actually handed to the frame
+    loop must be the same object's size, or the bound describes a scratch
+    nobody uses."""
+    th = {"visibility": {"max_candidate_cells": cap}}
+    a = allocate(load("5/10/20/40"), th, with_visibility=True)
+    assert len(a.visibility["u"]) == cap
+    assert a.budget[f"visibility scratch (cap {cap:,})"] == \
+        visibility_scratch_bytes(cap, np.float32)
+
+
+def test_the_gather_buffer_matches_the_range_image_dtype():
+    """float32 because that is what `perception/range_image.project()`
+    produces. `np.take` does not widen into `out`, so a float64 buffer against
+    a float32 image raises rather than converting -- and converting the image
+    per frame would copy the whole thing, which is what the scratch exists to
+    avoid."""
+    a = allocate(load("5/10/20/40"), with_visibility=True)
+    assert a.visibility["observed"].dtype == np.float32
+
+
+@pytest.mark.parametrize("kw", [
+    {},
+    {"with_pyramid": True},
+    {"with_visibility": True},
+    {"with_pyramid": True, "with_visibility": True},
+])
+def test_claimed_bound_equals_measured_bytes_in_every_configuration(kw):
+    """The budget is what we claim; `measured_bytes` is what we allocated.
+
+    Parametrised over the optional groups because it was not: `measured_bytes`
+    counted only the always-on groups, so the pyramid carried a budget line
+    that nothing ever weighed and this equality had never been asserted with
+    it switched on.
+    """
+    a = allocate(load("5/10/20/40"), with_pyramid=kw.get("with_pyramid", False),
+                 with_visibility=kw.get("with_visibility", False))
+    assert bytes_allocated(a) == measured_bytes(a)

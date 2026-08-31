@@ -36,12 +36,7 @@ from vrgrid.gpu.kernels import (
     scatter_sorted,
 )
 from vrgrid.gpu.shift import RingBuffer, flat_slot_into, new_slot_scratch, shift
-from vrgrid.gpu.visibility import (
-    Sensor,
-    apply_miss,
-    new_visibility_scratch,
-    visibility_cleanup,
-)
+from vrgrid.gpu.visibility import Sensor, apply_miss, visibility_cleanup
 from vrgrid.grid.fusion import fuse, occupancy_state
 from vrgrid.grid.lattice import i_ring, ring_of
 from vrgrid.grid.schedule import load_thresholds
@@ -83,17 +78,32 @@ class MapEngine:
     """Allocate once, then fold frames in. See the module docstring."""
 
     def __init__(self, schedule, thresholds=None, max_points: int = 150_000,
-                 max_candidates: int = 150_000, ghost_removal: bool = True,
+                 max_candidates: int | None = None, ghost_removal: bool = True,
                  sensor: Sensor | None = None, clip_class_ids: bool = False):
         self.sched = schedule
         self.thresholds = thresholds if thresholds is not None else load_thresholds()
+        if max_candidates is not None:
+            # An explicit cap overrides the config, but it has to reach
+            # `allocate()` too or the declared bound would describe a different
+            # scratch than the one the loop uses.
+            self.thresholds = dict(self.thresholds)
+            self.thresholds["visibility"] = dict(self.thresholds.get("visibility", {}))
+            self.thresholds["visibility"]["max_candidate_cells"] = max_candidates
         self.ghost_removal = ghost_removal
         self.clip_class_ids = clip_class_ids
         self.sensor = sensor or Sensor.from_config(self.thresholds)
-        self.handle = allocate(schedule, thresholds=self.thresholds)
+
+        # `with_visibility=True`: the cleanup's scratch is part of THIS loop's
+        # footprint, so it belongs in this allocation's budget rather than
+        # being conjured per call. `allocate()` leaves it off by default
+        # because switching it on moves the headline total, and that is the
+        # room's call -- but a frame loop that actually runs §10.4 is not the
+        # place to leave 9.60 MB undeclared.
+        self.handle = allocate(schedule, thresholds=self.thresholds,
+                               with_visibility=True)
 
         self.max_points = max_points
-        self.max_candidates = max_candidates
+        self.max_candidates = self.thresholds["visibility"]["max_candidate_cells"]
 
         # One toroidal window per ring, centred on the vehicle's start. `x0`
         # defaulting to the lattice origin would put half of every ring out of
@@ -108,13 +118,15 @@ class MapEngine:
         self.slot_scratch["out"] = np.zeros(max_points, np.int64)
         self.idx = np.zeros(max_points, np.int64)
 
-        # The range image is JP's, and it is float32; the gather buffer has to
-        # match its dtype exactly -- np.take does not widen into `out`.
-        self.vis_scratch = new_visibility_scratch(max_candidates, np.float32)
+        # From the allocation, not a fresh one: the range image is JP's and it
+        # is float32, and `allocate()` sizes the gather buffer to match --
+        # np.take does not widen into `out`, so the dtypes have to agree.
+        self.vis_scratch = self.handle.visibility
         self.range2d = np.zeros((0, 0), np.float32)
-        self._cand = {n: np.zeros(max_candidates, np.float64) for n in "xyz"}
-        self._cand_slots = np.zeros(max_candidates, np.int64)
-        self._has_return = np.zeros(max_candidates, np.bool_)
+        cap = self.max_candidates
+        self._cand = {n: np.zeros(cap, np.float64) for n in "xyz"}
+        self._cand_slots = np.zeros(cap, np.int64)
+        self._has_return = np.zeros(cap, np.bool_)
 
     # -- binning ------------------------------------------------------------
 

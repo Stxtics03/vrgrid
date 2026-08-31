@@ -112,6 +112,18 @@ visibility:
   protect_current_returns: true
   range_tolerance_m: 0.30
   frames_to_clear: 3
+  # Cap on candidate cells per frame -- the currently-OCCUPIED cells, since a
+  # free cell has nothing to clear. It sizes the cleanup's preallocated
+  # scratch at 64 B per cell against a float32 range image, exactly the way
+  # `scatter.max_points_per_frame` sizes the scatter scratch.
+  #
+  # ⚑ PROVISIONAL. 150,000 is an argument, not a measurement: a sweep touches
+  #   ~105,000 distinct cells a frame and the occupied set of a rolling 100 m
+  #   local map should not be several times that. The measurement needs
+  #   SemanticKITTI on disk. Raising it costs 64 B a cell and moves the
+  #   dashboard's total; lowering it silently drops candidates from the far
+  #   field, which is where over-clearing is least likely to be noticed.
+  max_candidate_cells: 150000
 
 # --- refinement pool (master v4 §3.4) ---------------------------------------
 refinement_pool:

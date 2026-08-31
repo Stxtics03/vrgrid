@@ -39,12 +39,30 @@ def main() -> None:
     # 1.24 MB -- low by more than half. A node stores the REDUCTIONS, not the
     # source fields (ground is both H_max and H_min), and the pyramid covers
     # the allocated SLOTS, not the logical cells. See docs/sih-math.md §7.2.
-    with_p = allocate(sched, thresholds, transient_rings=args.transient_rings,
-                      max_tracks=args.max_tracks, storage=args.storage,
-                      with_pyramid=True)
-    extra = with_p.total_bytes() - a.total_bytes()
-    print(f"\n  {'+ conservative pyramid (stretch)':<34} {extra / 1e6:>8.2f} MB")
-    print(f"  {'TOTAL with pyramid':<34} {with_p.total_bytes() / 1e6:>8.2f} MB")
+    def variant(**kw):
+        return allocate(sched, thresholds, transient_rings=args.transient_rings,
+                        max_tracks=args.max_tracks, storage=args.storage, **kw)
+
+    with_p = variant(with_pyramid=True)
+    with_v = variant(with_visibility=True)
+    both = variant(with_pyramid=True, with_visibility=True)
+    for handle in (with_p, with_v, both):
+        assert bytes_allocated(handle) == measured_bytes(handle), \
+            "claimed bound != measured bytes"
+
+    cap = thresholds.get("visibility", {}).get("max_candidate_cells", 150_000)
+    print(f"\n  {'+ conservative pyramid (stretch)':<34} "
+          f"{(with_p.total_bytes() - a.total_bytes()) / 1e6:>8.2f} MB")
+    print(f"  {'+ visibility scratch (§10.4)':<34} "
+          f"{(with_v.total_bytes() - a.total_bytes()) / 1e6:>8.2f} MB")
+    print(f"  {'-' * 34} {'-' * 8}")
+    print(f"  {'TOTAL with both':<34} {both.total_bytes() / 1e6:>8.2f} MB")
+
+    print(f"\nBoth are OFF by default and neither is in the {a.total_bytes() / 1e6:.2f} MB "
+          f"above. The pyramid is a\nstretch item; the visibility scratch is waiting on a "
+          f"cap -- {cap:,} candidate cells is\nprovisional, and picking it honestly needs "
+          f"the occupied set measured on real data.\nUntil then the cleanup allocates its "
+          f"own scratch per call: correct, and undeclared.")
 
     print(f"\n{a.logical_cells:,} logical cells, {a.allocated_slots:,} allocated slots.")
     print("Ratios in the report are cell-count ratios over the logical count, so")
