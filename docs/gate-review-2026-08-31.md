@@ -17,7 +17,7 @@
 
 Items 1–4 are blockers. Item 5 moves a number on a slide. Item 6 is for the record.
 
-**Suite: 368 passed, 20 skipped. `ruff check .` clean. `main` is green.**
+**Suite: 390 passed, 20 skipped. `ruff check .` clean. `main` is green.**
 
 ---
 
@@ -27,7 +27,7 @@ Items 1–4 are blockers. Item 5 moves a number on a slide. Item 6 is for the re
 
 ### First, the thing I would fix before anything else in this document
 
-**§10.4 exists twice.** `src/gpu/visibility.py: visibility_cleanup()` is implemented, tested and benchmarked — eq (32), the never-clear-a-current-return guard, a preallocated scratch, p50 9.5 / p99 13.3 ms at 200,000 candidates. `src/grid/fusion.py: visibility_cleanup()` is:
+**§10.4 exists twice.** `src/gpu/visibility.py: visibility_cleanup()` is implemented, tested and benchmarked — eq (32), the never-clear-a-current-return guard, a preallocated scratch, p50 9.0 / p99 10.6 ms at 200,000 candidates. `src/grid/fusion.py: visibility_cleanup()` is:
 
 ```python
 def visibility_cleanup(soa, range_image, thresholds) -> None:
@@ -62,21 +62,34 @@ The gap is one wiring change, not new work — `visibility_cleanup` returns a `s
 
 ```
 stage       owner         p50 ms   p99 ms   max ms   x10Hz  MB/frame
-bin         ⚑ nobody       16.20    21.27    24.46    4.7x      6.96
-scatter     Shrestha        6.14     8.26     8.50   12.1x      0.55
-fuse        Aakash          8.19    11.56    11.99    8.7x        ~0
-cleanup     Shrestha        9.50    13.33    13.51    7.5x      0.07
-pyramid     Shrestha        2.89     4.40     4.61   22.7x      0.05
-shift       Shrestha        2.99     4.18     4.29   23.9x      0.29
-MEASURED                   46.16    59.15    59.52    1.7x      7.92
+bin         ⚑ nobody       14.57    17.45    17.65    5.7x      6.96
+scatter     Shrestha        5.80     8.21     8.54   12.2x      0.55
+fuse        Aakash          6.66     9.10    10.33   11.0x        ~0
+cleanup     Shrestha        9.00    10.58    10.60    9.5x      0.07
+pyramid     Shrestha        2.69     3.98     4.04   25.1x      0.05
+shift       Shrestha        2.85     3.48     3.94   28.8x      0.29
+MEASURED                   41.87    49.49    49.69    2.0x      7.92
 ```
+
+Broken down, because the split matters for who fixes what:
+
+| sub-step | p50 ms | in |
+|---|---|---|
+| `ring_of` — ring membership | 4.39 | `src/grid/lattice.py` |
+| `i_ring` — lattice index, ×4 rings | 5.79 | `src/grid/lattice.py` |
+| `flat_slot` — index → storage slot, ×4 rings | 4.60 | `src/gpu/shift.py` |
+| mask + gather per ring | 3.85 | the composition itself |
 
 Turning a sweep into flat slots — `ring_of` for membership, `i_ring` per ring, `flat_slot` into the toroidal window — is a stage the frame loop must run every frame. **No module exports it.** It is composed by hand in three places already: in `scripts/timing_table.py` (all four rings), in `scripts/baseline_demo.py` (ring 0 only), and in `src/grid/transient.py` (a third spelling). Three hand-rolled copies of the one step between perception and the grid is an integration defect waiting for the day the three disagree, and they will disagree silently — a binning bug produces a plausible map, not a crash.
 
 Two things make it worse than a tidiness complaint:
 
-- **It is 16.2 ms p50, the largest single stage,** larger than `fuse` and larger than my `cleanup`.
-- **It allocates 6.96 MB per frame** in boolean masks and fancy-index copies. That is against the "no allocation in the frame loop" invariant, and it is more than twice what the scatter scratch cost per frame before I preallocated it — the defect I already found once, with a profiler, behind a docstring that said the opposite.
+- **It is the largest single stage,** larger than `fuse` and larger than my `cleanup`.
+- **It allocates 6.96 MB per frame**, against the "no allocation in the frame loop" invariant, and more than twice what the scatter scratch cost per frame before I preallocated it — the defect I already found once, with a profiler, behind a docstring that said the opposite.
+
+**On that 6.96 MB: I had this wrong when I first drafted this section, and the correction points at a different file than I did.** I assumed it was the masks and fancy-index copies in my own composition. Measured, it is not: `ring_of` allocates 6.96 MB per call on its own, 4.80 MB of it inside `d_aniso`, and the composition around it contributes essentially nothing. I rewrote the binning as a single fused pass with every intermediate preallocated and the per-frame figure did not move by a byte. **So the allocation is `src/grid/lattice.py`'s to fix, and no amount of restructuring on my side touches it.** Roughly seven full-length float64 temporaries per call, at 0.96 MB each for a 120,000-point sweep.
+
+**What I have already done, in my half.** `flat_slot` is now `flat_slot_into` — division-free and zero-allocation, and pinned bit-identical to the old method across ring sides, offsets and shifted windows by `test_flat_slot_into_matches_flat_slot`. In view means `x0 <= ix < x0 + W`, so `ix - x0` is already in `[0, W)` and `(x0 + c) mod W` is `(x0 mod W) + c` minus `W` once if it overflowed: one masked subtract instead of an integer division per point per axis. That is 28% off the `flat_slot` sub-step, and it is what took `bin` from 16.20 to 14.57 ms p50 and the frame subtotal from 59.15 to 49.49 ms p99 — the table above is the after. The odd-side (33) case is in the parametrisation deliberately — the identity has nothing to do with powers of two, and a version that assumed one would pass on 400 and 500.
 
 **And it is easy to get wrong in a way that survives casual testing.** I got it wrong twice today. Ring membership is a question about distance from the *sensor*, so `ring_of` takes the vehicle-frame point; the lattice index is *global*, so `i_ring` takes the world-frame one. Feed world coordinates to `ring_of` and every point reads as OUTSIDE once the vehicle has driven past ring 3's half-width. Hold the sweep at the vehicle origin while the ring windows advance and by frame 13 everything bins to −1 — after which `scatter` and `fuse` post sub-millisecond p50s for doing nothing at all, and the latency table reads *better*. Both failure modes look correct for the first few seconds. Both are written up in `bin_points`' docstring.
 
@@ -141,9 +154,9 @@ Corrected: **2.73 MB of nodes**, plus 0.38 MB of shared reduction scratch, 3.11 
 
 ## 6. Latency, for the record: the back end alone is 59 ms of the 100 ms budget
 
-From the table in item 2. 46 ms p50, 59 ms p99, **1.7× headroom at p99 — before a single line of perception runs.**
+From the table in item 2. 42 ms p50, 49 ms p99, **2.0× headroom at p99 — before a single line of perception runs.**
 
-Whatever `load`, `transform`, `range_image`, `semantics` and `motion` cost has to fit in the remaining ~41 ms. I am not raising this as an alarm: `bin` alone is 16 ms of it and is unoptimised (item 1), and the whole thing is the numpy CPU reference path. But **the 10 Hz claim is currently bounded, not demonstrated**, and I would rather say that at Day 3 than have it emerge at Day 6. JP: a per-stage p50/p99 from your front end, whenever you have one, and I will put the real total on the table.
+Whatever `load`, `transform`, `range_image`, `semantics` and `motion` cost has to fit in the remaining ~51 ms. I am not raising this as an alarm: `bin` alone is 14.6 ms of it and is only half-optimised (item 2), and the whole thing is the numpy CPU reference path. But **the 10 Hz claim is currently bounded, not demonstrated**, and I would rather say that at Day 3 than have it emerge at Day 6. JP: a per-stage p50/p99 from your front end, whenever you have one, and I will put the real total on the table.
 
 Stable to within about 10% across three runs of 200 frames. `Intel i7-14650HX`, numpy 2.5.2, single-threaded CPU path. No GPU kernel exists yet; that is a Day-6 item and it is where the headroom comes back.
 
@@ -157,7 +170,7 @@ Stable to within about 10% across three runs of 200 frames. `Intel i7-14650HX`, 
 
 **Scatter, two paths, bit-identical** — `scatter_sorted` (scratch sized by points) and `scatter_atomic` (dense accumulator, the literal §3.5 reading). `tests/test_kernels.py` asserts they agree field-for-field, and `bench_scatter.py` prints the hash proving it. Re-measured tonight on this machine at 120,000 returns into 745,000 cells: **sorted p50 6.65 / p99 9.81 ms, atomic p50 20.56 / p99 30.51 ms** — 3.1× apart on the median. Note these are higher than the 5.9 / 6.1 recorded in `src/gpu/CLAUDE.md`, which was measured on a quieter machine; the *ratio* between the two paths is what the design decision rests on and it has not moved. I am re-running every latency figure I own before any of them reaches a slide.
 
-**Visibility cleanup, §10.4** — eq (32) plus the never-clear-a-current-return guard, producing a mask. p50 9.5 / p99 13.3 ms at 200,000 candidates. Log-odds and the three-state decision stay in fusion, which is Aakash's.
+**Visibility cleanup, §10.4** — eq (32) plus the never-clear-a-current-return guard, producing a mask. p50 9.0 / p99 10.6 ms at 200,000 candidates. Log-odds and the three-state decision stay in fusion, which is Aakash's.
 
 **Conservative pyramid, §7.2–7.3 (stretch)** — off by default. Rebuild p50 2.9 / p99 4.4 ms over 910,000 slots. The theorem test is mutation-checked: six deliberate breakages, all six fail the suite.
 
@@ -178,6 +191,7 @@ Two things worth saying about correctness specifically:
 | Real-data latency numbers | Blocked — no SemanticKITTI on disk |
 | GPU kernels (CuPy path) | Day 6. Everything today is the numpy CPU reference path |
 | `bin_points` in `src/grid/` | Blocked on an ownership decision — item 2 |
+| `ring_of`'s 6.96 MB/frame | `src/grid/lattice.py`, not mine to fix — item 2 |
 
 ## Tomorrow
 

@@ -13,6 +13,8 @@ from vrgrid.gpu.shift import (
     RingBuffer,
     cells_per_shift,
     columns_to_clear,
+    flat_slot_into,
+    new_slot_scratch,
     rows_to_clear,
     shift,
 )
@@ -191,3 +193,74 @@ def test_a_literal_zero_clear_is_still_available(buf):
     soa = {"ceiling_height": np.full(W * W, 123, np.int16)}
     cleared = shift(buf, 2, 0, soa, fill={})
     assert np.all(soa["ceiling_height"][cleared] == 0)
+
+
+# --- flat_slot_into: the frame-path spelling of flat_slot ---------------------
+
+@pytest.mark.parametrize("side,offset", [(400, 0), (500, 160_000), (500, 660_000),
+                                         (32, 7), (33, 11)])
+@pytest.mark.parametrize("dx,dy", [(0, 0), (37, -13), (1234, 998), (-900, 401)])
+def test_flat_slot_into_matches_flat_slot(side, offset, dx, dy):
+    """The optimisation is only worth having if it is bit-identical.
+
+    `flat_slot_into` replaces `np.mod` with a subtract under a mask, which is
+    valid only because an in-view point's window offset is already in [0, W).
+    An odd side (33) is in the parametrisation on purpose: the identity has
+    nothing to do with powers of two, and a version that quietly assumed one
+    would pass on 400 and 500 and fail here.
+    """
+    rng = np.random.default_rng(abs(side + offset + dx + dy))
+    buf = RingBuffer(side=side, offset=offset, x0=-(side // 2) + dx,
+                     y0=-(side // 2) + dy)
+    # Sampled around the WINDOW, not around the lattice origin: with a small
+    # side and a large shift the window has driven clear of the origin, and a
+    # sample centred there would be entirely out of view -- which agrees
+    # trivially and tests nothing.
+    n = 4096
+    ix = rng.integers(buf.x0 - side, buf.x0 + 2 * side, n).astype(np.int64)
+    iy = rng.integers(buf.y0 - side, buf.y0 + 2 * side, n).astype(np.int64)
+
+    scratch = new_slot_scratch(n)
+    got = flat_slot_into(buf, ix, iy, np.zeros(n, np.int64), scratch)
+    assert np.array_equal(got, buf.flat_slot(ix, iy))
+
+    # The parametrisation has to actually exercise both branches, or this
+    # asserts that two functions agree about nothing.
+    assert (got >= 0).any() and (got < 0).any()
+
+
+def test_flat_slot_into_allocates_nothing_per_call():
+    """The whole point: this runs on the frame path, and the frame path does
+    not allocate. Anything above a few KB means a temporary crept back in."""
+    import tracemalloc
+
+    buf = RingBuffer(side=500, offset=0, x0=-250, y0=-250)
+    n = 60_000
+    rng = np.random.default_rng(0)
+    ix = rng.integers(-600, 600, n).astype(np.int64)
+    iy = rng.integers(-600, 600, n).astype(np.int64)
+    scratch, out = new_slot_scratch(n), np.zeros(n, np.int64)
+
+    flat_slot_into(buf, ix, iy, out, scratch)        # warm up
+    tracemalloc.start()
+    try:
+        peak = 0
+        for _ in range(5):
+            tracemalloc.reset_peak()
+            before = tracemalloc.get_traced_memory()[0]
+            flat_slot_into(buf, ix, iy, out, scratch)
+            peak = max(peak, tracemalloc.get_traced_memory()[1] - before)
+    finally:
+        tracemalloc.stop()
+    assert peak < 64_000, f"{peak:,} B per call -- a temporary is back"
+
+
+def test_flat_slot_into_accepts_a_scratch_larger_than_the_batch():
+    """Sized once at the point cap, used every frame at whatever the sweep
+    actually returned."""
+    buf = RingBuffer(side=64, offset=0, x0=-32, y0=-32)
+    scratch = new_slot_scratch(10_000)
+    ix = np.array([0, 5, -31, 40], np.int64)
+    iy = np.array([0, -5, 31, -40], np.int64)
+    got = flat_slot_into(buf, ix, iy, np.zeros(4, np.int64), scratch)
+    assert np.array_equal(got, buf.flat_slot(ix, iy))

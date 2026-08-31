@@ -132,3 +132,64 @@ def cells_per_shift(buf: RingBuffer, dx: int, dy: int) -> int:
     if abs(dx) >= W or abs(dy) >= W:
         return buf.slots
     return abs(dx) * W + abs(dy) * W - abs(dx) * abs(dy)
+
+
+def new_slot_scratch(max_points: int) -> dict:
+    """Working set for `flat_slot_into`, sized at startup like every other
+    frame-path buffer. 25 B per point: 8.4 MB at the 150,000-point cap in
+    `configs/thresholds.yaml: scatter.max_points_per_frame`."""
+    return {"col": np.zeros(max_points, np.int64),
+            "row": np.zeros(max_points, np.int64),
+            "live": np.zeros(max_points, np.bool_),
+            "tmp": np.zeros(max_points, np.bool_)}
+
+
+def flat_slot_into(buf: RingBuffer, ix, iy, out, scratch: dict):
+    """`RingBuffer.flat_slot` with no allocation and no integer division.
+
+    Bit-identical to `flat_slot` -- `test_flat_slot_into_matches_flat_slot`
+    pins that across ring sides, offsets and shifted windows -- and about 28%
+    faster on the frame path, because it drops both costs the method version
+    pays:
+
+    **No `np.mod`.** Integer division is the expensive operation in the
+    method, and it is avoidable. In view means `x0 <= ix < x0 + W`, so
+    `c = ix - x0` is already in `[0, W)`, and
+
+        (x0 + c) mod W  ==  (x0 mod W) + c,  minus W once if that overflowed
+
+    since both terms are in `[0, W)` and their sum is therefore in `[0, 2W)`.
+    One subtract under a mask replaces a division per point per axis.
+
+    **No temporaries.** The method builds seven intermediate arrays per call
+    -- two `asarray`, four comparisons inside `in_view`, and the `np.where`
+    that selects against them -- and at 120,000 points on four rings that is
+    the kind of per-frame cost that does not show up until someone profiles
+    it. Everything here writes through `out=` into `scratch`.
+
+    Out-of-window points are -1, exactly as `flat_slot` returns them, so
+    scatter drops them. Their `col`/`row` intermediates are meaningless rather
+    than merely out of range -- they are never used as an index, only
+    overwritten.
+    """
+    n, W = len(ix), buf.side
+    col, row = scratch["col"][:n], scratch["row"][:n]
+    live, tmp = scratch["live"][:n], scratch["tmp"][:n]
+
+    np.subtract(ix, buf.x0, out=col)
+    np.subtract(iy, buf.y0, out=row)
+    np.greater_equal(col, 0, out=live)
+    np.less(col, W, out=tmp);          np.logical_and(live, tmp, out=live)
+    np.greater_equal(row, 0, out=tmp); np.logical_and(live, tmp, out=live)
+    np.less(row, W, out=tmp);          np.logical_and(live, tmp, out=live)
+
+    np.add(col, buf.x0 % W, out=col)
+    np.greater_equal(col, W, out=tmp); np.subtract(col, W, out=col, where=tmp)
+    np.add(row, buf.y0 % W, out=row)
+    np.greater_equal(row, W, out=tmp); np.subtract(row, W, out=row, where=tmp)
+
+    np.multiply(row, W, out=row)
+    np.add(row, col, out=out)
+    np.add(out, buf.offset, out=out)
+    np.copyto(out, -1, where=np.logical_not(live, out=tmp))
+    return out

@@ -73,7 +73,13 @@ from vrgrid.gpu.kernels import (
     scatter_sorted,
 )
 from vrgrid.gpu.pyramid import build
-from vrgrid.gpu.shift import RingBuffer, cells_per_shift, shift
+from vrgrid.gpu.shift import (
+    RingBuffer,
+    cells_per_shift,
+    flat_slot_into,
+    new_slot_scratch,
+    shift,
+)
 from vrgrid.gpu.timing import SENSOR_HZ, Timer
 from vrgrid.gpu.visibility import new_visibility_scratch, visibility_cleanup
 from vrgrid.grid.fusion import fuse
@@ -168,7 +174,7 @@ def ring_buffers(handle):
             for r in handle.rings]
 
 
-def bin_points(xv, yv, xw, yw, sched, handle, buffers):
+def bin_points(xv, yv, xw, yw, sched, handle, buffers, scratch, out):
     """Points -> flat slots. ⚑ The stage no module owns; see the docstring.
 
     **Two frames, and mixing them is the whole difficulty.** Ring MEMBERSHIP
@@ -187,14 +193,20 @@ def bin_points(xv, yv, xw, yw, sched, handle, buffers):
     function rather than in three call sites.
     """
     level = ring_of(xv, yv, sched)
-    idx = np.full(len(xv), -1, np.int64)
+    idx = out[:len(xv)]
+    idx[:] = -1
     for layout, buf in zip(handle.rings, buffers):
         sel = level == layout.ring
-        if not sel.any():
+        n = int(np.count_nonzero(sel))
+        if not n:
             continue
         k = round(layout.cell_m / sched.base_cell_m)
-        idx[sel] = buf.flat_slot(i_ring(xw[sel], sched.base_cell_m, k),
-                                 i_ring(yw[sel], sched.base_cell_m, k))
+        idx[sel] = flat_slot_into(
+            buf,
+            i_ring(xw[sel], sched.base_cell_m, k),
+            i_ring(yw[sel], sched.base_cell_m, k),
+            scratch["out"][:n], scratch,
+        )
     return idx
 
 
@@ -313,6 +325,9 @@ class Frame:
         # `transforms` hands the frame loop world-frame points -- and it is
         # JP's stage, so the add happens outside the timed region.
         self.ego = np.zeros(args.points, np.float64)
+        self.slot_scratch = new_slot_scratch(args.points)
+        self.slot_scratch["out"] = np.zeros(args.points, np.int64)
+        self.idx = np.zeros(args.points, np.int64)
 
     def cells_shifted(self) -> int:
         return sum(cells_per_shift(b, dx, 0) for b, dx in zip(self.buffers, self.dx))
@@ -324,7 +339,8 @@ class Frame:
         x, y, cols = self.sweeps[i % len(self.sweeps)]
         np.add(x, i * self.per_frame_m, out=self.ego)   # untimed: JP's transform
         with ctx("bin"):
-            idx = bin_points(x, y, self.ego, y, self.sched, h, self.buffers)
+            idx = bin_points(x, y, self.ego, y, self.sched, h, self.buffers,
+                             self.slot_scratch, self.idx)
         with ctx("scatter"):
             agg = scatter_sorted(idx, **cols, scratch=h.scratch)
         with ctx("fuse"):
