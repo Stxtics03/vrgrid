@@ -99,6 +99,8 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["intensity", "class", "motion", "ground", "reflectivity"],
         help="how the dashboard colours the point cloud",
     )
+    p.add_argument("--show-ghosts", action="store_true",
+                   help="keep moving points in the main cloud (default: split to world/ghosts)")
     p.add_argument("--no-patchworkpp", action="store_true", help="use the semantic-class ground proxy")
     return p
 
@@ -115,7 +117,8 @@ def main(argv=None) -> int:
     if args.viz or args.save:
         from vrgrid.dash.pipeline_view import PipelineView
 
-        view = PipelineView(sched, spawn=args.viz, save_path=args.save, color_by=args.color_by)
+        view = PipelineView(sched, spawn=args.viz, save_path=args.save,
+                            color_by=args.color_by, ghost_removal=not args.show_ghosts)
 
     n = 0
     for frame in iter_pipeline(args.seq, args.frames, use_patchworkpp=not args.no_patchworkpp):

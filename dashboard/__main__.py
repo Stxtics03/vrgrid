@@ -10,6 +10,10 @@ days before submission the framework must still run and still produce numbers.
 
 Shows: the point cloud coloured by the chosen layer, ring boundaries and the
 blind cone tracking the vehicle, and the vehicle pose per frame on the timeline.
+
+Ghost toggle: the moving points are logged to `world/ghosts`; toggle that
+entity's visibility in the viewer. `--show-ghosts` puts them back in the main
+cloud instead (for a "raw pipeline output" view with nothing to toggle).
 """
 
 import argparse
@@ -26,6 +30,8 @@ def main(argv=None) -> None:
         choices=["intensity", "class", "motion", "ground", "reflectivity"],
     )
     p.add_argument("--save", default=None, help="write a .rrd recording instead of spawning a viewer")
+    p.add_argument("--show-ghosts", action="store_true",
+                   help="keep moving points in world/points (default: split to world/ghosts)")
     p.add_argument("--no-patchworkpp", action="store_true")
     args = p.parse_args(argv)
 
@@ -41,7 +47,8 @@ def main(argv=None) -> None:
     from .pipeline_view import PipelineView
 
     sched = schedule_mod.load(args.schedule)
-    view = PipelineView(sched, spawn=args.save is None, save_path=args.save, color_by=args.color_by)
+    view = PipelineView(sched, spawn=args.save is None, save_path=args.save,
+                        color_by=args.color_by, ghost_removal=not args.show_ghosts)
     n = 0
     for frame in iter_pipeline(args.seq, args.frames, use_patchworkpp=not args.no_patchworkpp):
         view.log_frame(frame)

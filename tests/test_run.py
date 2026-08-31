@@ -52,10 +52,9 @@ def test_ground_split_matches_semantics_roughly():
 
 def test_pipeline_view_builds_headless_and_colours(tmp_path):
     pytest.importorskip("rerun")
-    from vrgrid.dash.pipeline_view import _COLORERS
     from vrgrid.grid import schedule as schedule_mod
 
-    from vrgrid.dash.pipeline_view import PipelineView
+    from vrgrid.dash.pipeline_view import COLOR_BY, PipelineView, _frame_colors
 
     sched = schedule_mod.load("5/10/20/40")
     PipelineView(sched, spawn=False, save_path=str(tmp_path / "t.rrd"), color_by="class")
@@ -68,6 +67,6 @@ def test_pipeline_view_builds_headless_and_colours(tmp_path):
         ground = np.random.default_rng(3).random(100) > 0.5
         reflectivity8 = np.random.default_rng(4).integers(0, 256, 100).astype(np.uint8)
 
-    for name, fn in _COLORERS.items():
-        c = fn(_F())
+    for name in COLOR_BY:
+        c = _frame_colors(_F(), name)
         assert c.shape == (100, 3) and c.dtype == np.uint8, name
