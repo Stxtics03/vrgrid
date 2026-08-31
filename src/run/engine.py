@@ -38,14 +38,16 @@ from vrgrid.gpu.kernels import (
 )
 from vrgrid.gpu.shift import RingBuffer, flat_slot_into, new_slot_scratch, shift
 from vrgrid.gpu.visibility import Sensor, apply_miss, visibility_cleanup
-from vrgrid.grid.fusion import fuse, occupancy_state
+
+# fusion packs the semantic class into 5 bits since 1 Sep (math §10.2, Gate 3
+# item 3), so ids above 31 raise rather than wrap -- a silent % 32 would relabel
+# class 32 as 0, which is `unlabeled`. The SemanticKITTI learning set stops at
+# 19, so every real frame now fits and nothing on this path clips. Imported
+# rather than restated: this file held its own `CLASS_MAX = 15` and would have
+# gone on clipping perfectly storable ids after the split landed.
+from vrgrid.grid.fusion import CLASS_MAX, fuse, occupancy_state
 from vrgrid.grid.lattice import i_ring, ring_of
 from vrgrid.grid.schedule import load_thresholds
-
-# fusion packs the semantic class into 4 bits (math §10.2), so ids above this
-# raise rather than wrap -- a silent % 16 would relabel class 16 as 0, which is
-# `unlabeled`. SemanticKITTI is 19 classes. See `class_ids_fit` below.
-CLASS_MAX = 15
 
 
 @dataclass
@@ -238,13 +240,13 @@ class MapEngine:
             if not self.clip_class_ids:
                 raise ValueError(
                     f"semantic class {int(cls.max())} exceeds the {CLASS_MAX} that "
-                    "fusion's 4-bit candidate holds (math §10.2). SemanticKITTI is "
-                    "19-class, so this is every real frame, not an edge case. The "
-                    "fix is the 5-bit candidate / 3-bit counter split proposed in "
-                    "fusion.boyer_moore_update -- a room decision, pinned in "
-                    "test_nineteen_classes_do_not_fit. Pass clip_class_ids=True "
-                    "(--clip-class-ids) to run anyway with ids clipped, which "
-                    "corrupts the class layer and nothing else.")
+                    "fusion's 5-bit candidate holds (math §10.2). The learning set "
+                    "stops at 19, so an id above 31 means RAW SemanticKITTI ids "
+                    "(10, 11, 40, 252, ...) are reaching the map where learning "
+                    "ids are expected -- see `perception.semantics.semantic_labels`. "
+                    "Clipping would be the wrong repair for that: pass "
+                    "clip_class_ids=True (--clip-class-ids) only to get a frame "
+                    "through, and know that it corrupts the class layer.")
             np.clip(cls, 0, CLASS_MAX, out=cls)
 
         rng_m = np.sqrt(xs * xs + ys * ys + (zs) * (zs))

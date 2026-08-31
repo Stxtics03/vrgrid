@@ -31,9 +31,12 @@ catch, and nothing else:
                             is wrong.
 
 Classes are `road` / `sidewalk` / `parking` only. `terrain` would be the
-natural label for the verge and it is learning id 17, which does not fit the
-cell's 4-bit class nibble -- the §10.2 conflict, met in practice on the first
-synthetic sequence rather than on the first real one.
+natural label for the verge; it is learning id 17 and did not fit the cell's
+4-bit class nibble, which is where the §10.2 conflict was first met in
+practice. The byte was re-split 5 | 3 on 1 Sep and `terrain` fits now, so this
+scene can grow a verge whenever the metrics want one -- it has not been
+changed yet, because every reference number in `docs/` was measured against
+these three classes.
 """
 
 from pathlib import Path

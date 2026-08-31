@@ -39,7 +39,7 @@ from vrgrid.cell import (
     OCC_UNKNOWN,
     TRAV_CONFIDENCE,
 )
-from vrgrid.grid.fusion import occupancy_state
+from vrgrid.grid.fusion import occupancy_state, unpack_class
 from vrgrid.grid.lattice import OUTSIDE, i_ring, ring_of
 from vrgrid.grid.schedule import load_thresholds
 
@@ -150,7 +150,7 @@ def query(gm: GridMap, x_m: float, y_m: float) -> CellQuery:
     ceiling = float(soa["ceiling_height"][slot]) / 100.0
     occ = int(occupancy_state(soa, gm.thresholds, [slot])[0])
     trav = int(soa["traversability"][slot])
-    cls = int(soa["semantic_class"][slot] >> 4)      # §10.2 candidate nibble
+    cls = int(unpack_class(soa["semantic_class"][slot])[0])   # §10.2 candidate
     n = int(soa["obs_count"][slot])
 
     dynamic = False

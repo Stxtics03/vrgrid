@@ -56,6 +56,7 @@ would look sharper precisely where it had just admitted it was guessing.
 
 import numpy as np
 from vrgrid.cell import FLAG_DYNAMIC, TRAV_SLOPE, TRAV_STEP
+from vrgrid.grid.fusion import unpack_class
 from vrgrid.grid.pool import FREE, priority
 from vrgrid.grid.quantise import dequantise_variance_cm2, quantise_variance_cm2
 from vrgrid.grid.schedule import load_thresholds
@@ -77,8 +78,13 @@ def refine_class_ids(thresholds=None) -> np.ndarray:
     """The classes that fire the gate, by id -- those that CAN fire it.
 
     See `unstorable_refine_classes()`. Classes whose id will not fit the
-    cell's 4-bit class nibble are dropped here, because a cell can never
-    report them and matching against them is dead code that reads as working.
+    cell's class field are dropped here, because a cell can never report them
+    and matching against them is dead code that reads as working.
+
+    Since the byte was re-split 5/3 (1 Sep) the field holds ids to 31 and the
+    whole label set fits, so nothing is dropped and this returns every
+    configured name. The filter stays because it is what makes that fact
+    checkable rather than assumed.
     """
     from vrgrid.grid.fusion import CLASS_MAX
     from vrgrid.grid.traversability import CLASS_IDS
@@ -101,20 +107,20 @@ def _names(thresholds=None):
 
 
 def unstorable_refine_classes(thresholds=None) -> list:
-    """⚑ Classes the gate is configured to refine on and the cell cannot hold.
+    """Classes the gate is configured to refine on and the cell cannot hold.
 
-    The §10.2 conflict, arriving where it does the most damage. The class
-    nibble is 4 bits and holds ids 0-15; `pole` is 18 and `traffic-sign` is
-    19. Those are **the two classes semantic refinement exists for** -- thin
-    structures whose entire geometry is smaller than the cell they land in
-    past 25 m -- and a cell can never report either, so the gate's most
-    important criterion is dead code that reads as working.
+    **Empty since 1 Sep**, and it emptied itself: the §10.2 byte was re-split
+    5/3, the class field went from 16 ids to 32, and every configured name now
+    fits. Nothing here changed.
 
-    Nothing here silently substitutes or wraps: `% 16` would turn `pole` into
-    `other-vehicle` and `traffic-sign` into `road`, which is worse than not
-    firing. The list is returned so the pipeline can say so out loud, and so
-    the day the byte is re-split (5-bit candidate, 3-bit counter -- holds all
-    19) this comes back empty on its own.
+    It is kept, and still called, because of what it used to hold. With a
+    4-bit nibble `pole` (18) and `traffic-sign` (19) did not fit -- and those
+    are **the two classes semantic refinement exists for**, thin structures
+    whose entire geometry is smaller than the cell they land in past 25 m. The
+    gate matched against ids no cell could ever report, fired on nothing, and
+    nothing failed. A dead criterion that reads as working is the failure mode
+    this function exists to make visible, and it costs one list comprehension
+    per config load to keep it visible for the next class someone adds.
     """
     from vrgrid.grid.fusion import CLASS_MAX
     from vrgrid.grid.traversability import CLASS_IDS
@@ -144,7 +150,7 @@ def candidates(gm, slots, thresholds=None):
     if slots.size == 0:
         return np.zeros(0, dtype=bool)
 
-    cls = (gm.soa["semantic_class"][slots] >> 4).astype(np.int32)
+    cls = unpack_class(gm.soa["semantic_class"][slots])[0].astype(np.int32)
     fires = np.isin(cls, refine_class_ids(th))
 
     if gm.transient is not None:

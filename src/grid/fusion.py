@@ -65,11 +65,36 @@ from vrgrid.grid.quantise import dequantise_variance_cm2, quantise_variance_cm2
 from vrgrid.grid.schedule import load_thresholds
 
 # --- §10.2: the one byte -----------------------------------------------------
-# 4-bit candidate | 4-bit counter, exactly as the section specifies.
-CLASS_BITS = 4
+# 5-bit candidate | 3-bit counter. Ratified 1 Sep (Gate 3, item 3).
+#
+# §10.2 as written specifies 4 | 4, and that is wrong for this project: the
+# label set is 20 learning ids (0-19) and a 4-bit candidate holds 16. The
+# shortfall was not "a few rare classes missing" -- it landed in three
+# independent places, each of which read as working:
+#
+#   * `pole` (18) and `traffic-sign` (19) are the two classes the semantic
+#     refinement gate exists for -- thin structures smaller than the cell they
+#     land in past 25 m. No cell could report either, so the gate's most
+#     important criterion matched nothing and never fired (`grid/gate.py`).
+#   * `terrain` (17) is one of the five `drivable_classes` the traversability
+#     predicate consults on every cell (§7.1), so one of the five was
+#     unstorable.
+#   * The first real 19-class frame raised rather than degrading, and two
+#     different stand-ins had grown around it -- `% 16` in the eval harness and
+#     `clip(0, 15)` in the frame loop -- which disagreed with each other.
+#     `% 16` mapped `terrain` onto `car`, turning drivable ground into blocked
+#     cells; `clip` mapped everything above 15 onto `vegetation`.
+#
+# 5 | 3 holds all 20 with room to 31, and costs only the top of the counter's
+# range: it saturates at 7 rather than 15. Boyer-Moore's majority guarantee is
+# unaffected by where the counter saturates -- the invariant is that a true
+# majority can never be fully decremented away, which holds for any cap >= 1 --
+# so only the confidence readout gets coarser. The byte is still one byte, so
+# the frozen 12-byte cell struct does not move.
+CLASS_BITS = 5
 COUNTER_BITS = 8 - CLASS_BITS
-CLASS_MAX = (1 << CLASS_BITS) - 1      # 15
-COUNTER_MAX = (1 << COUNTER_BITS) - 1  # 15
+CLASS_MAX = (1 << CLASS_BITS) - 1      # 31, and the label set stops at 19
+COUNTER_MAX = (1 << COUNTER_BITS) - 1  # 7
 
 OBS_COUNT_MAX = 255                    # uint8, saturating (cell.py)
 FRAMES_SEEN_MAX = 255
@@ -234,30 +259,28 @@ def boyer_moore_update(packed, observed):
     """One streaming-majority step per cell, vectorised. Math §10.2.
 
         counter == 0      -> candidate <- y, counter <- 1
-        y == candidate    -> counter <- min(counter + 1, 15)
+        y == candidate    -> counter <- min(counter + 1, COUNTER_MAX)
         otherwise         -> counter <- counter - 1
 
     Returns the new packed bytes; does not write. Guaranteed to hold the true
     majority class whenever one exists, in constant memory, and the counter
     doubles as a confidence readout.
 
-    ⚑ 19 classes do not fit in 4 bits. §10.2 specifies a 4-bit candidate, so
-      this rejects anything above 15 rather than wrapping — a silent `% 16`
-      would relabel class 16 as 0, and 0 is `unlabeled`. The project uses
-      pretrained FRNet with 19 classes (CLAUDE.md), and `gpu/kernels.py`
-      packs its class key assuming ids < 32, so three files currently assume
-      three different class ranges. Cheapest fix that keeps the byte: 5-bit
-      candidate + 3-bit counter, which holds all 19 and caps the counter at 7
-      — Boyer-Moore's guarantee is unaffected by where the counter saturates.
-      That is a change to a frozen struct's semantics, so it is a room
-      decision, not mine. Pinned in `test_nineteen_classes_do_not_fit`.
+    The candidate is 5 bits since 1 Sep, so the whole 0-19 label set fits and
+    ids up to 31 are accepted. Anything above that is still rejected rather
+    than wrapped: a silent `% 32` would relabel class 32 as 0, and 0 is
+    `unlabeled` -- a chunk of the map quietly becoming unlabelled ground is
+    plausible-looking and undetectable without the reference map. Loud failure
+    at the seam is the safer of the two. See the header for why 5 | 3.
     """
     observed = np.asarray(observed, dtype=np.uint8)
     if np.any(observed > CLASS_MAX):
         raise ValueError(
             f"class id {int(observed.max())} does not fit in {CLASS_BITS} bits "
-            f"(max {CLASS_MAX}). FRNet is 19-class; see the note in §10.2 and in "
-            "this docstring -- a 5/3 split of the byte would hold it."
+            f"(max {CLASS_MAX}). The SemanticKITTI label set stops at 19, so an "
+            "id above 31 means the caller is passing RAW label ids (10, 11, 40, "
+            "252, ...) where learning ids (0-19) are expected -- see "
+            "`perception.semantics.semantic_labels`."
         )
     cand, cnt = unpack_class(packed)
     cnt = cnt.astype(np.int16)
@@ -414,10 +437,16 @@ def scatter(gm, points_m, class_id, is_ground, reflectivity=None,
                           scratch=scratch)
 
 
-def visibility_cleanup(soa, range_image, thresholds) -> None:
-    """O(1) per cell by range-image comparison, no ray casting. Math §10.4.
-
-    Hard guard: never clear a cell that has a return in the current scan.
-    Without it this eats fences, poles and sign posts within a few frames.
-    """
-    raise NotImplementedError("Aakash — Day 3")
+# §10.4 visibility cleanup does NOT live here. It is
+# `vrgrid.gpu.visibility.visibility_cleanup` — implemented, tested, benchmarked
+# and wired into the frame loop by `run/engine.py`.
+#
+# It was declared here as well, as a stub with a Day-3 owner on it, and the two
+# survived side by side long enough for a second reader to find this one first
+# and conclude the ghost gate was unbuilt. The section is a range-image
+# comparison, so it belongs in the module that owns range-image kernels; what
+# is fusion's, and is below, is what a miss MEANS — `apply_miss` walks the
+# log-odds and `occupancy_state` (§10.1) turns them into a three-state answer.
+#
+# Deleted rather than left raising: a NotImplementedError with a name on it
+# reads as work outstanding, and this was work already done.

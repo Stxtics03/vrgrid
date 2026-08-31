@@ -21,7 +21,7 @@ CELL_FIELDS = [
     ("ceiling_height", np.int16),     # 2 B, 1 cm units, lowest thing overhead
     ("height_variance", np.uint8),    # 1 B, log-quantised
     ("log_odds", np.int8),            # 1 B, occupancy
-    ("semantic_class", np.uint8),     # 1 B, Boyer-Moore: 4-bit candidate | 4-bit counter
+    ("semantic_class", np.uint8),     # 1 B, Boyer-Moore: 5-bit candidate | 3-bit counter
     ("reflectivity", np.uint8),       # 1 B, range-normalised
     ("obs_count", np.uint8),          # 1 B, saturating
     ("frames_since_seen", np.uint8),  # 1 B, saturating

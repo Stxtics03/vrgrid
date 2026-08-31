@@ -9,6 +9,7 @@ import numpy as np
 import pytest
 from vrgrid.cell import FLAG_DERIVED, FLAG_DYNAMIC, TRAV_ROUGHNESS, TRAV_SLOPE, TRAV_STEP
 from vrgrid.eval.harness import build_gridmap
+from vrgrid.grid.fusion import pack_class
 from vrgrid.grid.gate import _cell_centre as gate_cell_centre
 from vrgrid.grid.gate import apply, candidates, refine_class_ids, ring_of_slot
 from vrgrid.grid.pool import FREE
@@ -27,7 +28,12 @@ def gm():
 def _cell(gm, x, y, cls="road", n=9, var_cm2=1.0, trav=0):
     ring, slot = slot_of(gm, x, y)
     gm.soa["obs_count"][slot] = n
-    gm.soa["semantic_class"][slot] = (CLASS_IDS[cls] << 4) | 5
+    # `pack_class`, not a hand-rolled shift. This fixture spelled the 4/4
+    # split out itself and so kept writing a 4-bit-shifted byte after the
+    # field became 5 bits -- every cell then read back as some other class
+    # and half this file failed for a reason that had nothing to do with
+    # the gate.
+    gm.soa["semantic_class"][slot] = pack_class(CLASS_IDS[cls], 5)
     gm.soa["height_variance"][slot] = quantise_variance_cm2(var_cm2)
     gm.soa["traversability"][slot] = trav
     gm.soa["ground_height"][slot] = -5
@@ -57,34 +63,32 @@ def test_a_thin_class_fires_the_gate(gm):
     assert CLASS_IDS["person"] in refine_class_ids()
 
 
-def test_the_two_classes_refinement_exists_for_cannot_fire_it():
-    """⚑ The §10.2 width conflict doing its most expensive damage yet.
+def test_every_configured_refine_class_can_now_fire_it():
+    """The §10.2 conflict, resolved. Was `..._cannot_fire_it`.
 
-    The gate's whole point is thin structures whose geometry is smaller than
-    the cell they land in past 25 m -- and the canonical two are `pole` (id
-    18) and `traffic-sign` (id 19). The cell's class nibble is 4 bits and
-    holds 0-15, so no cell can ever report either: the criterion is dead code
-    that reads as working, and it would have stayed that way because nothing
-    fails.
+    With a 4-bit candidate the class field held ids 0-15, so `pole` (18) and
+    `traffic-sign` (19) did not fit -- and those are the two classes semantic
+    refinement exists for: thin structures whose entire geometry is smaller
+    than the cell they land in past 25 m. The gate matched on ids no cell
+    could report, fired on nothing, and nothing failed.
 
-    Not silently substituted. A `% 16` turns `pole` into `other-vehicle` and
-    `traffic-sign` into `road`, which is worse than not firing. Named instead,
-    so the pipeline can say so -- and so this comes back empty by itself the
-    day the byte is re-split 5/3, which holds all 19.
+    The byte was re-split 5/3 on 1 Sep. `unstorable_refine_classes()` was
+    written so that it would empty itself on that day without being edited,
+    and this is the assertion that it did.
     """
     from vrgrid.grid.fusion import CLASS_MAX
     from vrgrid.grid.gate import unstorable_refine_classes
 
-    blocked = unstorable_refine_classes()
-    assert set(blocked) == {"pole", "traffic-sign"}
-    for name in blocked:
-        assert CLASS_IDS[name] > CLASS_MAX
+    assert unstorable_refine_classes() == [], (
+        "a configured refine class still does not fit the cell's class field"
+    )
 
-    # and they are genuinely absent from what the gate matches on, rather than
-    # present and never matching
     ids = refine_class_ids().tolist()
-    assert CLASS_IDS["pole"] not in ids
-    assert ids, "every refine class was dropped -- the gate can never fire"
+    for name in ("pole", "traffic-sign"):
+        assert CLASS_IDS[name] <= CLASS_MAX
+        assert CLASS_IDS[name] in ids, (
+            f"{name} fits the byte now but the gate is not matching on it"
+        )
 
 
 def test_an_uncertain_edge_fires_the_gate_and_a_certain_one_does_not(gm):
@@ -263,7 +267,7 @@ def test_the_ablation_reports_unfit_rather_than_truncating():
     ring, slot = slot_of(ab, 40.0, 0.0)
     assert ring == 2
     ab.soa["obs_count"][slot] = 9
-    ab.soa["semantic_class"][slot] = (CLASS_IDS["person"] << 4) | 5
+    ab.soa["semantic_class"][slot] = pack_class(CLASS_IDS["person"], 5)
 
     out = apply(ab, [slot])
     assert out["unfit"] == 1

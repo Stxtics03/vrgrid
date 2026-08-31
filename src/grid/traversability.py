@@ -67,6 +67,7 @@ from vrgrid.cell import (
     TRAV_SLOPE,
     TRAV_STEP,
 )
+from vrgrid.grid.fusion import unpack_class
 from vrgrid.grid.quantise import dequantise_variance_cm2
 from vrgrid.grid.schedule import load_thresholds
 
@@ -149,7 +150,11 @@ def bitfield(soa, ring_slice: slice, side: int, cell_m: float, thresholds=None):
     ceiling = soa["ceiling_height"][ring_slice].astype(np.int32)
     var_code = soa["height_variance"][ring_slice]
     n = soa["obs_count"][ring_slice].astype(np.int32)
-    cls = (soa["semantic_class"][ring_slice] >> 4).astype(np.int32)  # §10.2 candidate
+    # §10.2 candidate, through `unpack_class` and never a literal shift.
+    # The field is 5 bits since 1 Sep, and a stale `>> 4` here reads the id
+    # with the counter's top bit welded on: every drivable class then fails
+    # the drivable_set test and the entire road reads untraversable.
+    cls = unpack_class(soa["semantic_class"][ring_slice])[0].astype(np.int32)
 
     out = np.zeros(ground.size, dtype=np.uint8)
 

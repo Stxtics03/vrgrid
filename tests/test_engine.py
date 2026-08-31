@@ -15,7 +15,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 from vrgrid.cell import OCC_OCCUPIED
-from vrgrid.grid.fusion import occupancy_state
+from vrgrid.grid.fusion import CLASS_MAX, occupancy_state, unpack_class
 from vrgrid.grid.lattice import ring_of
 from vrgrid.grid.schedule import load
 from vrgrid.run.engine import MapEngine, class_ids_fit
@@ -222,20 +222,40 @@ def test_the_frame_loop_allocates_almost_nothing():
         f"grid's {grid_side:,} B — something here is not preallocated")
 
 
-def test_nineteen_class_labels_are_refused_with_a_useful_message():
-    """The engine must not quietly clip. SemanticKITTI is 19-class and
-    fusion's candidate is 4 bits, so this is every real frame — the caller
-    has to be told, not accommodated."""
-    assert class_ids_fit(np.array([0, 15]))
-    assert not class_ids_fit(np.array([0, 16, 18]))
+def test_the_whole_label_set_now_fuses_and_raw_ids_still_raise():
+    """Was `test_nineteen_class_labels_are_refused_with_a_useful_message`.
+
+    The candidate is 5 bits since 1 Sep, so a 19-class frame is no longer an
+    error to be accommodated -- it is the normal case, and the engine must
+    fuse it without clipping. What still has to be refused is a RAW label id
+    reaching the map: raw ids run to 259 and are a different numbering, so
+    seeing one means the learning map was never applied. Clipping that would
+    turn `moving-car` into a static class and weld every passing car into the
+    elevation layer.
+    """
+    assert class_ids_fit(np.array([0, 15, 17, 18, 19]))
+    assert class_ids_fit(np.array([CLASS_MAX]))
+    assert not class_ids_fit(np.array([0, 18, CLASS_MAX + 1]))
+    assert not class_ids_fit(np.array([252]))          # raw moving-car
 
     rng = np.random.default_rng(0)
     engine = MapEngine(load("5/10/20/40"), max_points=40_000, max_candidates=80_000)
     frame, _ = next(iter(_sequence(rng, 1, 1)))
-    frame.semantic = np.full(len(frame.points_sensor), 18, np.int8)
 
-    with pytest.raises(ValueError, match="4-bit candidate"):
+    # pole (18) -- one of the two classes the refinement gate exists for, and
+    # one a 4-bit candidate could never hold
+    frame.semantic = np.full(len(frame.points_sensor), 18, np.int8)
+    engine.step(frame)                                  # no raise, no clip
+
+    slots = engine.occupied_slots()
+    assert slots.size, "the frame fused nothing, so this asserts nothing"
+    cand, _ = unpack_class(engine.handle.grid["semantic_class"][slots])
+    assert set(np.unique(cand).tolist()) == {18}, (
+        "the class came back as something other than pole -- the byte is being "
+        "packed or unpacked at the wrong width somewhere"
+    )
+
+    frame.semantic = np.full(len(frame.points_sensor), 100, np.int8)
+    with pytest.raises(ValueError, match="5-bit candidate"):
         engine.step(frame)
 
-    engine.clip_class_ids = True
-    engine.step(frame)          # opt in explicitly, and it runs

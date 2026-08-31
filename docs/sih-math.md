@@ -468,7 +468,7 @@ Gradient by central differences over the four neighbours, scaled by the cell siz
 >
 > ***Cross-ring neighbours are not computed.*** *A cell on the inner edge of ring 2 has neighbours in ring 1, at half the cell size. Resolving it means resampling across a ring boundary for a two-cell strip and interacts with both rings' toroidal offsets. Not done; the strip is caught by the border rule above, which is conservative in the right direction. **The ring seams are the one place the traversability layer is coarser than the map** — say so in the report rather than leaving it to be found.*
 >
-> ⚑ ***`terrain` is drivable and does not fit the cell.*** *`configs/thresholds.yaml` lists five drivable classes; `terrain` is learning id **17** and the cell's class nibble is 4 bits, holding 0–15. So one of the five classes this predicate consults on every cell cannot be stored in the map at all. This is the §10.2 class-width conflict arriving somewhere it cannot be deferred.* This is what the problem statement's Requirement 1 actually asks for, and it is also *evidence for* the grid: slope and step are finite differences over neighbours, which are trivial on a grid and effectively impossible on a raw point cloud without first building one.
+> ✔ ***`terrain` is drivable, and it fits now.*** *`configs/thresholds.yaml` lists five drivable classes; `terrain` is learning id **17**, and with the old 4-bit class nibble one of the five classes this predicate consults on every cell could not be stored in the map at all. Resolved 1 Sep by the 5 | 3 re-split (§10.2). Worth keeping on the record because of how it read while it was broken: the predicate ran on every cell, consulted a class the cell could never hold, and produced a complete, plausible traversability layer — and because the eval harness's `% 16` stand-in mapped `terrain` onto `car`, which is not drivable, so the failure was not "terrain is missing" but "verges are marked impassable".* This is what the problem statement's Requirement 1 actually asks for, and it is also *evidence for* the grid: slope and step are finite differences over neighbours, which are trivial on a grid and effectively impossible on a raw point cloud without first building one.
 
 ### 7.2 The conservative pyramid
 
@@ -653,21 +653,35 @@ A Dirichlet count vector over K classes needs K bytes; the cell budget allows on
 ```
 on observing class y:
     if counter == 0:        candidate ← y ;  counter ← 1
-    elif y == candidate:    counter ← min(counter + 1, 15)
+    elif y == candidate:    counter ← min(counter + 1, C)
     else:                   counter ← counter − 1
 ```
 
-Packed as 4-bit candidate + 4-bit counter = 1 byte. **Guaranteed to return the true majority class whenever one exists** (>50% of observations), and the counter doubles as a confidence readout. Never average softmax vectors across frames — the mean of two confident, contradictory distributions is a confident-looking lie.
+Packed as **5-bit candidate + 3-bit counter = 1 byte**, so `C = 7` and the candidate holds ids 0–31. Never average softmax vectors across frames — the mean of two confident, contradictory distributions is a confident-looking lie.
 
-> **⚑ Conflict, 29 Aug — Aakash. 19 classes do not fit in 4 bits, and three files currently assume three different class ranges.** *A 4-bit candidate holds 16. The project uses pretrained FRNet with **19** classes (CLAUDE.md, and the `moving-*` labels come from the raw `.label` files on top of that), while `gpu/kernels.py` packs its class key assuming ids `< 32`. Nothing has failed yet only because no real labels have reached the map.*
+> **⚑ Correction, 1 Sep — Aakash. This section claimed a guarantee it does not have, and the claim was wrong at 4/4 too.** *The text used to read "guaranteed to return the true majority class whenever one exists". Boyer–Moore's proof assumes an **unbounded** counter. A saturating counter discards exactly the evidence the proof rests on: once the counter is pinned at `C`, further sightings of the majority class are not recorded, so `C + 1` contradicting observations can unseat a class holding a genuine strict majority.*
 >
-> *`boyer_moore_update()` rejects an id above 15 rather than wrapping: a silent `% 16` would relabel class 16 as 0, and 0 is `unlabeled`, so a chunk of the map would quietly become unlabelled ground — plausible-looking, and undetectable without the reference map. Loud failure at the seam is the safer of the two until the room decides.*
+> *Demonstrated at both widths, which is the point — 5/3 did not introduce this, it halved the headroom:*
 >
-> **⚑ Update, 29 Aug — Aakash. The cost of this is now concrete, and it is worse than "some classes are missing".** *The semantic gate (master v4 §3.4) exists for thin structures whose geometry is smaller than the cell they land in past 25 m. The canonical two are **`pole` (id 18)** and **`traffic-sign` (id 19)**. Neither fits the 4-bit nibble, so no cell can ever report them and **the gate's class criterion is dead code that reads as working** — it matches against ids no cell can hold, fires on nothing, and nothing fails. `gate.unstorable_refine_classes()` names them rather than letting a `% 16` turn `pole` into `other-vehicle` and `traffic-sign` into `road`. It comes back empty by itself the day the byte is re-split.*
+> | counter cap | sequence | true majority | candidate returned |
+> |---|---|---|---|
+> | 15 (the old 4/4) | `1`×32 then `2`×31 | `1`, 32 of 63 | **`2`** |
+> | 7 (5/3) | `1`×16 then `2`×15 | `1`, 16 of 31 | **`2`** |
+> | unbounded | either | `1` | `1` |
 >
-> *Separately, `terrain` (id 17) is in `drivable_classes` and does not fit either — so one of the five classes the traversability predicate consults on every cell is unstorable too (§7.1). Three independent places now, all from one byte.*
+> *What the cell actually provides is therefore **a time constant, not a theorem**: the one-byte version is exactly textbook Boyer–Moore on any sequence whose running excess stays within `C`, and a cell changes its mind after more than `C` net contradicting observations. `C = 7` makes the map re-label about twice as fast as `C = 15` — for a rolling local map with dynamics in it that is arguably the better default, but it is a tuning claim and the report must not say "guaranteed majority" without the condition attached.*
 >
-> *Cheapest fix that keeps the byte: **5-bit candidate + 3-bit counter**. That holds all 19 and caps the counter at 7 instead of 15; Boyer–Moore's majority guarantee does not depend on where the counter saturates, only the confidence readout gets coarser. The alternative — remapping 19 classes onto ≤16 — is a semantic decision with a report consequence, since `drivable_classes` is quoted by name in `configs/thresholds.yaml`. Either way it changes a frozen struct's semantics, so it is a whole-team call. Pinned in `test_nineteen_classes_do_not_fit`.*
+> *Pinned in `test_saturation_is_what_bounds_the_guarantee`, and the honest equivalence is pinned separately in `test_boyer_moore_matches_the_textbook_until_the_counter_saturates`.*
+
+> **✔ Resolved, 1 Sep — ratified at Gate 3, item 3. The byte is re-split 5 | 3.** *The conflict below is kept because what it cost is the argument for the fix, and because the same defect recurred three times while the fix was being applied.*
+>
+> *A 4-bit candidate held 16 ids; the learning set is 20 (0–19). The shortfall did not present as "some rare classes are missing" — it landed in three independent places, each of which read as working. **(a)** `pole` (18) and `traffic-sign` (19) are the two classes the semantic gate exists for — thin structures whose geometry is smaller than the cell they land in past 25 m — so the gate matched against ids no cell could report, fired on nothing, and nothing failed. **(b)** `terrain` (17) is one of the five `drivable_classes` the §7.1 predicate consults on every cell. **(c)** The first real frame raised rather than degrading, and two disagreeing stand-ins had grown around that raise: `% 16` in the eval harness, which mapped `terrain` onto `car` and so turned drivable ground into blocked cells, and `clip(0, 15)` in the frame loop, which mapped everything above 15 onto `vegetation`.*
+>
+> *5 bits holds the set with room to 31. Ids above 31 are still refused loudly rather than wrapped: a silent `% 32` would relabel class 32 as 0, and 0 is `unlabeled`, so a chunk of the map would quietly become unlabelled ground — plausible-looking and undetectable without the reference map. In practice an id above 31 now means RAW SemanticKITTI ids (10, 11, 40, 252, …) have reached the map where learning ids were expected, which is a different bug and one clipping would hide.*
+>
+> *The byte is still one byte, so the frozen 12-byte cell struct does not move and no memory figure changes.*
+>
+> **⚑ And the width was written out seven times.** *Applying a two-constant change surfaced six more places that spelled the split themselves: `>> 4` in `grid/traversability.py`, `grid/gate.py` and `grid/query.py`, and a hand-rolled `(id << 4) | 5` in two test fixtures and one script. Each would have kept reading a 4-bit field out of a 5-bit byte — which returns a valid-looking class id with the counter's top bit welded on, so every drivable cell fails the class test and the entire road reads untraversable. All of them now go through `pack_class` / `unpack_class`, and that is the actual lesson: the constant was never the problem, the copies were.*
 
 ### 10.3 Reflectivity normalisation
 

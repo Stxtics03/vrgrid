@@ -214,19 +214,18 @@ def bin_points(xv, yv, xw, yw, sched, handle, buffers, scratch, out):
 def payload(z_m, range_m, rng, n):
     """The per-return columns scatter folds, from the sweep's own geometry.
 
-    ⚑ `class_id` is drawn over 0..15, not the 19 classes the project uses.
-      `fusion.boyer_moore_update` rejects anything above 15 (§10.2 specifies a
-      4-bit candidate), so a 19-class frame cannot be fused today and this
-      script could not run against one. Pinned in
-      `test_nineteen_classes_do_not_fit` and flagged there as a room decision.
-      It costs nothing here, but it does mean the first real frame off JP's GT
-      labels raises instead of fusing.
+    `class_id` is drawn over the full 0..19 learning set. It used to be drawn
+    over 0..15, because `fusion.boyer_moore_update` rejected anything above 15
+    under the old 4-bit candidate and this script could not otherwise run --
+    which also meant the binning and fusion stages were being timed against a
+    label distribution narrower than the real one. The byte was re-split 5 | 3
+    on 1 Sep (§10.2); the draw is the real range now.
     """
     return {
         "z_cm": quantise_height(z_m),
         "w_q": quantise_weight(measurement_variance_cm2(range_m)),
         "refl": rng.integers(0, 256, n).astype(np.uint8),
-        "class_id": rng.integers(0, 16, n).astype(np.uint8),
+        "class_id": rng.integers(0, 20, n).astype(np.uint8),
         "is_ground": z_m < 0.2,
     }
 

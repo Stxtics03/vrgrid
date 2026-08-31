@@ -20,7 +20,9 @@ from vrgrid.gpu.kernels import (
     scatter_sorted,
 )
 from vrgrid.grid.fusion import (
+    CLASS_BITS,
     CLASS_MAX,
+    COUNTER_MAX,
     boyer_moore_update,
     fuse,
     initialise,
@@ -250,15 +252,34 @@ def test_theorem_1_is_not_always_visible_through_the_codec():
 # --- §10.2: class fusion in one byte -----------------------------------------
 
 
+def _unbounded_majority(obs):
+    """Textbook Boyer-Moore, counter unbounded. The reference the one-byte
+    version is supposed to agree with, and the only version the theorem in
+    §10.2 actually holds for."""
+    cand, cnt = None, 0
+    for y in obs:
+        if cnt == 0:
+            cand, cnt = y, 1
+        elif y == cand:
+            cnt += 1
+        else:
+            cnt -= 1
+    return cand
+
+
 def test_boyer_moore_majority_in_one_byte():
-    """Streaming majority: match -> increment, mismatch -> decrement, zero ->
-    adopt. Recovers the true majority class in constant memory. Never average
-    softmax vectors across frames."""
-    rng = np.random.default_rng(11)
-    for _ in range(200):
+    """The majority guarantee, over sequences that stay inside the counter.
+
+    ⚑ Read `test_saturation_is_what_bounds_the_guarantee` before changing the
+      bound here. `n <= COUNTER_MAX` is not an arbitrary test parameter -- it
+      is the condition under which the one-byte version and the textbook
+      version are the same algorithm, because a counter that never reaches its
+      cap never discards anything.
+    """
+    rng = np.random.default_rng(0)
+    for _ in range(400):
+        n = int(rng.integers(3, COUNTER_MAX + 1))
         true_majority = int(rng.integers(0, CLASS_MAX + 1))
-        n = int(rng.integers(11, 60))
-        # a strict majority, plus arbitrary noise classes
         obs = [true_majority] * (n // 2 + 1)
         obs += list(rng.integers(0, CLASS_MAX + 1, n - len(obs)))
         rng.shuffle(obs)
@@ -269,42 +290,160 @@ def test_boyer_moore_majority_in_one_byte():
 
         cand, _ = unpack_class(packed)
         assert int(cand[0]) == true_majority
+        assert int(cand[0]) == _unbounded_majority(obs)
+
+
+def test_boyer_moore_matches_the_textbook_until_the_counter_saturates():
+    """The real equivalence, stated as it holds: the one-byte version IS
+    textbook Boyer-Moore on any sequence whose running excess stays within the
+    counter. Long random sequences included -- most never reach the cap."""
+    rng = np.random.default_rng(1)
+    agreed = 0
+    for _ in range(400):
+        n = int(rng.integers(4, 60))
+        obs = list(rng.integers(0, CLASS_MAX + 1, n))
+
+        cand, cnt = 0, 0
+        saturated = False
+        for y in obs:
+            if cnt == 0:
+                cand, cnt = int(y), 1
+            elif int(y) == cand:
+                if cnt == COUNTER_MAX:
+                    saturated = True
+                cnt = min(cnt + 1, COUNTER_MAX)
+            else:
+                cnt -= 1
+        if saturated:
+            continue
+
+        packed = np.zeros(1, dtype=np.uint8)
+        for y in obs:
+            packed = boyer_moore_update(packed, np.array([y], dtype=np.uint8))
+        assert int(unpack_class(packed)[0][0]) == _unbounded_majority(obs)
+        agreed += 1
+
+    assert agreed > 200, "the sample stopped exercising the unsaturated path"
+
+
+def test_saturation_is_what_bounds_the_guarantee():
+    """⚑ §10.2 says the majority guarantee "does not depend on where the
+    counter saturates". That is not true, and it was not true at 4/4 either.
+
+    Boyer-Moore's proof assumes an unbounded counter. A saturating counter
+    throws away exactly the evidence the proof relies on: once the counter is
+    pinned at C, further sightings of the majority class are not recorded, so
+    C+1 contradicting observations can unseat a class that holds a genuine
+    strict majority.
+
+    Demonstrated at BOTH caps, which is the point -- 5/3 did not introduce
+    this, it halved the headroom:
+
+        cap 15 (4/4):  1 x 32 then 2 x 31  -> candidate 2, and 1 had 32 of 63
+        cap  7 (5/3):  1 x 16 then 2 x 15  -> candidate 2, and 1 had 16 of 31
+
+    So what the cell actually provides is not a proof but a **time constant**:
+    a cell changes its mind after more than C net contradicting observations.
+    C = 7 makes the map adapt about twice as fast as C = 15, which for a
+    rolling local map with dynamics in it is arguably the better default --
+    but it is a tuning claim, not a theorem, and the report must not say
+    "guaranteed majority" without the condition attached.
+
+    This test exists so nobody restores the stronger sentence.
+    """
+    def run(obs, cap):
+        cand, cnt = None, 0
+        for y in obs:
+            if cnt == 0:
+                cand, cnt = y, 1
+            elif y == cand:
+                cnt = min(cnt + 1, cap)
+            else:
+                cnt -= 1
+        return cand
+
+    for cap, run_len in ((15, 32), (COUNTER_MAX, 2 * (COUNTER_MAX + 1))):
+        obs = [1] * run_len + [2] * (run_len - 1)
+        assert obs.count(1) > obs.count(2), "1 must hold a strict majority"
+        assert _unbounded_majority(obs) == 1, "the textbook version finds it"
+        assert run(obs, cap) == 2, (
+            f"cap {cap} no longer loses the majority -- if this is a real "
+            "improvement, update §10.2 and the report sentence with it"
+        )
+
+    # and the shipped implementation is the cap-7 case of exactly that
+    obs = [1] * (2 * (COUNTER_MAX + 1)) + [2] * (2 * (COUNTER_MAX + 1) - 1)
+    packed = np.zeros(1, dtype=np.uint8)
+    for y in obs:
+        packed = boyer_moore_update(packed, np.array([y], dtype=np.uint8))
+    assert int(unpack_class(packed)[0][0]) == 2
 
 
 def test_class_byte_packs_and_survives_a_round_trip():
+    """Every (candidate, counter) the 5/3 byte can hold. Bounds come from the
+    constants, so the day the split moves again this covers the new space
+    instead of silently testing a corner of it."""
     for c in range(CLASS_MAX + 1):
-        for k in range(16):
+        for k in range(COUNTER_MAX + 1):
             cand, cnt = unpack_class(pack_class(c, k))
             assert (int(cand), int(cnt)) == (c, k)
 
 
 def test_counter_saturates_without_losing_the_candidate():
-    """min(counter + 1, 15). A cell seen 300 times as road must not overflow
-    the nibble into the candidate -- which would silently relabel it."""
+    """min(counter + 1, COUNTER_MAX). A cell seen 300 times as road must not
+    overflow the counter into the candidate -- which would silently relabel it.
+
+    The cap is 7 since the byte was re-split 5/3 (it was 15). Asserted against
+    the constant rather than a literal, because the literal is what made this
+    a two-line edit instead of a no-op when the split landed.
+    """
     packed = np.zeros(1, dtype=np.uint8)
     for _ in range(300):
         packed = boyer_moore_update(packed, np.array([5], dtype=np.uint8))
     cand, cnt = unpack_class(packed)
     assert int(cand[0]) == 5
-    assert int(cnt[0]) == 15
+    assert int(cnt[0]) == COUNTER_MAX
 
 
-def test_nineteen_classes_do_not_fit():
-    """⚑ §10.2 specifies a 4-bit candidate, which holds 16 classes. The project
-    uses pretrained FRNet with 19 (CLAUDE.md), and gpu/kernels.py packs its
-    class key assuming ids < 32 -- three files, three class ranges.
+def test_the_whole_label_set_fits():
+    """⚑ Was `test_nineteen_classes_do_not_fit`, and it is the same theorem
+    read from the other side. Gate 3, item 3, ratified 1 Sep.
 
-    This asserts the loud failure rather than the silent one: wrapping mod 16
-    would relabel class 16 as 0, and 0 is `unlabeled`, so a chunk of the map
-    would quietly become unlabelled ground. Cheapest fix that keeps the byte
-    is a 5/3 split -- 19 classes, counter capped at 7 -- but that is a change
-    to a frozen struct's semantics and belongs to the room.
+    A 4-bit candidate held 16 ids and the label set is 20 (0-19). That
+    shortfall reached three independent places, each of which read as working:
+    the semantic gate could never match `pole` or `traffic-sign`, the
+    traversability predicate could never store `terrain`, and the first real
+    frame raised rather than degrading -- around which two disagreeing
+    stand-ins had grown, `% 16` in the eval harness and `clip(0, 15)` in the
+    frame loop.
+
+    5 bits holds the set with room to 31. Anything above 31 is still refused
+    loudly rather than wrapped, because `% 32` would relabel class 32 as 0 and
+    0 is `unlabeled` -- a chunk of the map quietly becoming unlabelled ground
+    is plausible-looking and invisible without the reference map.
     """
+    from vrgrid.grid.traversability import CLASS_IDS
+
     packed = np.zeros(1, dtype=np.uint8)
+
+    # every id the project actually uses, including the three that did not fit
+    for name, cid in CLASS_IDS.items():
+        assert cid <= CLASS_MAX, f"{name} ({cid}) does not fit in {CLASS_BITS} bits"
+        out = boyer_moore_update(packed, np.array([cid], dtype=np.uint8))
+        cand, cnt = unpack_class(out)
+        assert int(cand[0]) == cid, f"{name} did not survive a fuse"
+        assert int(cnt[0]) == 1
+
+    # the three that used to be silently corrupted, named explicitly
+    for name in ("terrain", "pole", "traffic-sign"):
+        assert CLASS_IDS[name] > 15, "this test is no longer testing anything"
+        assert CLASS_IDS[name] <= CLASS_MAX
+
+    # and the seam is still loud
     with pytest.raises(ValueError, match="does not fit"):
-        boyer_moore_update(packed, np.array([16], dtype=np.uint8))
+        boyer_moore_update(packed, np.array([32], dtype=np.uint8))
     with pytest.raises(ValueError, match="does not fit"):
-        boyer_moore_update(packed, np.array([18], dtype=np.uint8))
+        boyer_moore_update(packed, np.array([252], dtype=np.uint8))   # a RAW id
 
 
 def test_fuse_votes_the_class_it_was_given():
@@ -465,10 +604,27 @@ def test_measurement_variance_matches_the_weights_fuse_infers():
     assert int(quantise_weight(measurement_variance_cm2(100.0))) == 3
 
 
-def test_visibility_cleanup_spares_cells_with_a_current_return():
-    """The guard that stops the cleanup eating fences, poles and sign posts
-    within a few frames. Math §10.4."""
-    pytest.skip("visibility_cleanup — Aakash, Day 3")
+def test_visibility_cleanup_is_not_declared_here():
+    """§10.4 is `gpu.visibility.visibility_cleanup`, and only there.
+
+    This file used to declare a second `visibility_cleanup` — same name, same
+    section, same guard in the docstring, a different signature and a
+    `NotImplementedError`. Both were reachable, and the stub was the one a
+    reader looking for §10.4 in `src/grid` found first, which is how the ghost
+    gate came to be reported as unbuilt after it had been wired.
+
+    The guard itself is tested where the code is:
+    `tests/test_visibility.py::test_a_cell_with_a_return_now_is_never_cleared`.
+    This asserts only that the duplicate has not come back.
+    """
+    import vrgrid.grid.fusion as fusion_mod
+    from vrgrid.gpu.visibility import visibility_cleanup
+
+    assert not hasattr(fusion_mod, "visibility_cleanup"), (
+        "grid/fusion.py has re-declared visibility_cleanup — §10.4 has one "
+        "implementation, in gpu/visibility.py"
+    )
+    assert callable(visibility_cleanup)
 
 
 def test_a_cell_with_only_non_ground_returns_keeps_its_height():

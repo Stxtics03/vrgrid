@@ -115,24 +115,38 @@ def test_the_whole_pipeline_runs_a_sequence(sequence):
     assert sum(c.cleared for c in counters) > 0, "the cleanup never fired on real frames"
 
 
-def test_a_realistic_label_set_hits_the_four_bit_class_limit(sequence):
-    """⚑ The blocker, on the real path rather than in the abstract.
+def test_a_realistic_label_set_fuses_without_clipping(sequence):
+    """⚑ The blocker, cleared, on the real path rather than in the abstract.
 
-    A street scene contains poles (raw 80 -> class 17) and buildings
-    (50 -> 12). `fusion.boyer_moore_update` packs the class candidate into 4
-    bits, so anything above 15 raises. This is every real frame, not an edge
-    case, and it is why `clip_class_ids=True` appears in the test above.
+    A street scene contains poles and buildings, whose learning ids are above
+    15. With a 4-bit candidate `fusion.boyer_moore_update` raised on every
+    real frame, and `clip_class_ids=True` existed to get past it at the cost
+    of corrupting the class layer.
 
-    When the room ratifies the 5-bit/3-bit split this test should start
-    failing, and that is the signal to drop the clip.
+    This test used to assert the raise. Its docstring said that ratifying the
+    5/3 split should make it fail and that this would be the signal to drop
+    the clip. That happened on 1 Sep, so it now asserts the other side: the
+    frame fuses, nothing is clipped, and the ids above 15 survive into cells.
     """
+    from vrgrid.grid.fusion import unpack_class
     from vrgrid.run.__main__ import iter_pipeline
 
     engine = MapEngine(load("5/10/20/40"), max_points=40_000, max_candidates=80_000)
+    assert not engine.clip_class_ids, "the clip must be off by default now"
+
     frame = next(iter(iter_pipeline(SEQ, 1, use_patchworkpp=False)))
-    assert np.asarray(frame.semantic).max() > 15, "the fixture stopped being realistic"
-    with pytest.raises(ValueError, match="4-bit candidate"):
-        engine.step(frame)
+    semantic = np.asarray(frame.semantic)
+    assert semantic.max() > 15, "the fixture stopped being realistic"
+
+    engine.step(frame)                                   # no raise
+
+    slots = engine.occupied_slots()
+    assert slots.size, "the frame fused nothing, so this asserts nothing"
+    cand, _ = unpack_class(engine.handle.grid["semantic_class"][slots])
+    assert int(cand.max()) > 15, (
+        "no cell came back with a class above 15, so either the fixture has no "
+        "such returns in occupied cells or the byte is being truncated again"
+    )
 
 
 def test_one_timer_covers_the_whole_frame(sequence):
