@@ -34,7 +34,7 @@ SENSOR_HZ = 10.0
 # spellings of "range image".
 STAGES = (
     "load", "transform", "range_image", "semantics", "motion",
-    "scatter", "fuse", "split_merge", "cleanup", "total",
+    "scatter", "fuse", "split_merge", "cleanup", "pyramid", "total",
 )
 
 

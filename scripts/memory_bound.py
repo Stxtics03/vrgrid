@@ -15,8 +15,6 @@ import yaml
 from vrgrid.gpu.allocators import allocate, bytes_allocated, measured_bytes
 from vrgrid.grid.schedule import load
 
-PYRAMID_FRACTION = 5 / 12 / 3  # 5 of 12 bytes, 4-ary pyramid adds 1/3. Math §7.3.
-
 
 def main() -> None:
     ap = argparse.ArgumentParser()
@@ -36,9 +34,17 @@ def main() -> None:
     print(a.report())
     assert bytes_allocated(a) == measured_bytes(a), "claimed bound != measured bytes"
 
-    pyramid = sched.total_cells * 12 * PYRAMID_FRACTION
-    print(f"\n  {'+ conservative pyramid (stretch)':<34} {pyramid / 1e6:>8.2f} MB")
-    print(f"  {'TOTAL with pyramid':<34} {(a.total_bytes() + pyramid) / 1e6:>8.2f} MB")
+    # Allocated for real rather than estimated. It used to be estimated as
+    # `total_cells * 12 * 5/12/3`, straight from §7.2, and that printed
+    # 1.24 MB -- low by more than half. A node stores the REDUCTIONS, not the
+    # source fields (ground is both H_max and H_min), and the pyramid covers
+    # the allocated SLOTS, not the logical cells. See docs/sih-math.md §7.2.
+    with_p = allocate(sched, thresholds, transient_rings=args.transient_rings,
+                      max_tracks=args.max_tracks, storage=args.storage,
+                      with_pyramid=True)
+    extra = with_p.total_bytes() - a.total_bytes()
+    print(f"\n  {'+ conservative pyramid (stretch)':<34} {extra / 1e6:>8.2f} MB")
+    print(f"  {'TOTAL with pyramid':<34} {with_p.total_bytes() / 1e6:>8.2f} MB")
 
     print(f"\n{a.logical_cells:,} logical cells, {a.allocated_slots:,} allocated slots.")
     print("Ratios in the report are cell-count ratios over the logical count, so")
