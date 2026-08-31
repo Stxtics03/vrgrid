@@ -57,7 +57,6 @@ their own drift over ~100 frames -- sub-degree / sub-3 cm is the real target.
 
 import numpy as np
 import pytest
-
 from vrgrid.perception.loader import (
     _label_path,
     _velodyne_path,

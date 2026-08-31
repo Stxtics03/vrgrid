@@ -23,7 +23,6 @@ import argparse
 from dataclasses import dataclass
 
 import numpy as np
-
 from vrgrid.grid import schedule as schedule_mod
 
 

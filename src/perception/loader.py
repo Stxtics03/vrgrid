@@ -137,7 +137,7 @@ def _available_frames(sequence: str) -> list[int]:
     return sorted(frames)
 
 
-def scans(sequence: str, max_frames: int = None):
+def scans(sequence: str, max_frames: int | None = None):
     """Yield (points, labels, pose) per frame for a sequence.
 
     Args:

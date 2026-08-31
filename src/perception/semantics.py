@@ -179,19 +179,7 @@ class FRNetInference:
 
         for k, v in state_dict.items():
             # Voxel encoder
-            if k.startswith("voxel_encoder."):
-                new_k = k  # Same structure
-                if new_k in model_dict:
-                    mapped[new_k] = v
-
-            # Backbone
-            elif k.startswith("backbone."):
-                new_k = k  # Same structure
-                if new_k in model_dict:
-                    mapped[new_k] = v
-
-            # Decode head
-            elif k.startswith("decode_head."):
+            if k.startswith(("voxel_encoder.", "backbone.", "decode_head.")):
                 new_k = k  # Same structure
                 if new_k in model_dict:
                     mapped[new_k] = v

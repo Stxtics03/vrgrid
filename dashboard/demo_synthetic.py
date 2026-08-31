@@ -9,9 +9,14 @@ Renders:
 - Ring boundaries from configs/schedule_5_10_20_40.yaml
 """
 
-import rerun as rr
 import numpy as np
+import rerun as rr
 import yaml
+
+# The 19-class colour table lives in `palettes.py`, which imports no rerun, so
+# the CVD audit can read it without the viewer installed. Re-exported here
+# because this module has always been its import path.
+from .palettes import class_to_color
 
 
 def load_schedule(config_path: str = "configs/schedule_5_10_20_40.yaml") -> dict:
@@ -73,33 +78,6 @@ def make_synthetic_map() -> dict:
         "scale": scale,
         "center": (cx, cy),
     }
-
-
-def class_to_color(class_idx: int) -> list:
-    """Map class index to RGB color (rerun format)."""
-    colors = {
-        -1: [50, 50, 50],      # unknown
-        0: [245, 150, 100],    # car
-        1: [245, 230, 100],    # bicycle
-        2: [150, 60, 30],      # motorcycle
-        3: [180, 30, 80],      # truck
-        4: [255, 0, 0],        # other-vehicle
-        5: [30, 30, 255],      # person
-        6: [200, 40, 255],     # bicyclist
-        7: [90, 30, 150],      # motorcyclist
-        8: [255, 0, 255],      # road
-        9: [255, 150, 255],    # parking
-        10: [75, 0, 75],       # sidewalk
-        11: [75, 0, 175],      # other-ground
-        12: [0, 200, 255],     # building
-        13: [50, 120, 255],    # fence
-        14: [0, 175, 0],       # vegetation
-        15: [0, 60, 135],      # trunk
-        16: [80, 240, 150],    # terrain
-        17: [150, 240, 255],   # pole
-        18: [0, 0, 255],       # traffic-sign
-    }
-    return colors.get(class_idx, [128, 128, 128])
 
 
 def log_synthetic_map(map_data: dict):

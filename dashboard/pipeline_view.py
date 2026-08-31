@@ -30,55 +30,23 @@ they track the vehicle. Points are world-frame and accumulate on the timeline.
 import numpy as np
 import rerun as rr
 
-from .demo_synthetic import class_to_color, load_schedule
+from .demo_synthetic import load_schedule
 
-_CLASS_LUT = np.array([class_to_color(c) for c in range(-1, 19)], dtype=np.uint8)  # index c+1
-
-# Highlight for moving points (motion layer + the world/ghosts overlay).
-# Okabe & Ito (2008) "reddish purple" -- chosen because it is the one hue that
-# stays >= Delta-E 16 from every colour in the SemanticKITTI class map AND from
-# the motion-static grey, under normal vision and simulated protanopia,
-# deuteranopia and tritanopia (see dashboard/cvd.py). Red would collide with
-# `vegetation` under deuteranopia (Delta-E 3) and with `other-vehicle`; this
-# does not. The 3x point radius is the redundant, colour-independent cue.
-GHOST_RGB = (204, 121, 167)  # #CC79A7
+# Every colour below is defined in `palettes.py`, which imports no rerun: the
+# CVD audit (`cvd.py`) and tests/test_cvd.py check these numbers in CI, where
+# rerun-sdk (the optional `[dash]` extra) is not installed. Imported rather than
+# defined here so the dashboard and the audit cannot drift apart -- and so this
+# module stays the import path the rest of the dashboard already uses.
+from .palettes import (
+    _CLASS_LUT,
+    _GROUP_LUT,
+    GHOST_RGB,
+    GROUP_MEMBERS,
+    GROUP_NAMES,
+    GROUP_RGB,
+)
 
 PALETTES = ("semantickitti", "groups")
-
-# --- `groups` palette: 19 SemanticKITTI classes -> 7 colourblind-safe groups --
-#
-# Colours are Okabe & Ito (2008) plus two greys, with #CC79A7 held back for the
-# ghost highlight. Every pair clears Delta-E 16 under normal vision and
-# simulated protanopia / deuteranopia / tritanopia (dashboard/cvd.py).
-GROUP_NAMES = (
-    "drivable-ground", "structure", "vegetation", "vehicle",
-    "vulnerable-road-user", "pole-signage", "unknown",
-)
-GROUP_RGB = np.array([
-    (187, 187, 187),  # drivable-ground  -- neutral grey
-    (0, 114, 178),    # structure        -- Okabe-Ito blue
-    (0, 158, 115),    # vegetation       -- Okabe-Ito bluish-green
-    (230, 159, 0),    # vehicle          -- Okabe-Ito orange
-    (213, 94, 0),     # vulnerable-road-user -- Okabe-Ito vermillion (warning)
-    (86, 180, 233),   # pole-signage     -- Okabe-Ito sky-blue
-    (85, 85, 85),     # unknown          -- dark grey
-], dtype=np.uint8)
-
-# raw class index -> group index (index this by `semantic + 1`; row 0 is class -1)
-GROUP_MEMBERS = {
-    "drivable-ground": ("road", "parking", "sidewalk", "other-ground"),
-    "structure": ("building", "fence"),
-    "vegetation": ("vegetation", "trunk", "terrain"),
-    "vehicle": ("car", "bicycle", "motorcycle", "truck", "other-vehicle"),
-    "vulnerable-road-user": ("person", "bicyclist", "motorcyclist"),
-    "pole-signage": ("pole", "traffic-sign"),
-    "unknown": ("unlabeled",),
-}
-_CLASS_TO_GROUP = {
-    -1: 6, 0: 3, 1: 3, 2: 3, 3: 3, 4: 3, 5: 4, 6: 4, 7: 4, 8: 0, 9: 0,
-    10: 0, 11: 0, 12: 1, 13: 1, 14: 2, 15: 2, 16: 2, 17: 5, 18: 5,
-}
-_GROUP_LUT = np.array([_CLASS_TO_GROUP[c] for c in range(-1, 19)], dtype=np.uint8)  # index c+1
 
 
 def legend_markdown(palette: str) -> str:

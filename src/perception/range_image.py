@@ -76,7 +76,7 @@ def bin_widths(sensor_cfg: dict) -> tuple[float, float]:
 
 
 def project(
-    points: np.ndarray, sensor_cfg: dict = None, return_stats: bool = False
+    points: np.ndarray, sensor_cfg: dict | None = None, return_stats: bool = False
 ):
     """Project 3D points to an (H, W) spherical range image.
 
@@ -178,7 +178,7 @@ def project(
     return range_image, inverse_index, stats
 
 
-def project_with_inverse(points: np.ndarray, sensor_cfg: dict = None):
+def project_with_inverse(points: np.ndarray, sensor_cfg: dict | None = None):
     """Alias for project() -- explicit about the inverse index being returned."""
     return project(points, sensor_cfg)
 

@@ -7,7 +7,6 @@ Raw-power path: rho_hat = I * r^2 / max(cos(theta_inc), 0.1)  -- eq (31) verbati
 
 import numpy as np
 import pytest
-
 from vrgrid.grid.lattice import ring_of
 from vrgrid.grid.schedule import load as load_schedule
 from vrgrid.perception.loader import (

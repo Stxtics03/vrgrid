@@ -7,7 +7,6 @@ pin the raw-id -> 19-class map and the moving-* flag.
 
 import numpy as np
 import pytest
-
 from vrgrid.perception.loader import _label_path, load_labels, verify_sequence_exists
 from vrgrid.perception.semantics import (
     SEMANTIC_KITTI_LABEL_MAP,

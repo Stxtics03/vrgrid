@@ -12,7 +12,6 @@ Two guarantees this module has to make:
 
 import numpy as np
 import pytest
-
 from vrgrid.perception.loader import (
     _velodyne_path,
     load_velodyne_scan,
@@ -138,7 +137,7 @@ def test_full_azimuth_sweep_drops_nothing():
 def test_azimuth_wraps_at_plus_pi():
     """azimuth = +pi must fold into column 0, not overflow to column W."""
     pts = _synthetic_points([(np.pi, 0.0), (-np.pi, 0.0)], [10.0, 10.0])
-    _, inv, stats = project(pts, SENSOR_CFG, return_stats=True)
+    _, inv, _stats = project(pts, SENSOR_CFG, return_stats=True)
     cols = np.argwhere(inv >= 0)[:, 1]
     assert cols.max() < SENSOR_CFG["num_azimuth"]
     assert 0 in cols
@@ -151,7 +150,7 @@ def test_azimuth_wraps_at_plus_pi():
 
 @pytest.mark.filterwarnings("ignore:range_image.project")
 def test_out_of_fov_points_are_clamped_not_dropped():
-    d_theta, d_phi = bin_widths(SENSOR_CFG)
+    _d_theta, d_phi = bin_widths(SENSOR_CFG)
     az = 0.0
     above = np.deg2rad(2.0) + 5 * d_phi   # 5 rows above phi_max
     below = np.deg2rad(-24.8) - 5 * d_phi  # 5 rows below phi_min
@@ -159,7 +158,7 @@ def test_out_of_fov_points_are_clamped_not_dropped():
     pts = _synthetic_points([(az, above), (az, below), (az + 0.05, inside)],
                             [10.0, 10.0, 10.0])
 
-    range_image, inv, stats = project(pts, SENSOR_CFG, return_stats=True)
+    _range_image, inv, stats = project(pts, SENSOR_CFG, return_stats=True)
 
     assert stats["n_clamped_above"] == 1
     assert stats["n_clamped_below"] == 1
@@ -174,7 +173,7 @@ def test_out_of_fov_points_are_clamped_not_dropped():
 
 
 def test_out_of_fov_warning_only_above_threshold(recwarn):
-    d_theta, d_phi = bin_widths(SENSOR_CFG)
+    _d_theta, _d_phi = bin_widths(SENSOR_CFG)
     inside = _synthetic_points(
         [(a, np.deg2rad(-10.0)) for a in np.linspace(-3, 3, 90)], np.full(90, 15.0)
     )
