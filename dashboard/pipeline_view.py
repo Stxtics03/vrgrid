@@ -48,6 +48,22 @@ from .palettes import (
 
 PALETTES = ("semantickitti", "groups")
 
+# Elevation ramp for the occupied-cell surface: blue -> green -> yellow ->
+# vermillion over a FIXED [-3, 15] m band (z-up world), so a cell's colour does
+# not change frame to frame as the visible height range moves. Okabe-Ito stops,
+# an ordered light->dark progression that survives all three CVD types.
+_HEIGHT_STOPS = np.array(
+    [[0, 114, 178], [0, 158, 115], [240, 228, 66], [213, 94, 0]], dtype=np.float32
+)
+
+
+def _height_ramp(z: np.ndarray, lo: float = -3.0, hi: float = 15.0) -> np.ndarray:
+    """(N, 3) uint8 colour per cell from its world-z, clipped to [lo, hi]."""
+    t = np.clip((np.asarray(z, np.float32) - lo) / (hi - lo), 0.0, 1.0) * 3.0
+    i = np.clip(t.astype(np.int64), 0, 2)
+    f = (t - i)[:, None]
+    return (_HEIGHT_STOPS[i] * (1.0 - f) + _HEIGHT_STOPS[i + 1] * f).astype(np.uint8)
+
 
 def legend_markdown(palette: str) -> str:
     """Which raw classes fall into each colour, so nothing is lost in grouping."""
@@ -117,11 +133,15 @@ def get_display_points(frame, ghost_removal: bool, color_by: str = "class",
 class PipelineView:
     def __init__(self, schedule, spawn: bool = False, save_path: str | None = None,
                  color_by: str = "class", ghost_removal: bool = True,
-                 palette: str = "semantickitti"):
+                 palette: str = "semantickitti", engine=None):
         self.color_by = color_by
         self.ghost_removal = ghost_removal
         self.palette = palette
         self.schedule = schedule
+        # The map back end (`run.engine.MapEngine`), or None for perception-only
+        # runs. When present, `log_frame` draws its occupied cells as the real
+        # 2.5D surface -- see `_log_occupied`.
+        self.engine = engine
         rr.init("vrgrid_pipeline", spawn=spawn)
         if save_path:
             rr.save(save_path)
@@ -169,11 +189,46 @@ class PipelineView:
             static=True,
         )
 
+    def _cell_m_per_slot(self, slots: np.ndarray) -> np.ndarray:
+        """Cell edge length (m) for each occupied slot, from the ring it lives
+        in. This is what makes the foveation visible: a box drawn at a cell's
+        own size grows from 5 cm near the vehicle to 40 cm at 100 m."""
+        out = np.full(len(slots), self.engine.sched.base_cell_m, dtype=np.float32)
+        for layout in self.engine.handle.rings:
+            sel = (slots >= layout.offset) & (slots < layout.offset + layout.slots)
+            out[sel] = layout.cell_m
+        return out
+
+    def _log_occupied(self):
+        """The real 2.5D occupied surface: every cell the map currently calls
+        OCCUPIED, drawn as a box at its world xy, at its visibility height z
+        (ceiling where one was seen, ground otherwise -- the same height §10.4
+        tests), sized to its ring's cell. `--show-ghosts` keeps the moving
+        car's cells here; the default clears them via §10.4, so this entity is
+        where the toggle actually shows on screen."""
+        slots, x, y, z = self.engine.occupied_cells()
+        if len(slots) == 0:
+            rr.log("world/map/occupied", rr.Clear(recursive=True))
+            return
+        cell_m = self._cell_m_per_slot(slots)
+        centres = np.stack([x, y, z], axis=1).astype(np.float32)
+        half = np.stack(
+            [cell_m / 2.0, cell_m / 2.0, np.full_like(cell_m, 0.02)], axis=1
+        ).astype(np.float32)
+        rr.log(
+            "world/map/occupied",
+            rr.Boxes3D(centers=centres, half_sizes=half,
+                       colors=_height_ramp(z), fill_mode="solid"),
+        )
+
     def log_frame(self, frame):
         rr.set_time("frame", sequence=frame.index)
 
         xyz, colors = get_display_points(frame, self.ghost_removal, self.color_by, self.palette)
         rr.log("world/points", rr.Points3D(xyz, colors=colors, radii=0.03))
+
+        if self.engine is not None:
+            self._log_occupied()
 
         # The removed set, on its own entity -- this is what the demo toggles.
         ghosts = frame.points_world[frame.moving].astype(np.float32)

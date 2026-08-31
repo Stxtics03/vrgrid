@@ -171,20 +171,23 @@ def main(argv=None) -> int:
         f"{sched.total_cells:,} cells, {sched.total_cells * 12 / 1e6:.2f} MB"
     )
 
-    view = None
-    if args.viz or args.save:
-        from vrgrid.dash.pipeline_view import PipelineView
-
-        view = PipelineView(sched, spawn=args.viz, save_path=args.save,
-                            color_by=args.color_by, ghost_removal=not args.show_ghosts,
-                            palette=args.palette)
-
     engine = None
     if not args.no_map:
         engine = MapEngine(sched, ghost_removal=not args.show_ghosts,
                            clip_class_ids=args.clip_class_ids)
         print(f"map: {engine.handle.allocated_slots:,} slots preallocated, "
               f"ghost removal {'OFF' if args.show_ghosts else 'ON'}")
+
+    view = None
+    if args.viz or args.save:
+        from vrgrid.dash.pipeline_view import PipelineView
+
+        # `engine` is passed so the dashboard draws the map's occupied cells as
+        # the real 2.5D surface, not just the point cloud -- this is what makes
+        # `--show-ghosts` visibly change the screen (Gate 3).
+        view = PipelineView(sched, spawn=args.viz, save_path=args.save,
+                            color_by=args.color_by, ghost_removal=not args.show_ghosts,
+                            palette=args.palette, engine=engine)
 
     n, cleared, protected = 0, 0, 0
     for frame in iter_pipeline(args.seq, args.frames, use_patchworkpp=not args.no_patchworkpp):

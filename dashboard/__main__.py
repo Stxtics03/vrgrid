@@ -33,7 +33,11 @@ def main(argv=None) -> None:
                    help="class colours: the 19-class standard, or 7 colourblind-safe groups")
     p.add_argument("--save", default=None, help="write a .rrd recording instead of spawning a viewer")
     p.add_argument("--show-ghosts", action="store_true",
-                   help="keep moving points in world/points (default: split to world/ghosts)")
+                   help="keep moving points in world/points AND stop the map's "
+                        "visibility cleanup, so ghost trails stay in the cells "
+                        "(default: both on)")
+    p.add_argument("--no-map", action="store_true",
+                   help="perception only; skip the map back end and its occupied-cell surface")
     p.add_argument("--no-patchworkpp", action="store_true")
     args = p.parse_args(argv)
 
@@ -45,15 +49,19 @@ def main(argv=None) -> None:
 
     from vrgrid.grid import schedule as schedule_mod
     from vrgrid.run.__main__ import iter_pipeline
+    from vrgrid.run.engine import MapEngine
 
     from .pipeline_view import PipelineView
 
     sched = schedule_mod.load(args.schedule)
+    engine = None if args.no_map else MapEngine(sched, ghost_removal=not args.show_ghosts)
     view = PipelineView(sched, spawn=args.save is None, save_path=args.save,
                         color_by=args.color_by, ghost_removal=not args.show_ghosts,
-                        palette=args.palette)
+                        palette=args.palette, engine=engine)
     n = 0
     for frame in iter_pipeline(args.seq, args.frames, use_patchworkpp=not args.no_patchworkpp):
+        if engine is not None:
+            engine.step(frame)
         view.log_frame(frame)
         n += 1
     print(f"{n} frames from sequence {args.seq}" + (f" -> {args.save}" if args.save else ""))
