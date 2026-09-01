@@ -30,7 +30,7 @@ they track the vehicle. Points are world-frame and accumulate on the timeline.
 import numpy as np
 import rerun as rr
 
-from .demo_synthetic import load_schedule
+from ._config import blind_cone_radius_m, schedule_legend_markdown
 
 # Every colour below is defined in `palettes.py`, which imports no rerun: the
 # CVD audit (`cvd.py`) and tests/test_cvd.py check these numbers in CI, where
@@ -47,6 +47,22 @@ from .palettes import (
 )
 
 PALETTES = ("semantickitti", "groups")
+
+# Elevation ramp for the occupied-cell surface: blue -> green -> yellow ->
+# vermillion over a FIXED [-3, 15] m band (z-up world), so a cell's colour does
+# not change frame to frame as the visible height range moves. Okabe-Ito stops,
+# an ordered light->dark progression that survives all three CVD types.
+_HEIGHT_STOPS = np.array(
+    [[0, 114, 178], [0, 158, 115], [240, 228, 66], [213, 94, 0]], dtype=np.float32
+)
+
+
+def _height_ramp(z: np.ndarray, lo: float = -3.0, hi: float = 15.0) -> np.ndarray:
+    """(N, 3) uint8 colour per cell from its world-z, clipped to [lo, hi]."""
+    t = np.clip((np.asarray(z, np.float32) - lo) / (hi - lo), 0.0, 1.0) * 3.0
+    i = np.clip(t.astype(np.int64), 0, 2)
+    f = (t - i)[:, None]
+    return (_HEIGHT_STOPS[i] * (1.0 - f) + _HEIGHT_STOPS[i + 1] * f).astype(np.uint8)
 
 
 def legend_markdown(palette: str) -> str:
@@ -117,10 +133,15 @@ def get_display_points(frame, ghost_removal: bool, color_by: str = "class",
 class PipelineView:
     def __init__(self, schedule, spawn: bool = False, save_path: str | None = None,
                  color_by: str = "class", ghost_removal: bool = True,
-                 palette: str = "semantickitti", schedule_yaml: str | None = None):
+                 palette: str = "semantickitti", engine=None):
         self.color_by = color_by
         self.ghost_removal = ghost_removal
         self.palette = palette
+        self.schedule = schedule
+        # The map back end (`run.engine.MapEngine`), or None for perception-only
+        # runs. When present, `log_frame` draws its occupied cells as the real
+        # 2.5D surface -- see `_log_occupied`.
+        self.engine = engine
         rr.init("vrgrid_pipeline", spawn=spawn)
         if save_path:
             rr.save(save_path)
@@ -138,27 +159,66 @@ class PipelineView:
         )
         rr.log("legend", rr.TextDocument(legend_markdown(palette),
                                          media_type=rr.MediaType.MARKDOWN), static=True)
-        self._log_rings(load_schedule() if schedule_yaml is None else load_schedule(schedule_yaml))
-        self._log_blind_cone()
+        rr.log("schedules", rr.TextDocument(schedule_legend_markdown(schedule.name),
+                                            media_type=rr.MediaType.MARKDOWN), static=True)
+        self._log_rings(schedule)
+        self._log_blind_cone(blind_cone_radius_m())
 
-    def _log_rings(self, sched: dict):
-        for ring in sched.get("rings", []):
-            hw = ring["half_width_m"]
+    def _log_rings(self, schedule):
+        """Ring-boundary circles, straight from the passed `Schedule`. The ring
+        half-widths and cell sizes come from `configs/schedule_*.yaml` via
+        `grid.schedule.load` -- nothing here is hardcoded, and this draws the
+        same rings the engine bins into."""
+        for ring in schedule.rings:
+            hw = ring.half_width_m
             th = np.linspace(0, 2 * np.pi, 129)
             strip = np.stack([hw * np.cos(th), hw * np.sin(th), np.zeros_like(th)], axis=1)
             rr.log(
-                f"world/vehicle/rings/ring_{ring['ring']}",
+                f"world/vehicle/rings/ring_{ring.ring}_{ring.cell_m * 100:g}cm",
                 rr.LineStrips3D([strip.astype(np.float32)], colors=[220, 220, 220], radii=0.04),
                 static=True,
             )
 
-    def _log_blind_cone(self, radius_m: float = 3.74):
+    def _log_blind_cone(self, radius_m: float):
         th = np.linspace(0, 2 * np.pi, 65)
         strip = np.stack([radius_m * np.cos(th), radius_m * np.sin(th), np.zeros_like(th)], axis=1)
         rr.log(
             "world/vehicle/blind_cone",
-            rr.LineStrips3D([strip.astype(np.float32)], colors=[230, 60, 60], radii=0.05),
+            rr.LineStrips3D([strip.astype(np.float32)], colors=[230, 60, 60], radii=0.05,
+                            labels=[f"blind cone {radius_m:.2f} m (unknown, never free)"]),
             static=True,
+        )
+
+    def _cell_m_per_slot(self, slots: np.ndarray) -> np.ndarray:
+        """Cell edge length (m) for each occupied slot, from the ring it lives
+        in. This is what makes the foveation visible: a box drawn at a cell's
+        own size grows from 5 cm near the vehicle to 40 cm at 100 m."""
+        out = np.full(len(slots), self.engine.sched.base_cell_m, dtype=np.float32)
+        for layout in self.engine.handle.rings:
+            sel = (slots >= layout.offset) & (slots < layout.offset + layout.slots)
+            out[sel] = layout.cell_m
+        return out
+
+    def _log_occupied(self):
+        """The real 2.5D occupied surface: every cell the map currently calls
+        OCCUPIED, drawn as a box at its world xy, at its visibility height z
+        (ceiling where one was seen, ground otherwise -- the same height §10.4
+        tests), sized to its ring's cell. `--show-ghosts` keeps the moving
+        car's cells here; the default clears them via §10.4, so this entity is
+        where the toggle actually shows on screen."""
+        slots, x, y, z = self.engine.occupied_cells()
+        if len(slots) == 0:
+            rr.log("world/map/occupied", rr.Clear(recursive=True))
+            return
+        cell_m = self._cell_m_per_slot(slots)
+        centres = np.stack([x, y, z], axis=1).astype(np.float32)
+        half = np.stack(
+            [cell_m / 2.0, cell_m / 2.0, np.full_like(cell_m, 0.02)], axis=1
+        ).astype(np.float32)
+        rr.log(
+            "world/map/occupied",
+            rr.Boxes3D(centers=centres, half_sizes=half,
+                       colors=_height_ramp(z), fill_mode="solid"),
         )
 
     def log_frame(self, frame):
@@ -166,6 +226,9 @@ class PipelineView:
 
         xyz, colors = get_display_points(frame, self.ghost_removal, self.color_by, self.palette)
         rr.log("world/points", rr.Points3D(xyz, colors=colors, radii=0.03))
+
+        if self.engine is not None:
+            self._log_occupied()
 
         # The removed set, on its own entity -- this is what the demo toggles.
         ghosts = frame.points_world[frame.moving].astype(np.float32)
