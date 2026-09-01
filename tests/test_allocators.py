@@ -236,11 +236,33 @@ def test_our_own_allocation_is_resident_not_just_promised(alloc):
 
 def test_commit_can_be_declined(thresholds):
     """Committing costs a moment at startup and is not always wanted -- a unit
-    test allocating a hundred grids does not need them all faulted in."""
+    test allocating a hundred grids does not need them all faulted in.
+
+    Asserted as a RATIO between the two allocations rather than against an
+    absolute share of `total_bytes()`. What `allocate()` controls is whether it
+    touches the pages it asked for; whether an UNtouched page counts toward RSS
+    at all is the platform's business, and the absolute form quietly encoded
+    one platform's answer to that -- it passes on the ubuntu CI runner and
+    fails on the Windows machines two of the three of us develop on, so the
+    failure never appeared anywhere it would get fixed. The ratio asks the
+    question this file actually owns: does declining the commit cost
+    measurably less than taking it?
+
+    Where the OS will not separate the two cases at all there is nothing here
+    to assert, and saying so is more honest than either failing or quietly
+    passing on a comparison of two zeroes.
+    """
     schedule = load("5/10/20/40")
     lazy = allocate(schedule, thresholds, commit_pages=False)
-    assert lazy.total_bytes() == allocate(schedule, thresholds).total_bytes()
-    assert lazy.resident_delta < 0.5 * lazy.total_bytes()
+    committed = allocate(schedule, thresholds)
+
+    assert lazy.total_bytes() == committed.total_bytes()
+    if committed.resident_delta < 0.5 * committed.total_bytes():
+        pytest.skip(
+            f"this OS reports only {committed.resident_delta / 1e6:.2f} MB "
+            f"resident for a committed {committed.total_bytes() / 1e6:.2f} MB "
+            "allocation, so committed and lazy are not distinguishable here")
+    assert lazy.resident_delta < 0.5 * committed.resident_delta
 
 
 # --- the state a fresh cell is in --------------------------------------------
