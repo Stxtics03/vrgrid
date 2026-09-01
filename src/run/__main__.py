@@ -115,7 +115,9 @@ def iter_pipeline(seq: str, max_frames: int | None, use_patchworkpp: bool = True
             if len(rho8) < len(points):  # pad points that never projected
                 rho8 = np.concatenate([rho8, np.zeros(len(points) - len(rho8), np.uint8)])
 
-        # grid.scatter(soa, points, semantic, pose, schedule)  -- STUB, see module docstring
+        # The map back end (bin -> scatter -> fuse -> cleanup -> shift) runs in
+        # `engine.MapEngine.step(frame)`, called by `main()` on each frame this
+        # generator yields -- see the module docstring.
 
         yield PerceptionFrame(
             index=i,
