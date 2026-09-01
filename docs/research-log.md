@@ -137,6 +137,31 @@ Format:
 
 ---
 ## 2026-09-02 — Aakash
+**Module:** D1 — Refinement pool, lattice (Day 5 stretch)
+
+**Finding:** Day 5's D1 item is "conservative pyramid (§7.2) + the exhaustive no-false-negative test, then anisotropic foveation with hysteresis". The pyramid half was already done and tested (21 tests, `test_theorem3_has_no_false_negatives`). The hysteresis half was implemented and **had no caller**: `lattice.migrate_ring` appeared nowhere outside its own unit test. §6.3's own specified unit test — *"drive a synthetic trajectory with sinusoidal speed across a ring boundary; assert the number of split/merge events per cell is bounded and that variance does not grow monotonically over 1,000 frames"* — did not exist either, which is a CLAUDE.md rule ("every formula in `sih-math.md` has a named unit test").
+
+Writing that test turned up the larger thing. **Flaw E1's fix was inert, and the symptom was printed in every run we have ever done.** `gate.apply` calls `pool.release_overtaken(lambda ring, slot: ring_of_slot(gm, slot))`, and `ring_of_slot` answers which ring a flat **slot** is *stored* in — a property of the allocation, fixed at startup, which cannot change because the vehicle moved. So `now` was always exactly `ring`, the release test `now <= ring - levels` was unsatisfiable for `levels >= 1`, and **nothing was ever released**. Fourteen frames of the synthetic sequence ended `released 0 ... pool 512/512 blocks` with 15,791 refusals: the pool filled once, early, then refused every later request — flaw E1 precisely, with the fix for it sitting in the same function.
+
+The existing test did not catch it because it monkeypatched `gate.ring_of_slot` to return 0 for every slot. That monkeypatch was the tell: the only way to observe a release was to replace the function with one that lies.
+
+`release_overtaken` now gets `migrate_ring(*_cell_centre(gm, ring, slot), schedule, ring, speed)` — where the cell *is*, from its already-vehicle-relative centre — which both makes the E1 fix live and puts §6.3's hysteresis on the frame path for the first time. Measured, same 14 frames:
+
+    fired    116,684 -> 395        refused  15,791 -> 0
+    acquired   2,954 -> 395        released      0 -> 324
+    pool     512/512 -> 62/512
+
+`fired` collapses because a refused cell never gets `FLAG_REFINED` and so re-fires every frame; 116,684 was a few hundred cells asking again and again against a full pool. **No memory figure moves** — the pool is 512 x 16 x 12 B whether full or empty.
+
+**⚑ A measurement trap worth writing down.** My first version of §6.3's test counted `out["acquired"] + out["released"]` and reported 200 events in 200 frames, which reads as total thrash. It was not: `pool.acquire` is idempotent for a `(ring, slot)` it already holds, so `acquired` counts the gate *re-affirming* a block it already has. `free_blocks` never moved. The metric §6.3 actually bounds is pool **occupancy** change, and by that measure the band holds a boundary cell for 1,000 frames of sinusoidal speed with the variance byte unchanged — §5.4's `merge(split(c)) == c` doing its job. I nearly recorded a bug that was not there.
+
+**Source:** `src/grid/gate.py`, `tests/test_gate.py::test_release_happens_when_the_vehicle_drives_up_to_the_cell`, `::test_hysteresis_keeps_a_boundary_cell_from_thrashing_the_pool`.
+
+**So what:** The refinement pool is the mechanism behind the "bounded memory, spend it where it matters" claim, and until today it spent everything in the first few frames and then refused. Gate 5 asks that every stretch item either works and is integrated or is reverted cleanly; the anisotropic-foveation-with-hysteresis item is now integrated rather than present. 509 passed, 27 skipped.
+
+---
+
+## 2026-09-02 — Aakash
 **Module:** D1 — Evaluation harness, reference map
 
 **Finding:** Triage items #1 and #2, both landed on me. #1 is already closed and #2 was not what it looked like.
