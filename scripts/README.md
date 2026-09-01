@@ -14,6 +14,7 @@ is not produced by something in this directory, it does not go on a slide.
 | `regret_plot.py` | The Day-4 headline figure -- memory against plan regret (§8.2) -- as `regret.csv` plus `regret.svg`/`.png`. Runs `eval_synthetic`'s sweep by importing it, and refuses to draw a monotone story over non-monotone rows: it prints which step violates the claim |
 | `ablation_table.py` | Schedule ablation: cells, memory and per-stage latency per schedule against uniform-grid baselines, under ONE frozen threshold set whose sha256 is printed and re-checked. `--expect-thresholds` asserts it. **`--seq 08`** replays a real sequence for every row |
 | `ghost_removal_figure.py` | The Gate 3 figure -- the same map with and without §10.4, drawn as occupied CELLS rather than returns -- plus the per-frame counters as CSV. **`--seq 08`** uses real frames, with ghosts identified by the GT `moving-*` label |
+| `plan_query_survey.py` | What the plan-regret window CONTAINS -- M*'s wall set and cost spread, what survives into each schedule's M_S, the below-`n_min` population that `common_support()` does not restrict, and the cell size at which a step stops being a wall. **Never computes R(S)**, deliberately: it exists so a query can be chosen from the terrain rather than from the answer. See `docs/memo-shrestha-day5-plan-regret-query.md` |
 | `baseline_demo.py` | Our map beside the uniform 2.5D and dense 3D baselines, all three counters resident and ticking. `--dense` allocates the full 2.56 GB |
 
 Every script on the Gate 6 list now exists, and the three that measure the
