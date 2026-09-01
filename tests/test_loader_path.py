@@ -10,18 +10,29 @@ What this cannot check is KITTI's own bytes: real intensity distributions,
 real occlusion, real pose drift. What it does check is that every interface
 between the six modules fits, which is the failure that costs a day rather
 than an hour.
+
+⚑ This ran against `tests/kitti_layout.py`, a second sequence writer that
+  existed because `eval/synthetic.py` wrote its poses to the file `loader.py`
+  is built to ignore. It also wrote vehicle-frame points into sensor-frame
+  `.bin`s, learning ids into raw `.label`s, and vehicle->world rows into
+  Camera-0 poses -- so the gap was four conventions, not two paths. Fixing
+  them there made the second writer redundant and it is gone: one scene
+  generator, and the only frame convention in the repo is JP's. The scene
+  here is the analytic one from `docs/sih-math.md` §9.1 with `structure=True`,
+  which is a beam-model sweep rather than uniform samples, so the sampling
+  density is the one the ring schedule was derived from.
 """
 
 import warnings
 
 # No tests/__init__.py in this repo, so pytest puts the test directory on
 # sys.path and a sibling module is a plain import.
-import kitti_layout as fixture
 import numpy as np
 import pytest
 
 pytest.importorskip("vrgrid.perception.loader")
 
+from vrgrid.eval import synthetic as fixture
 from vrgrid.grid.schedule import load
 from vrgrid.perception import loader, transforms
 from vrgrid.run.engine import MapEngine
@@ -38,7 +49,7 @@ def sequence(tmp_path, monkeypatch):
     is loaded. The module attributes have to be patched instead -- a trap worth
     knowing about before someone spends an afternoon on it.
     """
-    fixture.write_sequence(tmp_path, SEQ, n_frames=5)
+    fixture.write_sequence(tmp_path, SEQ, n_frames=5, structure=True)
     monkeypatch.setattr(loader, "DATA_ROOT", tmp_path)
     monkeypatch.setattr(loader, "GT_POSES_DIR", tmp_path / "poses")
     monkeypatch.setattr(loader, "VELODYNE_DIR", tmp_path / "sequences")
@@ -49,9 +60,11 @@ def sequence(tmp_path, monkeypatch):
 
 
 def test_the_real_loader_reads_the_fixture(sequence):
-    """The point of the fixture. `eval/synthetic.py` writes its poses to
-    `sequences/<seq>/poses.txt`, which is the file loader.py's header says it
-    deliberately ignores in favour of `poses/<seq>.txt`."""
+    """The loader reads what the writer wrote, through no adapter.
+
+    `poses/<seq>.txt` and `sequences/<seq>/calib.txt` are the two files that
+    used to be in the wrong place or absent, and they are the two the loader
+    opens before it opens a single scan."""
     frames = list(loader.scans(SEQ, max_frames=5))
     assert len(frames) == 5
     points, labels, pose = frames[0]
@@ -70,17 +83,24 @@ def test_the_pose_puts_the_vehicle_where_it_was_asked_to(sequence):
         assert np.allclose(t_vw[:3, :3], np.eye(3), atol=1e-9)
 
 
-def test_the_ground_lands_at_world_zero(sequence):
-    """The vehicle origin sits on the road, so road returns must come out at
-    world z = 0 -- not at -1.73, which is what dropping `T_S_V` would give.
-    The whole sensor/vehicle/world chain is wrong by 1.73 m if this fails, and
-    the map would still look entirely plausible."""
+def test_the_ground_lands_on_the_surface_it_was_generated_from(sequence):
+    """The vehicle origin sits on the road, so road returns must come back at
+    the analytic terrain height -- not 1.73 m under it, which is what dropping
+    `T_S_V` anywhere in the chain gives. The map would still look entirely
+    plausible if this were wrong, which is why it is asserted here.
+
+    Against `terrain_height_m` rather than against zero: the synthetic road is
+    crowned (§9.1), so z = 0 is only true on the centreline. A tolerance loose
+    enough to absorb the crown would be loose enough to absorb a good part of
+    the 1.73 m this exists to catch.
+    """
     points, labels, pose = next(iter(loader.scans(SEQ, max_frames=1)))
     world = transforms.transform_points(
         points[:, :3], transforms.sensor_to_world(pose, sequence=SEQ))
-    road = world[(np.asarray(labels) & 0xFFFF) == fixture.RAW_ROAD]
+    road = world[(np.asarray(labels) & 0xFFFF) == fixture.ROAD]
     assert len(road) > 100
-    assert np.allclose(road[:, 2], 0.0, atol=1e-6)
+    surface = fixture.terrain_height_m(road[:, 0], road[:, 1], 0)
+    assert np.abs(road[:, 2] - surface).max() < 1e-5
 
 
 def test_every_return_is_inside_the_sensor_fov(sequence):
@@ -101,7 +121,12 @@ def test_the_whole_pipeline_runs_a_sequence(sequence):
     because a warning here is an interface disagreeing quietly."""
     from vrgrid.run.__main__ import iter_pipeline
 
-    engine = MapEngine(load("5/10/20/40"), max_points=40_000,
+    # ⚑ max_points must exceed the sweep. The fixture is ~48k returns and
+    #   this said 40_000, which silently truncated the tail -- and the tail is
+    #   where `structure` appends the facade, the pole and the sign, so the
+    #   whole reason this sequence has classes above 15 was being cut off
+    #   before it reached a cell. `binned == points` below is what caught it.
+    engine = MapEngine(load("5/10/20/40"), max_points=60_000,
                        max_candidates=80_000, clip_class_ids=True)
     counters = []
     with warnings.catch_warnings():
@@ -131,7 +156,7 @@ def test_a_realistic_label_set_fuses_without_clipping(sequence):
     from vrgrid.grid.fusion import unpack_class
     from vrgrid.run.__main__ import iter_pipeline
 
-    engine = MapEngine(load("5/10/20/40"), max_points=40_000, max_candidates=80_000)
+    engine = MapEngine(load("5/10/20/40"), max_points=60_000, max_candidates=80_000)
     assert not engine.clip_class_ids, "the clip must be off by default now"
 
     frame = next(iter(iter_pipeline(SEQ, 1, use_patchworkpp=False)))
@@ -164,7 +189,7 @@ def test_one_timer_covers_the_whole_frame(sequence):
     from vrgrid.run.__main__ import iter_pipeline
 
     t = Timer(stages=STAGES)
-    engine = MapEngine(load("5/10/20/40"), max_points=40_000,
+    engine = MapEngine(load("5/10/20/40"), max_points=60_000,
                        max_candidates=80_000, clip_class_ids=True, timer=t)
 
     frames = iter(iter_pipeline(SEQ, 5, use_patchworkpp=False, timer=t))
@@ -200,13 +225,13 @@ def test_one_timer_covers_the_whole_frame(sequence):
 def test_the_moving_car_actually_moves_in_the_world(sequence):
     """⚑ A `moving-car` label on a parked car is worse than no car at all.
 
-    The fixture generates the scene in the SENSOR frame, so a car placed at
-    `14 - i * step_m` cancels the vehicle's own motion exactly and sits at
-    world x 13-15 m for the whole sequence: labelled moving, never moves.
-    Ghost removal then has nothing to remove, and
-    `ghost_removal_figure.py --seq` reported clearing 1.0% of the trail --
-    correct behaviour, measured against a fixture that lied. Fixing the car's
-    world speed took the same number to 69.1%.
+    The scene is generated in the vehicle frame, so a car placed at a fixed
+    offset ahead cancels the vehicle's own motion exactly and sits at the same
+    world x for the whole sequence: labelled moving, never moves. Ghost
+    removal then has nothing to remove, and `ghost_removal_figure.py --seq`
+    reported clearing 1.0% of the trail -- correct behaviour, measured against
+    a fixture that lied. Fixing the car's world speed took the same number to
+    69.1%.
 
     A benchmark that quietly measures nothing is the expensive kind of wrong,
     so this asserts the car is somewhere else every frame.

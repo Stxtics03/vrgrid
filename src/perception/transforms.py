@@ -113,7 +113,8 @@ def _pose_to_4x4(pose: np.ndarray) -> np.ndarray:
     return T
 
 
-def vehicle_to_world(pose: np.ndarray, sequence: str = "00") -> np.ndarray:
+def vehicle_to_world(pose: np.ndarray, sequence: str = "00",
+                     tr: np.ndarray | None = None) -> np.ndarray:
     """4x4 Vehicle -> World transform for one frame.
 
     Composition, applied right to left to a Vehicle-frame point:
@@ -126,12 +127,16 @@ def vehicle_to_world(pose: np.ndarray, sequence: str = "00") -> np.ndarray:
     Args:
         pose: (3, 4) or (12,) row-major [R | t] from `poses.txt`, Camera-0 -> World_cam.
         sequence: which calib.txt to read `Tr` from. Default "00".
+        tr: (4, 4) Velodyne -> Camera-0, supplied instead of reading it. For a
+            sequence that does not live under the module-level DATA_ROOT --
+            a test fixture, `eval/synthetic.py`. The composition below is the
+            part that must not be duplicated; where `Tr` came from is not.
 
     Returns:
         (4, 4) float64 homogeneous matrix: point_Vehicle -> point_World.
     """
     T_pose = _pose_to_4x4(pose)
-    T_tr = velo_to_cam0(sequence)
+    T_tr = velo_to_cam0(sequence) if tr is None else np.asarray(tr, dtype=np.float64)
 
     R_flip = np.eye(4, dtype=np.float64)
     R_flip[:3, :3] = R_CAM0_TO_VEH

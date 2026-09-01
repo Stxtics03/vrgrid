@@ -37,7 +37,8 @@ resampling the objection is about.
 
 --- ⚑⚑ the confound that decides whether the ablation is valid at all -----
 
-Measured on the synthetic scene, 14 frames, one 11 x 11 m planning window:
+When this note was written the scene produced, at 14 frames and one
+11 x 11 m planning window:
 
     schedule        R(S)     cells low-confidence in the window
     5/10/20/40      5.803    65%
@@ -49,6 +50,28 @@ ring holds few returns per cell -- P_fill is 11.6% per frame at ring 0 and the
 far field fills only by ego-motion (§1.3) -- so most of its cells are below
 `n_min`, pay `w_unknown` plus the class penalty for an unset class byte, and
 the planner routes around a map that is merely SPARSE rather than wrong.
+
+⚑ **Those magnitudes no longer reproduce, and the reason is not that the
+  confound went away.** Re-measured 2026-09-01 with
+  `python scripts/eval_synthetic.py --frames 14 --confound`:
+
+    schedule        R(S)     cells low-confidence in the window
+    5/10/20/40      2.389     1%
+    uniform 20 cm   3.354     0%
+
+  The window is now 99.1% common support, so restricting it changes almost
+  nothing -- unrestricted and restricted R(S) agree to three decimals. Two
+  things moved underneath the old numbers: the planning window was repositioned
+  behind the final pose rather than ahead of it (see `PLAN_BEHIND_M` in
+  `scripts/eval_synthetic.py`, which records why), and the synthetic sampler's
+  beam-surface intersection was wrong and is fixed, which raised coverage in
+  every ring.
+
+  The restriction stays, and the numbers are printed side by side, because how
+  large this effect is depends on the scene, the window placement and the frame
+  count -- none of which are frozen. It was 65% against 4% on one arrangement
+  of them. An ablation that quotes R(S) across cell sizes without the
+  restriction is not interpretable whatever the current gap happens to be.
 
 **So R(S) compared across schedules with different cell sizes measures fill
 rate, not coarsening, unless the comparison is restricted to ground all of

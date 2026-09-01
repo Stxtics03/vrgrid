@@ -6,12 +6,15 @@ no amount of visibility cleanup gets it out cleanly. So moving points are
 routed here instead, and `query()` returns the union of the two layers with one
 merge rule defined in one place (`grid/query.py`).
 
-⚑ This is not a nicety. Measured on the synthetic sequence before it existed:
-  the car 12 m ahead pulled ring 1's height RMSE from 0.48 cm to 11.71 cm --
-  the entire error budget of that ring, from one object. `scripts/
-  eval_synthetic.py` had to strip moving points by hand to get an interpretable
-  number, which is exactly the kind of hand-holding that stops being possible
-  the moment the real sequence lands.
+⚑ This is not a nicety. `python scripts/eval_synthetic.py --frames 14
+  --keep-moving` bypasses it, and the car 12 m ahead pulls ring 1's height
+  RMSE from **0.41 cm to 12.72 cm** -- thirty times the entire error budget of
+  that ring, from one object. `eval_synthetic.py` used to strip moving points
+  by hand to get an interpretable number, which is exactly the kind of
+  hand-holding that stops being possible the moment the real sequence lands.
+
+  (Re-measured 2026-09-01 after the beam-intersection fix in `eval/synthetic`;
+  it read 0.48 -> 11.71 cm on the old sampler, which is the same conclusion.)
 
 --- where the motion labels come from, and why that is a feature ----------
 

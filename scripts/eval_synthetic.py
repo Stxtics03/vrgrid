@@ -71,7 +71,11 @@ def vehicle_frame_scans(root, sequence, keep_moving=False):
     budget, from one car 12 m ahead.
     """
     for pts, labels, pose in read_sequence(root, sequence):
-        out = np.where(labels >= 250, 1, labels) if keep_moving else labels
+        # Raw `car` (10), not raw `outlier` (1). `--keep-moving` is meant to
+        # show what the transient layer is worth, so the car has to survive as
+        # the thing it is; folding it onto an id the 19-class map sends to
+        # ignore would answer a different question.
+        out = np.where(labels >= 250, 10, labels) if keep_moving else labels
         yield pts, out, np.ones(len(pts), dtype=bool), pose
 
 
@@ -129,6 +133,11 @@ def main():
     ap.add_argument("--keep-moving", action="store_true",
                     help="do not strip moving-* before scatter; shows what the "
                          "missing transient layer costs")
+    ap.add_argument("--confound", action="store_true",
+                    help="also print R(S) WITHOUT the common-support "
+                         "restriction, next to how much of each planning "
+                         "window was low-confidence -- the table in "
+                         "eval/plan_regret.py's confound note")
     args = ap.parse_args()
 
     root = Path(args.out) if args.out else Path(tempfile.mkdtemp(prefix="vrgrid-syn-"))
@@ -163,8 +172,13 @@ def main():
               f"observed by every schedule")
         print()
 
-        rows = []
+        rows, unrestricted = [], []
         for schedule, gm, result, stats in built:
+            if args.confound:
+                _, mine = costmaps_for(gm, reference, vehicle_x)
+                raw_u = plan_regret_for(gm, reference, vehicle_x)
+                unrestricted.append((schedule.name, raw_u,
+                                     float(np.mean(mine.unknown))))
             if schedule.name.startswith("uniform"):
                 rows.append((result, plan_regret_for(gm, reference, vehicle_x, mask)))
                 continue
@@ -196,6 +210,27 @@ def main():
                   f"{m['logical_cells']:>10,} {m['worst_ring_rmse_cm']:>6.2f}c "
                   f"{m['mean_rho']:>6.2f} {m['regret']:>8.3f} "
                   f"{m['frechet_m']:>7.2f}m {m['unknown_fraction']:>7.1%}{blocked}")
+        if unrestricted:
+            print()
+            print("The confound, unrestricted. Math §8.2, and the note in "
+                  "eval/plan_regret.py.")
+            print("  R(S) here is NOT on the common support, so it is not "
+                  "comparable across")
+            print("  cell sizes -- that is the whole point of printing it.")
+            print(f"  {'schedule':<14} {'R(S)':>8} {'window low-confidence':>22}")
+            for name, raw_u, low in unrestricted:
+                print(f"  {name:<14} {raw_u.regret:>8.3f} {low:>21.0%}")
+            print()
+            print("  A finer schedule holds fewer returns per cell, so more of "
+                  "its window is")
+            print("  below n_min; it pays w_unknown and the planner routes "
+                  "around a map that")
+            print("  is merely SPARSE. Read across this table and finer looks "
+                  "worse, which is")
+            print("  precisely backwards. `common_support()` is the fix and the "
+                  "money plot")
+            print("  above uses it.")
+
         print()
         print("  R(S) = 0 means the coarsening did not change the decision -- the")
         print("  only sense in which a saving is free. Read it WITH `unknown`:")

@@ -37,6 +37,42 @@ library should not cost you the sweep.
   and it should be agreed before it is made rather than tuned until the curve
   looks right.
 
+  ---- 2026-09-01, Aakash: the numbers above have moved, and not by tuning ----
+
+  The block above is left as written because its diagnosis is still right and
+  still open. What changed underneath it is `eval/synthetic.py`'s beam-surface
+  intersection, which had a sign error: the sensor's height above a surface at
+  elevation z is `(h_s - z)` and the sampler used `(h_s + z)`. On flat ground
+  they agree, so it survived every test the scene had. On the features it did
+  not, and the consequence for this figure is specific: **across a whole
+  sequence the old sampler returned not one point below -30 cm.** The 40 cm
+  pothole -- the scene's only negative obstacle -- had never once been
+  observed as a hole at any range, so "the hazards are not on the lane" was
+  understating it. One of them was not in the map at all.
+
+  I found this from a FOV assertion in `tests/test_loader_path.py`, before
+  looking at any regret number, and the fix is forced by the geometry rather
+  than chosen: `_beam_range` now solves the intersection instead of taking one
+  step towards it. `PLAN_LANE_CELLS` and the rest of the query are untouched.
+
+  What the curve does now, `--frames 14`:
+
+      5_10_20_40    2.389      uniform_20cm   3.354
+      5_10_50       2.389      uniform_40cm   3.854
+      uniform_10cm  0.000      uniform_80cm   3.854
+
+  The all-zeros are gone, the non-monotone spike at uniform 10 cm is gone --
+  it is now the best of the six, which is the direction a finer map should
+  move -- and the four uniforms are identical at 12, 14 and 24 frames where
+  they used to swing. The two frozen schedules still move with frame count
+  (2.389 at 12 and 14, 1.450 at 24), so that half of your finding stands.
+
+  It is not a flattering curve: on this scene ours costs 29.06 MB to score
+  2.389 where uniform 10 cm costs 18.19 MB to score 0.000. That is a real
+  reading of a synthetic scene whose hazards sit off the planned lane, and it
+  is an argument for posing the query properly -- your point, unchanged --
+  rather than for a different sampler.
+
 Everything here is synthetic and none of it is reportable: the terrain is
 analytic, so there is no sensor noise, no occlusion and no registration error.
 The figure is stamped with that, in the figure itself, so a screenshot of it

@@ -64,13 +64,15 @@ def _calib_path(sequence: str) -> Path:
     return VELODYNE_DIR / sequence / "calib.txt"
 
 
-def load_calib(sequence: str) -> dict:
-    """Load calibration from calib.txt.
+def read_calib(path) -> dict:
+    """Parse one `calib.txt`. Same as `load_calib`, addressed by path.
 
-    Returns dict with 'Tr_velo_to_cam0' as 4x4 matrix (Velodyne → Camera-0).
-    By KITTI convention, Velodyne frame = Vehicle frame.
+    `load_calib` resolves the path from the module-level DATA_ROOT, which is
+    fixed at import. Anything holding a sequence somewhere else -- a test
+    fixture, `eval/synthetic.py`'s writer -- needs the parser without the
+    lookup, and the alternative is a second parser.
     """
-    path = _calib_path(sequence)
+    path = Path(path)
     if not path.exists():
         raise FileNotFoundError(f"Calib not found: {path}")
 
@@ -86,6 +88,15 @@ def load_calib(sequence: str) -> dict:
     if 'Tr_velo_to_cam0' not in calib:
         raise ValueError(f"Tr not found in calib.txt: {path}")
     return calib
+
+
+def load_calib(sequence: str) -> dict:
+    """Load calibration from `sequences/<seq>/calib.txt`.
+
+    Returns dict with 'Tr_velo_to_cam0' as 4x4 matrix (Velodyne → Camera-0).
+    By KITTI convention, Velodyne frame = Vehicle frame.
+    """
+    return read_calib(_calib_path(sequence))
 
 
 def load_gt_poses(sequence: str) -> np.ndarray:

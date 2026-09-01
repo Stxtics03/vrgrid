@@ -114,6 +114,23 @@ r_max(W) = √(W · h_s / Δφ)                                          (6)
 |---|---|---|---|
 | `r_max` | **8.3 m** | **10.8 m** | **15.2 m** |
 
+⚑ **This is now checked against the sampler rather than only derived.** The
+synthetic scene's 60 cm pothole (`eval/synthetic.py`) is resolved — beams
+return points at depth — from 8 m, and from 14 m and 16 m beams still land
+inside its footprint but every one comes back at rim height. That is eq. (6)
+doing what it says, and it is asserted in
+`tests/test_synthetic_layout.py::test_the_pothole_is_resolved_near_and_invisible_far`.
+
+Worth recording *why* it went unchecked until 2026-09-01: the sampler solved
+the beam-ground intersection with one correction step that used `(h_s + z)`
+where the sensor's height above a surface at elevation `z` is `(h_s − z)`. The
+two agree exactly on flat ground, so nothing caught it, and on a feature they
+disagree by about `2z/tan|φ|` — 1.7 m radially at the steepest beam. The
+practical consequence was that **no return below −30 cm was produced at any
+range in any frame**: the scene's only negative obstacle was never observed as
+a hole, so the §8.2 plan-regret figure was measuring a lane with no hazard in
+it. The intersection is now solved (`synthetic._beam_range`).
+
 **Slow-motion detectability.** An object at speed `v` moves `d = v·Δt` between frames (Δt = 0.1 s at 10 Hz). It is *geometrically* detectable only if
 
 ```
@@ -749,7 +766,7 @@ N_dense3D = (200/0.05)² × (8/0.05) = 2.56 × 10⁹ voxels
 |---|---|---|---|
 | 1.2 | `s_rad = r²Δφ/h` — quadratic radial sampling | ⚑ original analysis | empirical fill rate |
 | 1.3 | Ring-sweep filling; uniform 5 cm is 99.87% empty at 50 m | ⚑ the core argument, quantified | fill-rate plot |
-| 1.4 | Blind cone 3.74 m; potholes ≤ 8.3 m; motion ≤ 25 m | derived scope limits | geometry check |
+| 1.4 | Blind cone 3.74 m; potholes ≤ 8.3 m; motion ≤ 25 m | derived scope limits | `test_synthetic_layout.py::test_the_blind_cone_is_where_section_1_2_says_it_is`, `::test_the_pothole_is_resolved_near_and_invisible_far` |
 | 2.2 | Nested-floor theorem ⇒ exact partition | standard, correctly applied | 10⁶-point partition test |
 | 3.2 | `σ²_z ∝ r²σ²_φ / cos²θ_inc` | standard (Fankhauser) | monotonicity |
 | 4.2 | Merge by law of total variance | ⚑ corrects a real error | kerb-step test |
