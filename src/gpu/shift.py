@@ -178,15 +178,27 @@ def flat_slot_into(buf: RingBuffer, ix, iy, out, scratch: dict):
 
     np.subtract(ix, buf.x0, out=col)
     np.subtract(iy, buf.y0, out=row)
-    np.greater_equal(col, 0, out=live)
-    np.less(col, W, out=tmp);          np.logical_and(live, tmp, out=live)
-    np.greater_equal(row, 0, out=tmp); np.logical_and(live, tmp, out=live)
-    np.less(row, W, out=tmp);          np.logical_and(live, tmp, out=live)
 
+    # live = (0 <= col < W) & (0 <= row < W). Every comparison lands in `tmp`
+    # and is folded straight into `live`, so the four of them share one
+    # temporary instead of building four arrays -- which is the whole point of
+    # this function and the reason the pairs used to sit on single lines.
+    np.greater_equal(col, 0, out=live)
+    np.less(col, W, out=tmp)
+    np.logical_and(live, tmp, out=live)
+    np.greater_equal(row, 0, out=tmp)
+    np.logical_and(live, tmp, out=live)
+    np.less(row, W, out=tmp)
+    np.logical_and(live, tmp, out=live)
+
+    # (x0 + c) mod W, by the identity in the docstring: add `x0 mod W`, then
+    # take W back off only the ones that overflowed past it.
     np.add(col, buf.x0 % W, out=col)
-    np.greater_equal(col, W, out=tmp); np.subtract(col, W, out=col, where=tmp)
+    np.greater_equal(col, W, out=tmp)
+    np.subtract(col, W, out=col, where=tmp)
     np.add(row, buf.y0 % W, out=row)
-    np.greater_equal(row, W, out=tmp); np.subtract(row, W, out=row, where=tmp)
+    np.greater_equal(row, W, out=tmp)
+    np.subtract(row, W, out=row, where=tmp)
 
     np.multiply(row, W, out=row)
     np.add(row, col, out=out)
