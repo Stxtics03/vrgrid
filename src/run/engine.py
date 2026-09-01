@@ -31,6 +31,8 @@ from vrgrid.cell import OCC_OCCUPIED
 from vrgrid.gpu.allocators import allocate
 from vrgrid.gpu.kernels import (
     CEILING_NONE,
+    Z_MAX_CM,
+    Z_MIN_CM,
     measurement_variance_cm2,
     quantise_height,
     quantise_weight,
@@ -53,6 +55,12 @@ from vrgrid.grid.fusion import (
 )
 from vrgrid.grid.lattice import bin_points, new_bin_scratch
 from vrgrid.grid.schedule import load_thresholds
+
+# How far the vehicle must climb or drop before the vertical band follows it.
+# The band is re-based in whole steps for the same reason a ring's window
+# shifts in whole cells: moving it costs a pass over every height in the map,
+# so it should happen 46 times on seq 08's 45.7 m climb rather than 4,071.
+Z_DATUM_STEP_M = 1.0
 
 
 @dataclass
@@ -126,6 +134,7 @@ class MapEngine:
                         for r in self.handle.rings]
         self._k = [round(r.cell_m / schedule.base_cell_m) for r in self.handle.rings]
         self._origin = None          # world xy of the vehicle at frame 0
+        self._z_datum = None         # world z the height band is measured from
 
         # The frame loop allocates its binning scratch up front rather than on
         # first use: this object exists to run frames, so there is no case
@@ -169,12 +178,21 @@ class MapEngine:
 
     # -- the inverse, for the cleanup ---------------------------------------
 
-    def _centres(self, slots, ego_xy, out_x, out_y, out_z):
-        """Occupied slots -> cell centres, minus `ego_xy`.
+    def _centres(self, slots, ego, out_x, out_y, out_z):
+        """Occupied slots -> cell centres, minus `ego`.
 
         Pass the vehicle's world xy for vehicle-frame centres, which is what
         the cleanup needs; pass zeros for world-frame ones, which is what a
         map view needs.
+
+        `ego` may be (x, y) or (x, y, z). Height is the axis the two frames
+        disagree on most and the one it is easiest to leave half-converted, so
+        the length says which is wanted: a 2-vector leaves z in the WORLD
+        frame, which is what every readout draws; a 3-vector takes it all the
+        way to the vehicle frame, which is what `visibility_cleanup` documents
+        its inputs as and what it needs to compute a viewing angle. Two
+        elements used to be the only option, and the cleanup silently got
+        world-frame z -- see `_track_datum` for what that cost.
 
         The cleanup projects cell centres into JP's range image, so it needs
         them where the sensor is, not where the lattice origin is. Slot to
@@ -193,8 +211,8 @@ class MapEngine:
             row, col = local // W, local % W
             ix = buf.x0 + np.mod(col - buf.x0, W)
             iy = buf.y0 + np.mod(row - buf.y0, W)
-            out_x[:n][sel] = (ix + 0.5) * layout.cell_m - ego_xy[0]
-            out_y[:n][sel] = (iy + 0.5) * layout.cell_m - ego_xy[1]
+            out_x[:n][sel] = (ix + 0.5) * layout.cell_m - ego[0]
+            out_y[:n][sel] = (iy + 0.5) * layout.cell_m - ego[1]
 
         # **Not `ground_height`.** A cell whose returns are all non-ground has
         # `w_sum == 0`, so `ground_height` is 0 -- and 0 cm is not a neutral
@@ -212,6 +230,12 @@ class MapEngine:
         ceiling = self.handle.grid["ceiling_height"][slots]
         ground = self.handle.grid["ground_height"][slots]
         out_z[:n] = np.where(ceiling != CEILING_NONE, ceiling, ground) / 100.0
+        # Stored heights are relative to the band's datum. `+ datum` puts them
+        # back in the world frame; `- ego[2]`, when asked for, takes them the
+        # rest of the way to the vehicle frame.
+        out_z[:n] += self.z_datum
+        if len(ego) > 2:
+            out_z[:n] -= ego[2]
         return out_x[:n], out_y[:n], out_z[:n]
 
     # -- the frame ----------------------------------------------------------
@@ -225,12 +249,13 @@ class MapEngine:
         n = min(len(pts), self.max_points)
         xs, ys, zs = pts[:n, 0], pts[:n, 1], pts[:n, 2]
         world = frame.points_world[:n]
-        ego = np.asarray(frame.vehicle_xyz_world, float)[:2]
+        ego = np.asarray(frame.vehicle_xyz_world, float)
         if self._origin is None:
-            self._origin = ego.copy()
+            self._origin = ego[:2].copy()
 
         with stage("shift"):
-            self._track_vehicle(ego)
+            self._track_vehicle(ego[:2])
+            self._track_datum(ego[2])
         with stage("bin"):
             idx = self.bin(xs, ys, world[:, 0], world[:, 1])
 
@@ -253,7 +278,7 @@ class MapEngine:
         with stage("scatter"):
             aggregate = scatter_sorted(
                 idx,
-                quantise_height(world[:, 2]),
+                quantise_height(world[:, 2], self.z_datum),
                 quantise_weight(measurement_variance_cm2(np.maximum(rng_m, 1e-3))),
                 np.asarray(frame.reflectivity8)[:n].astype(np.uint8),
                 cls,
@@ -284,7 +309,79 @@ class MapEngine:
             if dx or dy:
                 shift(buf, dx, dy, self.handle.grid)
 
-    def _cleanup(self, frame, touched, ego_xy, counters):
+    @property
+    def z_datum(self) -> float:
+        """World z the stored heights are measured from. 0.0 until frame 0
+        sets it, so a map that has never seen a frame reads world-absolute --
+        which is what the readouts assume of an empty map."""
+        return 0.0 if self._z_datum is None else self._z_datum
+
+    def _track_datum(self, ego_z):
+        """Slide the vertical band to keep the vehicle inside it, in whole
+        `Z_DATUM_STEP_M` steps -- the vertical counterpart of `_track_vehicle`.
+
+        **Why the band moves at all.** `vertical_extent_m` is 8 m wide and was
+        clamped world-absolute, so it described a slab from -2 to +6 m above
+        sea level rather than 8 m around the vehicle. On seq 08's climb every
+        nearby cell's height saturated at the ceiling while the sensor sat tens
+        of metres above it, `visibility_cleanup` computed viewing angles past
+        the sensor's FOV limit, and ghost removal went inert -- 57% of that
+        sequence's frames, clearing nothing. Widening the clamp instead would
+        have worked and cost the report its memory claim: the dense-3D baseline
+        in `dashboard/_config.py` counts voxels over exactly this extent, so a
+        taller band inflates our own headline ratio. Moving an 8 m band leaves
+        that arithmetic untouched.
+
+        Heights are stored relative to the datum, so moving it means re-basing
+        every height already in the map -- the same bargain `shift()` makes
+        horizontally, and the reason the datum moves in whole steps instead of
+        tracking ego-z continuously.
+
+        ⚑ **This is the one path in the frame loop that allocates**, and the
+        module docstring's "the frame loop allocates nothing" is about the
+        steady state rather than about this. The `seen` mask is 0.91 MB against
+        a 10.92 MB grid, it is freed immediately, and it is not part of the
+        declared bound. It is also rare: seq 08's 45.7 m of climb crosses a
+        1 m step 46 times in 4,071 frames. Preallocating it would put a
+        permanent 8% on top of the grid to save a transient that fires on 1%
+        of frames, which is the wrong trade for a headline memory number.
+        """
+        want = float(np.floor(ego_z / Z_DATUM_STEP_M) * Z_DATUM_STEP_M)
+        if self._z_datum is None:
+            # Frame 0: the map is empty, so there is nothing to re-base and the
+            # band can start where the vehicle is. This is also what keeps the
+            # first step from being a jump of the sequence's whole elevation.
+            self._z_datum = want
+            return
+        if want == self._z_datum:
+            return
+        delta_cm = round((want - self._z_datum) * 100.0)
+        self._z_datum = want
+
+        ground = self.handle.grid["ground_height"]
+        ceiling = self.handle.grid["ceiling_height"]
+        seen = ceiling != CEILING_NONE
+        if abs(delta_cm) >= Z_MAX_CM - Z_MIN_CM:
+            # The band moved further than it is wide, so nothing already in the
+            # map is inside it any more. Saturating in one fill is what the
+            # clamp would do cell by cell, and it avoids widening every height
+            # in the map to int32 just to hold an intermediate that is about to
+            # be clipped anyway.
+            end = Z_MIN_CM if delta_cm > 0 else Z_MAX_CM
+            ground[:] = end
+            ceiling[seen] = end
+            return
+        # In range, so the subtraction cannot leave int16 on the way: stored
+        # heights are already inside the band and |delta| is below its span.
+        # CEILING_NONE is a sentinel, not a height -- re-basing it would turn
+        # "nothing overhead was ever seen" into a ceiling at the band's edge,
+        # and §7.1 would read that as a clearance failure over the whole map.
+        np.subtract(ground, delta_cm, out=ground)
+        np.clip(ground, Z_MIN_CM, Z_MAX_CM, out=ground)
+        np.subtract(ceiling, delta_cm, out=ceiling, where=seen)
+        np.clip(ceiling, Z_MIN_CM, Z_MAX_CM, out=ceiling, where=seen)
+
+    def _cleanup(self, frame, touched, ego, counters):
         """§10.4 against this frame's range image, then fold the misses into
         occupancy. This is the half the Gate 3 toggle is supposed to switch."""
         state = occupancy_state(self.handle.grid, self.thresholds,
@@ -300,7 +397,7 @@ class MapEngine:
 
         m = len(occupied)
         self._cand_slots[:m] = occupied
-        cx, cy, cz = self._centres(occupied, ego_xy, self._cand["x"],
+        cx, cy, cz = self._centres(occupied, ego, self._cand["x"],
                                            self._cand["y"], self._cand["z"])
 
         image = np.asarray(frame.range_image)
