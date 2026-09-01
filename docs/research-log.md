@@ -137,6 +137,30 @@ Format:
 
 ---
 ## 2026-09-02 — Aakash
+**Module:** D1 — Memory bound under load (Day 6 D1, brought forward)
+
+**Finding:** "Confirm the memory bound holds under a worst-case dense-crowd scene" had no artefact behind it. The existing frame-loop allocation test runs on the quiet wall-and-car scene, which is the easy case for a bound.
+
+`synthetic.scan(crowd=N)` adds N pedestrians on the raw `moving-person` id (254 → learning id 5, `person`). That is the worst case in four ways at once, and they are four *different* caps: every return is dynamic, so the transient layer takes all of them and the tracked-object list is pushed at `max_tracks`; `person` is a refine class, so the semantic gate fires on all of them and the pool is pushed at its 512 blocks; they are small and close, so they occupy many fine cells rather than a few coarse ones, pushing `max_candidate_cells`; and they are separate objects a metre apart, which is the clustering worst case — one blob is far cheaper than two hundred.
+
+Measured, peak transient allocation over the harness path:
+
+    crowd     0    47,579 returns    21.01 MB
+    crowd    50    48,779 returns    21.04 MB
+    crowd   200    52,379 returns    21.13 MB
+    crowd   400    57,179 returns    21.26 MB
+
+**20% more returns for 1.2% more peak.** The bound is flat in the scene, which is the claim the report actually makes — not that the loop allocates nothing (this is the eval harness, which composes world coordinates per frame), but that what it allocates does not scale with how much is happening.
+
+**⚑ Two things I got wrong first, both worth recording.** My first threshold was an absolute cap of 12 MB against a measured 21 MB, and the honest fix was not to raise the number but to change what is asserted: an absolute figure here measures the *harness* and would drift with every unrelated change to it, so the test now compares crowded against quiet on the same code. And a test asserting "the crowd is fully mapped" would have been asserting the opposite of the design — under a crowd the correct behaviour of a fixed pool is refusal and eviction, so that is what is asserted.
+
+**Source:** `src/eval/synthetic.py` (`_crowd`), `tests/test_memory_crowd.py` (5).
+
+**So what:** Day 6 D1's memory item now has a CI-enforced answer rather than a plan, and it exercises the caps that the E1 fix earlier today changed the behaviour of. Nothing in the memory table moves — the whole point is that it cannot.
+
+---
+
+## 2026-09-02 — Aakash
 **Module:** D1 — Refinement pool, lattice (Day 5 stretch)
 
 **Finding:** Day 5's D1 item is "conservative pyramid (§7.2) + the exhaustive no-false-negative test, then anisotropic foveation with hysteresis". The pyramid half was already done and tested (21 tests, `test_theorem3_has_no_false_negatives`). The hysteresis half was implemented and **had no caller**: `lattice.migrate_ring` appeared nowhere outside its own unit test. §6.3's own specified unit test — *"drive a synthetic trajectory with sinusoidal speed across a ring boundary; assert the number of split/merge events per cell is bounded and that variance does not grow monotonically over 1,000 frames"* — did not exist either, which is a CLAUDE.md rule ("every formula in `sih-math.md` has a named unit test").

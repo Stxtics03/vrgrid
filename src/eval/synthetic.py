@@ -100,6 +100,7 @@ import numpy as np
 ROAD, PARKING, SIDEWALK = 40, 44, 48
 BUILDING, VEGETATION, POLE, TRAFFIC_SIGN = 50, 70, 80, 81
 MOVING_CAR = 252  # raw moving-* id, stripped by the reference map
+MOVING_PERSON = 254  # raw moving-person, the crowd's label
 
 KERB_Y_M = 3.0
 KERB_HEIGHT_M = 0.12
@@ -261,9 +262,41 @@ def _structure(rng, pose_x_m, sensor_height_m, n_wall=6000, n_pole=900,
     return xyz[keep], lab[keep].astype(np.uint16)
 
 
+def _crowd(rng, n_people: int, sensor_height_m: float):
+    """`n_people` pedestrians in the near field, on the raw `moving-person` id.
+
+    The worst case this project has, and it is worst in four ways at once
+    (Day 6 D1, "confirm the memory bound holds under a dense-crowd scene"):
+
+      * every return is dynamic, so the transient layer takes all of them and
+        the tracked-object list is pushed at its `max_tracks` cap;
+      * `person` is in `refine_classes`, so the semantic gate fires on every
+        one of them and the refinement pool is pushed at its 512-block cap;
+      * they are small and close, so they occupy many distinct fine cells
+        rather than a few coarse ones, pushing `max_candidates`;
+      * they are separate objects a metre apart, which is the clustering
+        worst case -- one big blob is cheaper than 200 small ones.
+
+    Spread over a 30 x 16 m patch ahead of the vehicle: dense enough to be a
+    crowd, not so dense that they merge into one cluster and stop being 200
+    tracked objects.
+    """
+    per = 24                                   # returns per person
+    cx = rng.uniform(4.0, 34.0, n_people).repeat(per)
+    cy = rng.uniform(-8.0, 8.0, n_people).repeat(per)
+    pts = np.column_stack([
+        cx + rng.uniform(-0.25, 0.25, n_people * per),
+        cy + rng.uniform(-0.25, 0.25, n_people * per),
+        rng.uniform(0.0, 1.8, n_people * per),
+    ])
+    keep = _in_sensor_fov(pts, sensor_height_m)
+    return pts[keep], np.full(int(keep.sum()), MOVING_PERSON, dtype=np.uint16)
+
+
 def scan(pose_x_m: float = 0.0, sensor_height_m: float = 1.73,
          n_azimuth: int = 720, n_beams: int = 64, max_range_m: float = 100.0,
-         moving_car: bool = True, structure: bool = False, seed: int = 0):
+         moving_car: bool = True, structure: bool = False, crowd: int = 0,
+         seed: int = 0):
     """One HDL-64E-shaped sweep of the surface, in VEHICLE frame.
 
     Beams are fired on the real angular grid and intersected with the ground
@@ -272,6 +305,9 @@ def scan(pose_x_m: float = 0.0, sensor_height_m: float = 1.73,
     the ring schedule is derived from, so the sampling density this produces
     has the right *shape*: quadratic radial spacing, linear azimuthal spacing,
     and a blind cone.
+
+    `crowd=N` adds N pedestrians on the raw `moving-person` id -- the
+    worst-case scene for the memory bound. Off by default; see `_crowd`.
 
     Returns (points (N,3), raw label id (N,) uint16, is_ground (N,)).
     """
@@ -328,6 +364,12 @@ def scan(pose_x_m: float = 0.0, sensor_height_m: float = 1.73,
         pts = np.vstack([pts, s_pts])
         cls = np.concatenate([cls, s_cls])
         ground = np.concatenate([ground, np.zeros(len(s_pts), dtype=bool)])
+
+    if crowd:
+        c_pts, c_cls = _crowd(rng, crowd, sensor_height_m)
+        pts = np.vstack([pts, c_pts])
+        cls = np.concatenate([cls, c_cls])
+        ground = np.concatenate([ground, np.zeros(len(c_pts), dtype=bool)])
 
     if moving_car:
         # A car 12 m ahead, 2 m wide, 1.5 m tall, on the raw moving-* label so
