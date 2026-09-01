@@ -17,7 +17,7 @@ import pytest
 from vrgrid.cell import OCC_OCCUPIED
 from vrgrid.grid.fusion import CLASS_MAX, occupancy_state, unpack_class
 from vrgrid.grid.schedule import load
-from vrgrid.run.engine import MapEngine, class_ids_fit
+from vrgrid.run.engine import Z_DATUM_STEP_M, MapEngine, class_ids_fit
 
 SENSOR_H = 1.73          # docs/frames.md: the sensor sits this far above the vehicle
 WALL_X = 30.0            # a static wall the beams return from
@@ -67,19 +67,25 @@ def _car(rng, n=1500):
                             rng.uniform(-1.5, -0.2, n)])
 
 
-def _frame(index, points, ground_mask):
+def _frame(index, points, ground_mask, elevation_m=0.0):
     """A stand-in for `run.__main__.PerceptionFrame`, built the way the real
     one is: the range image comes from JP's projector over the same points, so
-    the image and the cloud cannot disagree."""
+    the image and the cloud cannot disagree.
+
+    `elevation_m` puts the whole rig on a hill. The SENSOR-frame points do not
+    move -- a car 15 m ahead is 15 m ahead whatever the altitude -- so this
+    lifts only `points_world` and `vehicle_xyz_world`, which is exactly the
+    difference a climbing sequence presents and the one the map has to absorb.
+    """
     ri_mod = pytest.importorskip("vrgrid.perception.range_image")
     p4 = np.column_stack([points, np.full(len(points), 0.5)])
     image, inverse = ri_mod.project(p4)
     return SimpleNamespace(
         index=index,
         points_sensor=p4,
-        points_world=points + np.array([0.0, 0.0, SENSOR_H]),
+        points_world=points + np.array([0.0, 0.0, SENSOR_H + elevation_m]),
         pose=np.eye(4)[:3],
-        vehicle_xyz_world=np.zeros(3),
+        vehicle_xyz_world=np.array([0.0, 0.0, elevation_m]),
         semantic=np.zeros(len(points), np.int8),
         moving=np.zeros(len(points), bool),
         ground=ground_mask,
@@ -89,7 +95,7 @@ def _frame(index, points, ground_mask):
     )
 
 
-def _sequence(rng, present_for: int, total: int):
+def _sequence(rng, present_for: int, total: int, elevation_m=0.0):
     """The car is there for `present_for` frames, then gone. Same static
     returns throughout."""
     ground, wall = _scene(rng)
@@ -99,15 +105,15 @@ def _sequence(rng, present_for: int, total: int):
         points = np.vstack(parts)
         mask = np.zeros(len(points), bool)
         mask[:len(ground)] = True
-        yield _frame(i, points, mask), len(ground) + len(wall)
+        yield _frame(i, points, mask, elevation_m), len(ground) + len(wall)
 
 
-def _run(ghost_removal, present_for=3, total=12, seed=0):
+def _run(ghost_removal, present_for=3, total=12, seed=0, elevation_m=0.0):
     rng = np.random.default_rng(seed)
     engine = MapEngine(load("5/10/20/40"), max_points=40_000,
                        max_candidates=80_000, ghost_removal=ghost_removal)
     car_slots, counters = None, []
-    for frame, n_static in _sequence(rng, present_for, total):
+    for frame, n_static in _sequence(rng, present_for, total, elevation_m):
         counters.append(engine.step(frame))
         if car_slots is None:
             # The cells the car itself occupies, taken from the engine's own
@@ -306,3 +312,60 @@ def test_the_whole_label_set_now_fuses_and_raw_ids_still_raise():
     with pytest.raises(ValueError, match="5-bit candidate"):
         engine.step(frame)
 
+
+
+# --- elevation: the vertical band has to follow the vehicle ------------------
+
+
+@pytest.mark.parametrize("elevation_m", [0.0, -5.8, 6.0, 12.0, 39.0])
+def test_the_ghost_clears_at_any_vehicle_elevation(elevation_m):
+    """Gate 3 again, with the whole rig on a hill.
+
+    Heights used to be clamped to a WORLD-ABSOLUTE [-2, +6] m band, so a
+    vehicle above the ceiling saw every nearby cell's height saturate while the
+    sensor sat tens of metres higher. `visibility_cleanup` documents its inputs
+    as vehicle-frame, computed a viewing angle far outside the sensor's FOV,
+    found nothing in view and cleared nothing: on SemanticKITTI seq 08 that was
+    2,304 of 4,071 frames with ghost removal silently inert.
+
+    The elevations here are the ones that mattered. -5.8 m is seq 07's floor,
+    which saturates the BOTTOM of the band and is the case a naive "subtract
+    ego-z in the cleanup" fix breaks -- a stored -2.0 m minus an ego of -5.8 m
+    reads as +3.8 m and leaves through the top of the image, taking the flat
+    sequence the demo runs on from working to inert. 6.0 m is the old ceiling,
+    12.0 m the measured point where clearing stopped entirely, and 39.0 m the
+    top of seq 08's climb.
+    """
+    engine, car_slots, counters = _run(ghost_removal=True, elevation_m=elevation_m)
+
+    assert len(car_slots) > 20, "the car has to occupy a real number of cells"
+    assert any(c.cleared > 0 for c in counters), (
+        f"the cleanup never cleared a single cell at {elevation_m} m -- it is "
+        "inert at this elevation, not merely worse")
+
+    left = _occupied(engine, car_slots)
+    assert left <= 0.25 * len(car_slots), (
+        f"{left} of {len(car_slots)} car cells are still occupied nine frames "
+        f"after the car left, with the vehicle at {elevation_m} m")
+
+
+def test_the_band_follows_the_vehicle_rather_than_the_world_datum():
+    """The mechanism behind the test above, asserted directly.
+
+    Storage stays 8 m tall -- widening it would have fixed the symptom and cost
+    the report its memory claim, since `dashboard/_config.py` counts the dense
+    baseline's voxels over exactly this extent. So the datum moves instead, and
+    a cell at the vehicle's own feet must read as being at its feet, not at the
+    band's edge, however high the vehicle is.
+    """
+    engine, _, _ = _run(ghost_removal=True, elevation_m=39.0)
+
+    assert engine.z_datum == pytest.approx(39.0, abs=Z_DATUM_STEP_M)
+    slots, _, _, z = engine.occupied_cells()
+    assert len(slots), "nothing occupied, so this asserts nothing"
+    # `occupied_cells` reads out in the WORLD frame, so the ground the vehicle
+    # is standing on comes back near its world elevation -- not pinned to the
+    # +6 m the old absolute clamp would have saturated it to.
+    assert np.median(z) > 30.0, (
+        f"median occupied height {np.median(z):.1f} m with the vehicle at 39 m "
+        "-- heights are still being clamped against the world datum")

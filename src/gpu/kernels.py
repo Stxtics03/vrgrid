@@ -110,10 +110,39 @@ def quantise_weight(variance_cm2) -> np.ndarray:
     return np.clip(np.rint(w), 1, WEIGHT_MAX).astype(np.int32)
 
 
-def quantise_height(z_m) -> np.ndarray:
-    """Metres -> int16 centimetres, clamped to the vertical extent."""
-    return np.clip(np.rint(np.asarray(z_m, dtype=np.float64) * 100.0),
-                   Z_MIN_CM, Z_MAX_CM).astype(np.int16)
+def quantise_height(z_m, datum_m: float = 0.0) -> np.ndarray:
+    """Metres -> int16 centimetres, clamped to the vertical extent.
+
+    `datum_m` is the world-frame elevation the band is measured FROM. It
+    defaults to 0.0 -- the world datum, and exactly what every caller meant
+    while the band was world-absolute, bit for bit.
+
+    ⚑ **The band is 8 m wide; it is not 8 m above sea level.** Clamping to a
+    world-absolute [-2, +6] m works only while the vehicle stays near z = 0,
+    which is true of seq 00 and 07 and false of seq 08's hill. Above the
+    ceiling every nearby cell's height saturates at +6 m while the sensor sits
+    tens of metres higher, so `visibility_cleanup` -- which is handed these
+    heights and documents them as VEHICLE-frame -- computes a viewing angle
+    far above the sensor's FOV limit, finds nothing in view, and clears no
+    ghosts at all. Measured on seq 08: inert above ~11.7 m world-z, 57% of its
+    frames.
+
+    Subtracting ego-z at the cleanup's end does not repair this, and that is
+    the non-obvious part: by then the clamp has already destroyed the value it
+    would subtract from. Driving the real projection with ground-level cells,
+    seq 07 (world-z -5.8 m, which saturates the FLOOR of the band) goes from 42
+    of 46 cells in view to 0 -- a saturated -2.0 m minus an ego of -5.8 m reads
+    as +3.8 m and leaves through the TOP of the image. The frame and the clamp
+    have to move together, which is what this argument is for: pass the
+    vehicle's elevation and the band follows it, keeping the 8 m of vertical
+    extent the schedule's `vertical_extent_m` declares and the memory claim
+    is computed from.
+    """
+    z_cm = np.asarray(z_m, dtype=np.float64) * 100.0
+    if datum_m:
+        z_cm -= datum_m * 100.0
+    np.rint(z_cm, out=z_cm)
+    return np.clip(z_cm, Z_MIN_CM, Z_MAX_CM).astype(np.int16)
 
 
 class CellAggregate:
