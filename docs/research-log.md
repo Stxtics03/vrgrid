@@ -137,6 +137,41 @@ Format:
 
 ---
 ## 2026-09-02 — Aakash
+**Module:** D1 — Plan regret (§8.1 eq. 23)
+
+**Finding:** Two independent defects in eq. (23), both reported from outside and both confirmed. `R(S) = J_M*(π_S) − J_M*(π*)` scores both paths on M*, so the only thing M_S may contribute is the *path* — and a path is meaningful only if the two costmaps describe the same world at the same scale. They did not.
+
+**1. The fill-rate confound, and a diagnostic that hid it.** `_cost_from_bits` charges `w_unknown` for `unknown | TRAV_CONFIDENCE`. The `--confound` diagnostic I added on 1 Sep read `CostMap.unknown` alone — the smaller term by two orders of magnitude, because a cell can be observed and still sit below `n_min`. It printed **0.0% where the real figure was 100.0%**. The tool added specifically to make this visible reported that the problem was absent, which is worse than having no tool.
+
+The confound itself was in `costmap_from_gridmap`, which OR-ed the confidence bit over the sub-cells of each planning cell. A 25 cm planning cell covers 25 map cells of a 5 cm ring; at ring 0's fill rate most are thin, so the OR fired essentially always and **the handicap grew with the resolution** — a 4-unit penalty on every cell, for resolving finely. Cells paying `w_unknown` inside the common support, at 14 frames:
+
+    schedule        before    after
+    5/10/20/40      100.0%     0.9%
+    uniform 20 cm     4.2%     0.0%
+    M* reference        --      0.0%
+
+Confidence is evidence and evidence adds up, so the observation counts over the footprint's *distinct* cells are now summed and compared against `n_min` once — which is exactly what this file's own reference side had always done with `block_stats`. "Distinct" matters: 25 samples over a 40 cm ring cell all land in one cell, and summing per sample would multiply its evidence by 25.
+
+**2. The two sides were on different lattices.** M_S OR-ed bitfields computed on the **ring** lattice — a step over a 5 cm neighbourhood in ring 0, 40 cm in ring 3 — while M* computed them at the 25 cm planning cell from block means. The synthetic scene's 12 cm kerb is a step at 5 cm and smooth at 25 cm, so:
+
+    5/10/20/40, 14 frames:  invented 148 impassable cells M* did not have,
+                            missed 8 that it did, against 12 real ones.
+
+A path planned around 148 phantom walls and then scored on a map without them is not a regret, it is two different problems subtracted. The predicate is now evaluated **once, on the planning lattice**, from the same summed statistics on both sides — heights combined by observation count, variances by the law of total variance (§4.2). Clearance is evaluated on neither side, because M* is 2.5D ground and structurally cannot set that bit; keeping it on the M_S side alone scored a difference in map *contents* as a cost of coarsening. After: **0 invented, 0 missed** for both frozen schedules.
+
+**⚑ The direction of the result inverted, and the new direction is the physical one.** It is now the *coarse uniform* grid that misses M*'s hazards — uniform 20 cm misses all 12, uniform 10 cm misses 9 at 12 frames — because it averages a 12 cm kerb into its cells until the step falls under `s_max`. The fine map used to be the one reported as disagreeing with the reference, for the sole reason that it was the only one resolving the kerb at all.
+
+**⚑ One claim did not reproduce.** "At the default frame count the reference map has zero impassable cells at all" — at 12 frames M* has 12 impassable cells inside the planning window, and at 14 it has 12. I could not reproduce a zero, and I would guess it predates 1 Sep's traversability class-table fix (which had `road` marked non-drivable) or the beam-model fix, both of which change M*.
+
+**What is still open, and it is the same thing as yesterday.** The money plot still reads 0.207 for both frozen schedules against 0.000 for every uniform. That is no longer a lattice or a confound artefact — M_S and M* now agree cell for cell about the walls — it is that `PLAN_LANE_CELLS` runs the path six cells off the centreline, where none of the scene's hazards are. A map that cannot see a wall scores identically to one that can, because the path never goes near it. Shrestha's `regret_plot.py` finding, unresolved, and `PLAN_LANE_CELLS` remains untouched by me.
+
+**Source:** `src/eval/plan_regret.py` (`costmap_from_gridmap`, `CostMap.low_confidence`), `scripts/eval_synthetic.py` (`--confound`), `tests/test_regret_lattice.py` (6).
+
+**So what:** Eq. (23) now subtracts like from like, and the ablation's headline is no longer carrying a 4-unit-per-cell handicap against its own contribution. **Neither fix moves the money plot's ordering**, and that is worth saying plainly before Gate 4: the remaining gap is the planning query, not the metric. 520 passed, 27 skipped.
+
+---
+
+## 2026-09-02 — Aakash
 **Module:** D1 — Memory bound under load (Day 6 D1, brought forward)
 
 **Finding:** "Confirm the memory bound holds under a worst-case dense-crowd scene" had no artefact behind it. The existing frame-loop allocation test runs on the quiet wall-and-car scene, which is the easy case for a bound.
