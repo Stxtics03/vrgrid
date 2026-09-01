@@ -102,9 +102,8 @@ def run(seq: str, n_frames: int, footprint_m: float, save_path: str,
                rr.Boxes3D(centers=dcent.astype(np.float32), half_sizes=dhalf,
                           colors=[_DENSE_RGB], fill_mode="solid"))
 
-        last = dict(frame=i, var_boxes=int(crop.sum()),
-                    dense_boxes=len(dcent),
-                    var_total_occupied=len(slots))
+        last = {"frame": i, "var_boxes": int(crop.sum()),
+                "dense_boxes": len(dcent), "var_total_occupied": len(slots)}
 
         rr.log("comparison", rr.TextDocument(
             _overlay(footprint_m, half_fp, dense, full_voxels, last),
@@ -114,34 +113,43 @@ def run(seq: str, n_frames: int, footprint_m: float, save_path: str,
     return last
 
 
-def _overlay(footprint_m, half_fp, dense, full_voxels, last):
+def _overlay(footprint_m: float, half_fp: float, dense, full_voxels: int,
+             last: dict) -> str:
     ratio = last["dense_boxes"] / last["var_boxes"] if last["var_boxes"] else float("nan")
+    disclaimer = (
+        f"_Reduced-footprint illustration: {footprint_m:g} x {footprint_m:g} x "
+        f"{dense.layers * dense.cell_m:g} m ({dense.units / 1e6:.1f} M voxels, "
+        f"{dense.claimed_bytes / 1e6:.1f} MB). The real dense baseline is "
+        f"200 x 200 x 8 m = {full_voxels / 1e9:.2f} G voxels = "
+        f"{full_voxels / 1e9:.2f} GB -- that byte ratio (286x) is on the live "
+        f"memory panel, NOT this number._"
+    )
+    mechanism = (
+        "_The ratio grows over the clip: early on the vehicle is in the "
+        "footprint and both grids see it at ~5 cm; as the vehicle drives on, "
+        "the variable grid coarsens this now-distant region (5 -> 10 -> 20 -> "
+        "40 cm) and the toroidal window releases the far part, while the dense "
+        "grid keeps every voxel at 5 cm forever. So the late ratio is foveation "
+        "+ bounded memory, not foveation alone._"
+    )
+    footer = (
+        f"frame {last['frame']}   .   variable grid total occupied cells "
+        f"(full 100 m map): {last['var_total_occupied']:,}"
+    )
     return "\n".join([
         "**Variable grid vs dense 5 cm 3-D voxel grid**",
         "",
-        f"_Reduced-footprint illustration: {footprint_m:g} x {footprint_m:g} x "
-        f"{dense.layers * dense.cell_m:g} m ({dense.units / 1e6:.1f} M voxels, "
-        f"{dense.claimed_bytes / 1e6:.1f} MB). The **real** dense baseline is "
-        f"200 x 200 x 8 m = {full_voxels / 1e9:.2f} G voxels = "
-        f"{full_voxels / 1e9:.2f} GB -- that byte ratio (286x) is on the live "
-        f"memory panel, NOT this number._",
+        disclaimer,
         "",
-        "| | boxes drawn (same {0:g} m footprint, centred on the frame-0 "
-        "vehicle position) |".format(2 * half_fp),
+        f"| | boxes drawn (same {2 * half_fp:g} m footprint, frame-0 centred) |",
         "|---|---|",
         f"| `world/map/occupied` (variable, 5/10/20/40 cm) | **{last['var_boxes']:,}** |",
         f"| `dense3d/occupied` (uniform 5 cm) | **{last['dense_boxes']:,}** |",
         f"| local box-count ratio | **{ratio:.1f}x** |",
         "",
-        "_The ratio grows over the clip: early on the vehicle is in the footprint "
-        "and both grids see it at ~5 cm; as the vehicle drives on, the variable "
-        "grid coarsens this now-distant region (5 -> 10 -> 20 -> 40 cm) and the "
-        "toroidal window releases the far part, while the dense grid keeps every "
-        "voxel at 5 cm forever. So the late ratio is foveation + bounded memory, "
-        "not foveation alone._",
+        mechanism,
         "",
-        f"frame {last['frame']}   ·   variable grid total occupied cells "
-        f"(full 100 m map): {last['var_total_occupied']:,}",
+        footer,
     ])
 
 
