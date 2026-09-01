@@ -106,11 +106,11 @@ def _overlap(seq, frame):
 
     m = res.point_mask
     tp, fp, fn = int((m & gt).sum()), int((m & ~gt).sum()), int((~m & gt).sum())
-    point = dict(
-        precision=tp / (tp + fp) if tp + fp else 0.0,
-        recall=tp / (tp + fn) if tp + fn else 0.0,
-        iou=tp / (tp + fp + fn) if tp + fp + fn else 0.0,
-    )
+    point = {
+        "precision": tp / (tp + fp) if tp + fp else 0.0,
+        "recall": tp / (tp + fn) if tp + fn else 0.0,
+        "iou": tp / (tp + fp + fn) if tp + fp + fn else 0.0,
+    }
 
     _, inv = range_image.project(curr)
     gt_px = np.zeros(res.pixel_mask.shape, bool)
@@ -118,11 +118,11 @@ def _overlap(seq, frame):
     gt_px[filled] = gt[inv[filled]]
     pm = res.pixel_mask
     tpx, fpx, fnx = int((pm & gt_px).sum()), int((pm & ~gt_px).sum()), int((~pm & gt_px).sum())
-    pixel = dict(
-        precision=tpx / (tpx + fpx) if tpx + fpx else 0.0,
-        recall=tpx / (tpx + fnx) if tpx + fnx else 0.0,
-        iou=tpx / (tpx + fpx + fnx) if tpx + fpx + fnx else 0.0,
-    )
+    pixel = {
+        "precision": tpx / (tpx + fpx) if tpx + fpx else 0.0,
+        "recall": tpx / (tpx + fnx) if tpx + fnx else 0.0,
+        "iou": tpx / (tpx + fpx + fnx) if tpx + fpx + fnx else 0.0,
+    }
     return point, pixel
 
 
