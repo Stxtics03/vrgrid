@@ -48,14 +48,26 @@ low-confidence by the border rule above, which is conservative in the right
 direction. Worth an explicit line in the report rather than silence: the ring
 seams are the one place the traversability layer is coarser than the map.
 
-**The class table is SemanticKITTI's 19-class learning map, and it does not
-fit the cell.** `configs/thresholds.yaml` names the drivable set in words;
-turning words into ids needs the label map, which is JP's `semantics.py` when
-it lands. Until then it is below, and it makes the §10.2 class-width conflict
-concrete: **`terrain` is learning id 17 and does not fit in 4 bits.** One of
-the five drivable classes cannot be stored in the byte the map has. Confirm
-the ids against the real `semantic-kitti.yaml` when the download lands --
-that is Hriday's R2 item -- and treat this table as provisional until then.
+**The class table is SemanticKITTI's 19-class learning map.**
+`configs/thresholds.yaml` names the drivable set in words; turning words into
+ids needs the label ordering, and that is read from `configs/frnet.yaml` via
+`schedule.load_class_names` rather than written out again here.
+
+⚑ It WAS written out again here, and it was off by one for every class. The
+  hand-written table began `unlabeled: 0, car: 1, ...` where the real learning
+  map begins `car: 0` and puts `unlabeled` at 19. So the five names in
+  `drivable_classes` resolved to the ids of
+  {parking, sidewalk, other-ground, **building**, **pole**}: `road` and
+  `terrain` were not drivable, and a building wall and a lamp post were. Bit 4
+  is a cost of `w_class` rather than impassable, so nothing crashed and no
+  path was blocked -- the whole road surface just quietly carried a penalty
+  and the planner preferred to drive along the kerb line.
+
+  It survived because the synthetic scene wrote learning ids 9/10/11 directly,
+  which are inside the wrong table's drivable set by coincidence. Correcting
+  that scene to raw ids (1 Sep) put `road` = 8 into the map and made the bug
+  reachable. Two errors that cancelled, which is the argument for one table
+  and not three.
 """
 
 import numpy as np
@@ -69,28 +81,29 @@ from vrgrid.cell import (
 )
 from vrgrid.grid.fusion import unpack_class
 from vrgrid.grid.quantise import dequantise_variance_cm2
-from vrgrid.grid.schedule import load_thresholds
+from vrgrid.grid.schedule import load_class_names, load_thresholds
 
-# SemanticKITTI learning ids (semantic-kitti.yaml `learning_map`), provisional
-# until the download confirms them. 0 is `unlabeled`, which is why an unset
-# class byte must never be read as drivable.
-CLASS_IDS = {
-    "unlabeled": 0, "car": 1, "bicycle": 2, "motorcycle": 3, "truck": 4,
-    "other-vehicle": 5, "person": 6, "bicyclist": 7, "motorcyclist": 8,
-    "road": 9, "parking": 10, "sidewalk": 11, "other-ground": 12,
-    "building": 13, "fence": 14, "vegetation": 15, "trunk": 16,
-    "terrain": 17, "pole": 18, "traffic-sign": 19,
-}
+
+def class_ids() -> dict:
+    """name -> 19-class learning id, from `configs/frnet.yaml`.
+
+    Index in the config's `class_names` IS the learning id, which is what
+    `perception.semantics.semantic_labels` produces. `unlabeled` is 19, not 0 --
+    an unset class byte reads as `car`, so bit 4 must never be allowed to
+    treat 0 as "no information". It does not: `car` is not drivable either.
+    """
+    return {name: i for i, name in enumerate(load_class_names())}
 
 
 def drivable_ids(thresholds=None) -> np.ndarray:
-    """The drivable set, by id. Names come from config; ids from the table."""
+    """The drivable set, by id. Names come from config; ids come from config."""
     th = thresholds if thresholds is not None else load_thresholds()
+    ids = class_ids()
     names = th["traversability"]["drivable_classes"]
-    unknown = [n for n in names if n not in CLASS_IDS]
+    unknown = [n for n in names if n not in ids]
     if unknown:
         raise ValueError(f"drivable_classes names no class in the label map: {unknown}")
-    return np.array(sorted(CLASS_IDS[n] for n in names), dtype=np.int32)
+    return np.array(sorted(ids[n] for n in names), dtype=np.int32)
 
 
 def gradient(ground_cm, side: int, cell_m: float):
@@ -197,9 +210,11 @@ def bitfield(soa, ring_slice: slice, side: int, cell_m: float, thresholds=None):
     sigma2_m2 = dequantise_variance_cm2(var_code) * 1e-4
     out |= np.where(sigma2_m2 > t["sigma2_max_m2"], TRAV_ROUGHNESS, 0).astype(np.uint8)
 
-    # bit 4 -- class. An unobserved cell has class byte 0, i.e. `unlabeled`,
-    # which is not in the drivable set -- so this bit fails safe on its own,
-    # before bit 5 gets to.
+    # bit 4 -- class. An unobserved cell has class byte 0, which in the
+    # learning map is `car`, not `unlabeled` -- but `car` is not in the
+    # drivable set either, so this bit still fails safe on its own, before
+    # bit 5 gets to. It fails safe by arithmetic rather than by meaning, which
+    # is worth knowing if the drivable set is ever widened.
     out |= np.where(np.isin(cls, drivable_ids(th)), 0, TRAV_CLASS).astype(np.uint8)
 
     # bit 5 -- confidence. Fail safe: unobserved is not traversable. The window

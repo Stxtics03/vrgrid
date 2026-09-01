@@ -125,6 +125,39 @@ def validate(s: Schedule) -> None:
 
 
 _THRESHOLDS_CACHE: dict = {}
+_CLASS_NAMES_CACHE: dict = {}
+
+
+def load_class_names(path=None) -> list:
+    """The 19-class learning order, by name: index i is learning id i.
+
+    From `configs/frnet.yaml`, which carries it because that is the file the
+    label map was transcribed from. It lives here, beside `load_thresholds`,
+    so `grid/` can read a dataset fact without importing `perception/` --
+    CLAUDE.md keeps the core free of that dependency, and a config file is
+    the seam that costs nothing.
+
+    ⚑ There were three copies of this ordering: this file's source,
+      `perception.semantics.FRNET_CLASS_NAMES`, and a hand-written
+      `CLASS_IDS` dict in `grid/traversability.py`. The third was off by one
+      for every class -- it began at `unlabeled: 0` where the real map begins
+      at `car: 0` -- so `drivable_classes` resolved to
+      {parking, sidewalk, other-ground, **building**, **pole**} and `road`
+      was not among them. Every road cell in the map carried the §7.1 class
+      bit, and every building and pole read as drivable.
+      `tests/test_traversability.py::test_the_class_table_is_the_one_the_labels_use`
+      now pins the two survivors together.
+    """
+    p = Path(path) if path is not None else CONFIG_DIR / "frnet.yaml"
+    key = str(p.resolve())
+    if key not in _CLASS_NAMES_CACHE:
+        with open(p) as f:
+            cfg = yaml.safe_load(f) or {}
+        names = cfg.get("model", {}).get("class_names")
+        if not names:
+            raise ScheduleError(f"no model.class_names in {p}")
+        _CLASS_NAMES_CACHE[key] = list(names)
+    return list(_CLASS_NAMES_CACHE[key])
 
 
 def load_thresholds(path=None) -> dict:

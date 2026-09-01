@@ -64,7 +64,7 @@ from vrgrid.grid.splitmerge import CellValue, split
 
 # Thin or safety-critical structures whose geometry is finer than the ring they
 # land in past the near field. SemanticKITTI learning ids, provisional with the
-# rest of that table (see traversability.CLASS_IDS).
+# rest of that table (see traversability.class_ids()).
 DEFAULT_REFINE_CLASSES = ("person", "bicyclist", "motorcyclist", "pole",
                           "traffic-sign", "bicycle", "motorcycle")
 
@@ -87,20 +87,21 @@ def refine_class_ids(thresholds=None) -> np.ndarray:
     checkable rather than assumed.
     """
     from vrgrid.grid.fusion import CLASS_MAX
-    from vrgrid.grid.traversability import CLASS_IDS
+    from vrgrid.grid.traversability import class_ids
 
     _, _th = _config(thresholds)
     names = _names(thresholds)
-    return np.array(sorted(CLASS_IDS[n] for n in names
-                           if CLASS_IDS[n] <= CLASS_MAX), dtype=np.int32)
+    ids = class_ids()
+    return np.array(sorted(ids[n] for n in names
+                           if ids[n] <= CLASS_MAX), dtype=np.int32)
 
 
 def _names(thresholds=None):
-    from vrgrid.grid.traversability import CLASS_IDS
+    from vrgrid.grid.traversability import class_ids
 
     cfg, _ = _config(thresholds)
     names = cfg.get("refine_classes", DEFAULT_REFINE_CLASSES)
-    unknown = [n for n in names if n not in CLASS_IDS]
+    unknown = [n for n in names if n not in class_ids()]
     if unknown:
         raise ValueError(f"refine_classes names no class in the label map: {unknown}")
     return names
@@ -123,9 +124,10 @@ def unstorable_refine_classes(thresholds=None) -> list:
     per config load to keep it visible for the next class someone adds.
     """
     from vrgrid.grid.fusion import CLASS_MAX
-    from vrgrid.grid.traversability import CLASS_IDS
+    from vrgrid.grid.traversability import class_ids
 
-    return [n for n in _names(thresholds) if CLASS_IDS[n] > CLASS_MAX]
+    ids = class_ids()
+    return [n for n in _names(thresholds) if ids[n] > CLASS_MAX]
 
 
 def ring_of_slot(gm, slot: int) -> int:

@@ -16,13 +16,13 @@ from vrgrid.cell import (
     TRAV_STEP,
     alloc_soa,
 )
-from vrgrid.grid.fusion import initialise, pack_class
+from vrgrid.grid.fusion import CLASS_MAX, initialise, pack_class
 from vrgrid.grid.quantise import quantise_variance_cm2
 from vrgrid.grid.schedule import load_thresholds
 from vrgrid.grid.traversability import (
-    CLASS_IDS,
     bitfield,
     border_mask,
+    class_ids,
     drivable_ids,
     gradient,
     max_step_cm,
@@ -39,7 +39,7 @@ def _flat_grid(ground_cm=0, class_name="road", n=9):
     initialise(soa)
     soa["ground_height"][:] = ground_cm
     soa["obs_count"][:] = n
-    soa["semantic_class"][:] = pack_class(CLASS_IDS[class_name], 5)
+    soa["semantic_class"][:] = pack_class(class_ids()[class_name], 5)
     soa["height_variance"][:] = quantise_variance_cm2(1.0)   # sigma = 1 cm
     return soa
 
@@ -160,32 +160,90 @@ def test_the_window_border_is_marked_rather_than_fabricated():
 def test_drivable_set_comes_from_config_by_name():
     th = load_thresholds()
     ids = drivable_ids(th)
-    assert set(ids) == {CLASS_IDS[n] for n in th["traversability"]["drivable_classes"]}
+    assert set(ids) == {class_ids()[n] for n in th["traversability"]["drivable_classes"]}
 
     bad = {"traversability": dict(th["traversability"], drivable_classes=["tarmac"])}
     with pytest.raises(ValueError, match="names no class"):
         drivable_ids(bad)
 
 
-def test_terrain_is_drivable_and_does_not_fit_the_cell():
-    """⚑ The §10.2 class-width conflict, met where it actually bites.
+def test_the_class_table_is_the_one_the_labels_use():
+    """⚑ The bug this test exists for, and it was live for five days.
+
+    There were three copies of the 19-class learning order: `configs/frnet.yaml`,
+    `perception.semantics.FRNET_CLASS_NAMES`, and a hand-written `CLASS_IDS`
+    dict in `grid/traversability.py`. The third was off by one for every class
+    -- it began `unlabeled: 0, car: 1, ...` where the real map begins `car: 0`
+    and puts `unlabeled` at 19.
+
+    So `drivable_classes: [road, parking, sidewalk, other-ground, terrain]`
+    resolved to the ids of {parking, sidewalk, other-ground, **building**,
+    **pole**}. The road was not drivable and a building wall was. Bit 4 costs
+    `w_class` rather than blocking, so nothing crashed and no path failed --
+    the whole road surface just quietly carried a penalty.
+
+    It stayed hidden because the synthetic scene wrote learning ids 9/10/11
+    directly, which fall inside the WRONG table's drivable set by coincidence.
+    Two errors that cancelled. Correcting that scene to raw ids on 1 Sep put
+    `road` = 8 into the map, made this one reachable, and moved plan regret
+    from 0.000 to 2.389 -- which was briefly and wrongly attributed to the
+    pothole fix landing in the same commit.
+
+    So this asserts against the label producer, not against a literal list.
+    """
+    from vrgrid.perception.semantics import (
+        FRNET_CLASS_NAMES,
+        SEMANTIC_KITTI_LABEL_MAP,
+        semantic_labels,
+    )
+
+    ids = class_ids()
+    assert [n for n, _ in sorted(ids.items(), key=lambda kv: kv[1])] == \
+        list(FRNET_CLASS_NAMES), "the config and semantics.py disagree"
+
+    # The end-to-end statement: a raw `.label` word for a road surface must
+    # come out of `semantic_labels` as the id this module calls `road`.
+    for raw, name in ((40, "road"), (44, "parking"), (48, "sidewalk"),
+                      (50, "building"), (80, "pole"), (81, "traffic-sign")):
+        assert SEMANTIC_KITTI_LABEL_MAP[raw] == ids[name]
+        assert int(semantic_labels(np.array([raw], np.uint32))[0]) == ids[name]
+
+
+def test_the_road_is_drivable_and_a_building_is_not():
+    """The predicate the off-by-one inverted, stated in words rather than ids.
+
+    Worth a test of its own: reading `drivable_ids() == [8, 9, 10, 11, 16]` and
+    checking it is what a reviewer does once. Reading it back as names is what
+    catches the next table shift.
+    """
+    names = [n for n, _ in sorted(class_ids().items(), key=lambda kv: kv[1])]
+    drivable = {names[i] for i in drivable_ids(load_thresholds())}
+    assert drivable == {"road", "parking", "sidewalk", "other-ground", "terrain"}
+    for blocked in ("building", "pole", "car", "person", "vegetation"):
+        assert blocked not in drivable
+
+
+def test_terrain_is_drivable_and_now_fits_the_cell():
+    """⚑ The §10.2 class-width conflict, met where it bit, and closed.
 
     `terrain` is in the drivable set in `configs/thresholds.yaml` and is
-    learning id 17. The cell's class nibble is 4 bits and holds 0-15. So one
-    of the five classes the config calls drivable cannot be stored in the map
-    at all -- it is not an edge case in a class nobody uses, it is a class the
-    traversability predicate consults on every cell.
+    learning id 16. The cell's class candidate was 4 bits and held 0-15, so
+    one of the five classes the config calls drivable could not be stored in
+    the map at all -- not an edge case in a class nobody uses, a class the
+    §7.1 predicate consults on every cell.
 
-    Documents the conflict rather than working around it; the fix (5-bit
-    candidate, 3-bit counter) is a whole-team call on a frozen struct.
+    The byte was re-split 5 | 3 on 1 Sep and it fits now. This asserts the
+    resolved state and keeps the boundary visible: `terrain` is still above
+    what four bits would hold, so a revert would fail here rather than
+    silently mark drivable verges blocked.
     """
     th = load_thresholds()
     assert "terrain" in th["traversability"]["drivable_classes"]
-    assert CLASS_IDS["terrain"] == 17
-    assert CLASS_IDS["terrain"] > 15
+    assert class_ids()["terrain"] == 16
+    assert class_ids()["terrain"] > 15, "a 4-bit candidate would lose this"
+    assert class_ids()["terrain"] <= CLASS_MAX, "the 5-bit candidate must hold it"
 
-    fits = [n for n in th["traversability"]["drivable_classes"] if CLASS_IDS[n] <= 15]
-    assert len(fits) == 4, "the class table changed -- recheck the 4-bit conflict"
+    assert set(drivable_ids(th)) <= set(range(CLASS_MAX + 1))
 
 
 def test_geometry_is_not_fabricated_against_unobserved_neighbours():

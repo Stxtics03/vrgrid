@@ -55,23 +55,37 @@ library should not cost you the sweep.
   than chosen: `_beam_range` now solves the intersection instead of taking one
   step towards it. `PLAN_LANE_CELLS` and the rest of the query are untouched.
 
-  What the curve does now, `--frames 14`:
+  ⚑ **Your finding stands. The curve is unchanged, and I briefly thought
+  otherwise.** Putting the pothole into the map moves nothing here, for
+  exactly the reason you gave: `PLAN_LANE_CELLS` runs the path six cells off
+  the centreline and the pothole is ON the centreline. What did move R(S) --
+  to 2.389, in the hour between the two fixes -- was a second and unrelated
+  bug that the first one exposed: `grid/traversability.py` held a
+  hand-written class table that was off by one for every class, so
+  `drivable_classes` resolved to {parking, sidewalk, other-ground, building,
+  pole}. Road was not drivable and a building wall was. It had been
+  unreachable only because the synthetic scene wrote learning ids that landed
+  inside the wrong table's drivable set by coincidence. Both are fixed and the
+  table now comes from `configs/frnet.yaml`.
 
-      5_10_20_40    2.389      uniform_20cm   3.354
-      5_10_50       2.389      uniform_40cm   3.854
-      uniform_10cm  0.000      uniform_80cm   3.854
+  So, `--frames 12` and `--frames 14`, with both fixes in:
 
-  The all-zeros are gone, the non-monotone spike at uniform 10 cm is gone --
-  it is now the best of the six, which is the direction a finer map should
-  move -- and the four uniforms are identical at 12, 14 and 24 frames where
-  they used to swing. The two frozen schedules still move with frame count
-  (2.389 at 12 and 14, 1.450 at 24), so that half of your finding stands.
+      5_10_20_40    0.000      uniform_20cm   0.000
+      5_10_50       0.000      uniform_40cm   0.000
+      uniform_10cm  1.536      uniform_80cm   0.000
 
-  It is not a flattering curve: on this scene ours costs 29.06 MB to score
-  2.389 where uniform 10 cm costs 18.19 MB to score 0.000. That is a real
-  reading of a synthetic scene whose hazards sit off the planned lane, and it
-  is an argument for posing the query properly -- your point, unchanged --
-  rather than for a different sampler.
+  which is your block above, to the third decimal, with the uniform-10 cm
+  spike moving 1.389 -> 1.536. The frame-count dependence you flagged is also
+  still there and is now larger, not smaller: at 24 frames the two frozen
+  schedules go to **1.450** where they used to go to 0.207, while all four
+  uniforms stay at 0.000. That window sits behind the vehicle at x = 35-46 m
+  and so contains the ramp rather than the pothole, which is worth knowing
+  before anyone reads the 24-frame number as being about the pothole.
+
+  Nothing here has been resolved by the sampler fix and `PLAN_LANE_CELLS` is
+  still untouched. Posing the query so it has to decide about the kerb or the
+  pothole is still the open item, still yours to agree with me before either
+  of us moves it.
 
 Everything here is synthetic and none of it is reportable: the terrain is
 analytic, so there is no sensor noise, no occlusion and no registration error.

@@ -17,7 +17,7 @@ from vrgrid.grid.quantise import dequantise_variance_cm2, quantise_variance_cm2
 from vrgrid.grid.query import slot_of
 from vrgrid.grid.schedule import load, load_thresholds
 from vrgrid.grid.splitmerge import CellValue, merge
-from vrgrid.grid.traversability import CLASS_IDS
+from vrgrid.grid.traversability import class_ids
 
 
 @pytest.fixture
@@ -33,7 +33,7 @@ def _cell(gm, x, y, cls="road", n=9, var_cm2=1.0, trav=0):
     # field became 5 bits -- every cell then read back as some other class
     # and half this file failed for a reason that had nothing to do with
     # the gate.
-    gm.soa["semantic_class"][slot] = pack_class(CLASS_IDS[cls], 5)
+    gm.soa["semantic_class"][slot] = pack_class(class_ids()[cls], 5)
     gm.soa["height_variance"][slot] = quantise_variance_cm2(var_cm2)
     gm.soa["traversability"][slot] = trav
     gm.soa["ground_height"][slot] = -5
@@ -60,7 +60,7 @@ def test_a_thin_class_fires_the_gate(gm):
     _, person = _cell(gm, 30.0, 2.0, cls="person")
     assert not candidates(gm, [road])[0]
     assert candidates(gm, [person])[0]
-    assert CLASS_IDS["person"] in refine_class_ids()
+    assert class_ids()["person"] in refine_class_ids()
 
 
 def test_every_configured_refine_class_can_now_fire_it():
@@ -85,8 +85,8 @@ def test_every_configured_refine_class_can_now_fire_it():
 
     ids = refine_class_ids().tolist()
     for name in ("pole", "traffic-sign"):
-        assert CLASS_IDS[name] <= CLASS_MAX
-        assert CLASS_IDS[name] in ids, (
+        assert class_ids()[name] <= CLASS_MAX
+        assert class_ids()[name] in ids, (
             f"{name} fits the byte now but the gate is not matching on it"
         )
 
@@ -267,7 +267,7 @@ def test_the_ablation_reports_unfit_rather_than_truncating():
     ring, slot = slot_of(ab, 40.0, 0.0)
     assert ring == 2
     ab.soa["obs_count"][slot] = 9
-    ab.soa["semantic_class"][slot] = pack_class(CLASS_IDS["person"], 5)
+    ab.soa["semantic_class"][slot] = pack_class(class_ids()["person"], 5)
 
     out = apply(ab, [slot])
     assert out["unfit"] == 1

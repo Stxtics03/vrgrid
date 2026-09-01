@@ -422,12 +422,12 @@ def test_the_whole_label_set_fits():
     0 is `unlabeled` -- a chunk of the map quietly becoming unlabelled ground
     is plausible-looking and invisible without the reference map.
     """
-    from vrgrid.grid.traversability import CLASS_IDS
+    from vrgrid.grid.traversability import class_ids
 
     packed = np.zeros(1, dtype=np.uint8)
 
     # every id the project actually uses, including the three that did not fit
-    for name, cid in CLASS_IDS.items():
+    for name, cid in class_ids().items():
         assert cid <= CLASS_MAX, f"{name} ({cid}) does not fit in {CLASS_BITS} bits"
         out = boyer_moore_update(packed, np.array([cid], dtype=np.uint8))
         cand, cnt = unpack_class(out)
@@ -436,8 +436,8 @@ def test_the_whole_label_set_fits():
 
     # the three that used to be silently corrupted, named explicitly
     for name in ("terrain", "pole", "traffic-sign"):
-        assert CLASS_IDS[name] > 15, "this test is no longer testing anything"
-        assert CLASS_IDS[name] <= CLASS_MAX
+        assert class_ids()[name] > 15, "this test is no longer testing anything"
+        assert class_ids()[name] <= CLASS_MAX
 
     # and the seam is still loud
     with pytest.raises(ValueError, match="does not fit"):

@@ -128,8 +128,14 @@ two agree exactly on flat ground, so nothing caught it, and on a feature they
 disagree by about `2z/tan|φ|` — 1.7 m radially at the steepest beam. The
 practical consequence was that **no return below −30 cm was produced at any
 range in any frame**: the scene's only negative obstacle was never observed as
-a hole, so the §8.2 plan-regret figure was measuring a lane with no hazard in
-it. The intersection is now solved (`synthetic._beam_range`).
+a hole at all. The intersection is now solved (`synthetic._beam_range`).
+
+This did NOT move the §8.2 figure, and an earlier revision of this paragraph
+said it did. R(S) is measured down a lane six cells off the centreline and the
+pothole sits on the centreline, so putting it into the map changes no decision
+there. What moved R(S) that day was a separate off-by-one in
+`grid/traversability.py`'s class table, which the same commit exposed; both are
+recorded in `docs/research-log.md` under 2026-09-01.
 
 **Slow-motion detectability.** An object at speed `v` moves `d = v·Δt` between frames (Δt = 0.1 s at 10 Hz). It is *geometrically* detectable only if
 
