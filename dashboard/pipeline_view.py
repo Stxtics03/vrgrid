@@ -31,7 +31,11 @@ import numpy as np
 import rerun as rr
 from vrgrid.cell import OCC_FREE, OCC_UNKNOWN
 
-from ._config import blind_cone_radius_m, schedule_legend_markdown
+from ._config import (
+    blind_cone_radius_m,
+    memory_overlay_markdown,
+    schedule_legend_markdown,
+)
 
 # Every colour below is defined in `palettes.py`, which imports no rerun: the
 # CVD audit (`cvd.py`) and tests/test_cvd.py check these numbers in CI, where
@@ -156,6 +160,7 @@ class PipelineView:
         # runs. When present, `log_frame` draws its occupied cells as the real
         # 2.5D surface -- see `_log_occupied`.
         self.engine = engine
+        self._last_occupied_n = 0   # updated by _log_occupied, read by _log_memory
         rr.init("vrgrid_pipeline", spawn=spawn)
         if save_path:
             rr.save(save_path)
@@ -241,6 +246,7 @@ class PipelineView:
         Calling `occupied_cells()` also refreshes `engine.occ_state`, which
         `_log_free` / `_log_unknown` then read -- so this runs first."""
         slots, x, y, z = self.engine.occupied_cells()
+        self._last_occupied_n = len(slots)   # for _log_memory, no second pass
         if len(slots) == 0:
             rr.log("world/map/occupied", rr.Clear(recursive=True))
             return
@@ -300,6 +306,19 @@ class PipelineView:
                        colors=[_UNKNOWN_RGBA], fill_mode="solid"),
         )
 
+    def _log_memory(self):
+        """Per-frame live memory overlay: the real occupied-cell storage now
+        (`occupied count * CELL_BYTES`), the dense-3D baseline derived from the
+        schedule for the same covered volume, and the live ratio. Logged
+        alongside the static `schedules` panel, but updated every frame."""
+        rr.log(
+            "memory",
+            rr.TextDocument(
+                memory_overlay_markdown(self._last_occupied_n, self.schedule),
+                media_type=rr.MediaType.MARKDOWN,
+            ),
+        )
+
     def log_frame(self, frame):
         rr.set_time("frame", sequence=frame.index)
 
@@ -310,6 +329,7 @@ class PipelineView:
             self._log_occupied()   # also refreshes engine.occ_state
             self._log_free()
             self._log_unknown()
+            self._log_memory()
 
         # The removed set, on its own entity -- this is what the demo toggles.
         ghosts = frame.points_world[frame.moving].astype(np.float32)

@@ -13,8 +13,12 @@ import pytest
 pytest.importorskip("rerun")
 
 from vrgrid.dash._config import (
+    DENSE_VOXEL_BYTES,
     available_schedules,
     blind_cone_radius_m,
+    dense_3d_baseline,
+    grid_memory_stats,
+    memory_overlay_markdown,
     schedule_legend_markdown,
 )
 from vrgrid.dash.pipeline_view import COLOR_BY, get_display_points
@@ -263,3 +267,72 @@ def test_pipeline_view_without_engine_skips_the_surface(tmp_path):
     view = PipelineView(load_schedule("5/10/20/40"), spawn=False,
                         save_path=str(tmp_path / "n.rrd"), engine=None)
     view.log_frame(_wall_frame(0))  # no engine -> no occupied surface, no error
+
+
+# --------------------------------------------------------------------------
+# live memory overlay -- occupied cells * CELL_BYTES vs the dense-3D baseline
+# --------------------------------------------------------------------------
+
+
+def test_dense_3d_baseline_is_derived_not_a_magic_number():
+    from vrgrid.cell import CELL_BYTES
+
+    sched = load_schedule("5/10/20/40")
+    d = dense_3d_baseline(sched)
+
+    # exactly the documented formula, recomputed from the schedule
+    footprint = 2.0 * sched.rings[-1].half_width_m
+    lo, hi = sched.vertical_extent_m
+    vertical = hi - lo
+    res = sched.base_cell_m
+    assert d["footprint_m"] == footprint == 200.0
+    assert d["vertical_m"] == vertical == 8.0
+    assert d["res_m"] == res == 0.05
+    assert d["voxels"] == (footprint / res) ** 2 * (vertical / res) == 2.56e9
+    assert d["bytes"] == d["voxels"] * DENSE_VOXEL_BYTES == 2.56e9   # 1 B/voxel
+
+    # matches the report's 286x headline against the 8.94 MB logical map
+    assert d["bytes"] / (sched.total_cells * CELL_BYTES) == pytest.approx(286.4, abs=0.5)
+
+
+def test_grid_memory_stats_is_exactly_occupied_count_times_cell_bytes():
+    from vrgrid.cell import CELL_BYTES
+
+    sched = load_schedule("5/10/20/40")
+    for n in (0, 1, 42, 187_808, 745_000):
+        s = grid_memory_stats(n, sched)
+        assert s["live_bytes"] == n * CELL_BYTES        # exact, no rounding
+        assert s["cell_bytes"] == CELL_BYTES
+        assert s["dense_bytes"] == dense_3d_baseline(sched)["bytes"]
+        if n:
+            assert s["ratio"] == s["dense_bytes"] / (n * CELL_BYTES)
+
+
+@needs_data
+def test_memory_overlay_tracks_the_real_occupied_count(tmp_path):
+    """The overlay number must equal len(occupied_cells()) * CELL_BYTES for the
+    frame it was logged on -- no drift between what is drawn and what is counted."""
+    from vrgrid.cell import CELL_BYTES
+    from vrgrid.dash.pipeline_view import PipelineView
+    from vrgrid.run.__main__ import iter_pipeline
+    from vrgrid.run.engine import MapEngine
+
+    sched = load_schedule("5/10/20/40")
+    engine = MapEngine(sched, ghost_removal=True)
+    view = PipelineView(sched, spawn=False, save_path=str(tmp_path / "mem.rrd"),
+                        engine=engine)
+
+    seen = []
+    for f in iter_pipeline("00", 20):
+        engine.step(f)
+        view.log_frame(f)
+        n = len(engine.occupied_slots())
+        assert view._last_occupied_n == n
+        s = grid_memory_stats(n, sched)
+        assert s["live_bytes"] == n * CELL_BYTES
+        assert str(f"{n:,}") in memory_overlay_markdown(n, sched)
+        seen.append((n, s["live_bytes"], s["ratio"]))
+
+    ns = [x[0] for x in seen]
+    assert ns[-1] > ns[0] > 0                     # the map fills as frames arrive
+    assert all(0 < x[2] < 1e7 for x in seen)      # ratio stays a sane finite number
