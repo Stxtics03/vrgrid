@@ -146,15 +146,21 @@ def memory_overlay_markdown(n_occupied: int, schedule) -> str:
         f"| occupied cells | {s['n_occupied']:,} |",
         f"| cell size | {s['cell_bytes']} B (`CELL_BYTES`) |",
         f"| **map in use now** | **{_fmt_bytes(s['live_bytes'])}** |",
-        f"| dense-3D baseline | {_fmt_bytes(s['dense_bytes'])} "
-        f"({s['dense_voxels'] / 1e9:.2f} G voxels @ {DENSE_VOXEL_BYTES} B) |",
+        (
+            f"| dense-3D baseline | {_fmt_bytes(s['dense_bytes'])} "
+            f"({s['dense_voxels'] / 1e9:.2f} G voxels @ {DENSE_VOXEL_BYTES} B) |"
+        ),
         f"| **live ratio** | **{s['ratio']:,.0f}x smaller** |",
         "",
-        f"dense volume: {s['footprint_m']:g} x {s['footprint_m']:g} x "
-        f"{s['vertical_m']:g} m at {s['res_m'] * 100:g} cm uniform "
-        f"= ({s['footprint_m']:g}/{s['res_m']:g})^2 x ({s['vertical_m']:g}/{s['res_m']:g}) voxels",
+        (
+            f"dense volume: {s['footprint_m']:g} x {s['footprint_m']:g} x "
+            f"{s['vertical_m']:g} m at {s['res_m'] * 100:g} cm uniform "
+            f"= ({s['footprint_m']:g}/{s['res_m']:g})^2 x ({s['vertical_m']:g}/{s['res_m']:g}) voxels"
+        ),
         "",
-        f"_live ratio counts only occupied cells; the fixed preallocation is "
-        f"{schedule.total_cells * CELL_BYTES / 1e6:.2f} MB "
-        f"({s['dense_bytes'] / (schedule.total_cells * CELL_BYTES):,.0f}x -- the report figure)._",
+        (
+            "_live ratio counts only occupied cells; the fixed preallocation is "
+            f"{schedule.total_cells * CELL_BYTES / 1e6:.2f} MB "
+            f"({s['dense_bytes'] / (schedule.total_cells * CELL_BYTES):,.0f}x -- the report figure)._"
+        ),
     ])
