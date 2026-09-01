@@ -8,7 +8,7 @@ what happens when the budget runs out -- rather than the plumbing.
 import numpy as np
 import pytest
 from vrgrid.cell import FLAG_DERIVED, FLAG_DYNAMIC, TRAV_ROUGHNESS, TRAV_SLOPE, TRAV_STEP
-from vrgrid.eval.harness import build_gridmap
+from vrgrid.eval.harness import build_gridmap, recenter
 from vrgrid.grid.fusion import pack_class
 from vrgrid.grid.gate import _cell_centre as gate_cell_centre
 from vrgrid.grid.gate import apply, candidates, refine_class_ids, ring_of_slot
@@ -198,30 +198,112 @@ def test_the_children_merge_back_to_the_parent(gm):
     assert back.n == int(gm.soa["obs_count"][slot])
 
 
-def test_release_happens_before_acquire(gm):
-    """⚑ Flaw E1's ordering. A block whose cell has migrated inward is buying
-    resolution the schedule now provides free; holding it while new requests
-    are refused is the degradation E1 describes -- the pool going useless
-    exactly as you approach the things you cared about."""
-    small = build_gridmap(load("5/10/20/40"))
-    small.pool.blocks = small.pool.blocks       # capacity is the real pool's
+def test_release_happens_when_the_vehicle_drives_up_to_the_cell(gm):
+    """⚑ Flaw E1's ordering, exercised by DRIVING rather than by pretending.
 
+    A block whose cell has migrated inward is buying resolution the schedule
+    now provides free; holding it while new requests are refused is the
+    degradation E1 describes -- the pool going useless exactly as you approach
+    the things you cared about.
+
+    ⚑ This test used to monkeypatch `gate.ring_of_slot` to return 0 for every
+      slot, and that monkeypatch was the tell. `ring_of_slot` answers which
+      ring a flat SLOT is STORED in, which the allocation fixes at startup; it
+      cannot change because the vehicle moved. So the release condition
+      `now <= ring - levels` was unsatisfiable on the real path, nothing was
+      ever released, and the only way to see a release was to replace the
+      function with one that lies. Twelve frames of the synthetic sequence
+      ended `released 0 ... pool 512/512 blocks` with 15,791 refusals.
+
+      `apply` now asks `migrate_ring` where the cell IS, from its
+      vehicle-relative centre. So this drives the vehicle at it instead, which
+      is the thing that actually happens.
+    """
     ring, slot = _cell(gm, 30.0, 0.0, cls="person")
+    assert ring >= 2, "the cell must start coarse enough to be worth refining"
     apply(gm, [slot])
-    assert gm.pool.find(ring, slot) != FREE
+    block = gm.pool.find(ring, slot)
+    assert block != FREE, "nothing was acquired, so the release proves nothing"
 
-    # pretend that cell now lives at ring 0: the schedule overtook the block
-    out = apply(gm, [], thresholds=None)
-    assert out["released"] >= 0                 # nothing migrated, nothing freed
+    # Parked: the cell has not moved, so the block is still buying something.
+    assert apply(gm, [])["released"] == 0
 
-    from vrgrid.grid import gate as gate_mod
-    real = gate_mod.ring_of_slot
-    gate_mod.ring_of_slot = lambda g, s: 0      # everything is now ring 0
-    try:
-        out = apply(gm, [])
-    finally:
-        gate_mod.ring_of_slot = real
+    # Drive up to it. `_cell_centre` is vehicle-relative, so moving the
+    # vehicle to the cell puts it in ring 0 -- which the schedule already
+    # resolves at 5 cm, finer than the block was bought to provide.
+    recenter(gm, 30.0, 0.0)
+    out = apply(gm, [])
     assert out["released"] == 1, "a block the schedule overtook was not released"
+    assert gm.pool.find(ring, slot) == FREE
+
+
+def test_hysteresis_keeps_a_boundary_cell_from_thrashing_the_pool(gm):
+    """§6.3's specified unit test, on the path that actually splits and merges.
+
+    "Drive a synthetic trajectory with sinusoidal speed across a ring boundary;
+    assert the number of split/merge events per cell is bounded." A cell
+    sitting on a boundary while `v` fluctuates would otherwise acquire and
+    release every frame: pool thrash, and by §5.4 variance inflation with no
+    physical cause.
+
+    The anisotropy is what makes speed move the boundary at all. Note it is
+    the LATERAL edge that moves here, not the forward one: eq. (20) divides
+    |y| by `a_s < 1`, so a point to the side is pushed OUT to a coarser ring
+    as the vehicle speeds up -- resolution taken from the sides and spent
+    forward, which is the whole idea. At this schedule's `kappa_forward = 1.0`
+    a cell dead ahead at the ring 0/1 edge does not change ring at all, so a
+    forward cell would have made this test vacuous. A cell parked on the
+    moving lateral edge is the worst case, and `migrate_ring`'s asymmetric
+    thresholds (eq. 21) are what bound it.
+
+    ⚑ `migrate_ring` had no caller outside its own unit test until 2 Sep, so
+      this could not have been asserted before: there was nothing on the frame
+      path for the hysteresis to protect.
+    """
+    from vrgrid.grid.lattice import d_aniso, ring_of
+
+    sched = gm.schedule
+    # Lateral, and between the ring 1/2 edges at rest and at speed: ring 1 at
+    # 0 m/s, ring 2 at 30 m/s, so the boundary sweeps over it every cycle.
+    y = 14.0
+    assert ring_of(0.0, y, sched, 0.0) != ring_of(0.0, y, sched, 30.0), (
+        "this y is not on a speed-sensitive boundary, so the test is vacuous")
+
+    _ring, slot = _cell(gm, 0.0, y, cls="person")
+    var_before = int(gm.soa["height_variance"][slot])
+
+    # ⚑ Count pool OCCUPANCY changes, not `acquired`. `pool.acquire` is
+    #   idempotent for a (ring, slot) it already holds, so `acquired` counts
+    #   the gate re-affirming a block it already has -- 1 every frame, on a
+    #   cell that never moved. Occupancy is the thing §6.3 bounds: a split
+    #   takes a block, a merge gives it back.
+    events, held = 0, gm.pool.free_blocks
+    for frame in range(1000):
+        speed = 15.0 + 15.0 * np.sin(frame * 0.35)     # 0 .. 30 m/s
+        apply(gm, [slot], vehicle_speed_ms=speed)
+        if gm.pool.free_blocks != held:
+            events += 1
+            held = gm.pool.free_blocks
+
+    # One acquisition on the first frame, and then nothing: the band holds it
+    # across every crossing. Generous on purpose -- the claim is "bounded",
+    # not a tuned count.
+    assert events <= 4, (
+        f"{events} pool occupancy changes in 1000 frames on one boundary "
+        "cell -- the hysteresis band is not holding it")
+
+    # §5.4's half of the same argument: a cell oscillating across a boundary
+    # must not inflate its variance every cycle with no physical cause. The
+    # `derived` bit is what makes `merge(split(c)) == c` exact, and this is
+    # the 1000-frame check §6.3 asks for.
+    assert int(gm.soa["height_variance"][slot]) == var_before, (
+        "the boundary cell's variance moved over 1000 frames of speed "
+        "oscillation, with no new evidence")
+
+    # And the band is genuinely doing the holding, rather than the cell never
+    # being near the edge: the anisotropy really does move it, outward, as
+    # eq. (20)'s lateral term says.
+    assert d_aniso(0.0, y, sched, 30.0) > d_aniso(0.0, y, sched, 0.0)
 
 
 def test_the_pool_stays_bounded_under_a_flood(gm):

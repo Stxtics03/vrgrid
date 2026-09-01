@@ -57,6 +57,7 @@ would look sharper precisely where it had just admitted it was guessing.
 import numpy as np
 from vrgrid.cell import FLAG_DYNAMIC, TRAV_SLOPE, TRAV_STEP
 from vrgrid.grid.fusion import unpack_class
+from vrgrid.grid.lattice import migrate_ring
 from vrgrid.grid.pool import FREE, priority
 from vrgrid.grid.quantise import dequantise_variance_cm2, quantise_variance_cm2
 from vrgrid.grid.schedule import load_thresholds
@@ -183,6 +184,36 @@ def apply(gm, slots, vehicle_speed_ms: float = 0.0, thresholds=None,
     the degradation flaw E1 describes -- the pool going useless precisely as
     you approach the things you cared about.
 
+    ⚑ **That fix was inert until 2 Sep, and the symptom was in every run.**
+      `release_overtaken` was handed `ring_of_slot`, which answers which ring
+      a flat SLOT is stored in -- a property of the allocation layout, fixed
+      at startup, and not a function of where the vehicle is. So `now` was
+      always exactly `ring`, the release test `now <= ring - levels` could
+      never hold with `levels >= 1`, and nothing was ever released. Twelve
+      frames of the synthetic sequence ended `released 0 ... pool 512/512
+      blocks` with 15,791 requests refused: the pool filled once, early, and
+      then refused every later request -- E1 exactly, with the fix for it
+      sitting in the file.
+
+      What it needs is where the cell IS, which is `_cell_centre` (already
+      vehicle-relative) put through `migrate_ring`. That also puts §6.3's
+      hysteresis on the frame path for the first time: `migrate_ring` had no
+      caller outside its own unit test, so a cell on a ring boundary while
+      the speed fluctuated would have thrashed the pool -- the exact failure
+      §6.3 calls mandatory to prevent.
+
+      Measured on the same 14 frames, before -> after:
+
+          fired    116,684 -> 395        refused  15,791 -> 0
+          acquired   2,954 -> 395        released      0 -> 324
+          pool     512/512 -> 62/512
+
+      `fired` collapses because a refused cell never gets FLAG_REFINED and so
+      re-fires every frame: 116,684 was the same few hundred cells asking
+      again and again against a full pool. Memory is unchanged -- the pool is
+      512 x 16 x 12 B whether or not it is full -- so no headline number
+      moves. What changes is that the refinement pool now does its job.
+
     `corridor_mask(ring, slot) -> bool` is §8.3's band, when a planner is
     running: cells outside the near-optimal corridor cannot change the plan
     however finely resolved, so refining them is provably wasted. Optional,
@@ -198,7 +229,8 @@ def apply(gm, slots, vehicle_speed_ms: float = 0.0, thresholds=None,
         return {"released": 0, "fired": 0, "acquired": 0, "refused": 0, "unfit": 0}
 
     released = pool.release_overtaken(
-        lambda ring, slot: ring_of_slot(gm, slot))
+        lambda ring, slot: migrate_ring(*_cell_centre(gm, ring, slot),
+                                        gm.schedule, ring, vehicle_speed_ms))
 
     slots = np.asarray(slots, dtype=np.int64)
     fires = candidates(gm, slots, th)
