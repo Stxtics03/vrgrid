@@ -203,11 +203,21 @@ class _Builder:
 
 
 def build_from_scans(scans, out_path=None, cell_m: float = 0.05) -> ReferenceMap:
-    """M* from an iterable of (points in sensor frame, label ids, pose 4x4).
+    """M* from an iterable of (points in VEHICLE frame, RAW label ids,
+    vehicle -> world 4x4).
 
     This is the whole of §9.1 and it does not care where the scans came from,
     which is the point: the synthetic sequence and SemanticKITTI go through
     the same function, so the harness that works on one works on the other.
+
+    ⚑ The frame in that first line used to read "sensor frame", and the body
+      has always applied the pose and nothing else -- no `Tr`, no 1.73 m
+      ground drop. Both callers pass the vehicle frame, so the code was right
+      and the sentence was wrong, which is the more dangerous way round: the
+      one caller that believed the docstring (`build()`, below) handed it raw
+      sensor points and a raw `poses.txt` row. Same convention as
+      `harness.run_sequence`, deliberately -- M* and M are built from the same
+      scans and any disagreement between them is scored as map error.
     """
     b = _Builder(cell_m)
     for pts, labels, pose in scans:
@@ -220,25 +230,67 @@ def build_from_scans(scans, out_path=None, cell_m: float = 0.05) -> ReferenceMap
     return ref
 
 
-def build(sequence: str, out_path: str, root="data", cell_m: float = 0.05):
+# Learning ids whose surface IS the ground: road, parking, sidewalk,
+# other-ground, terrain. Used only to pick the returns the frame-convention
+# guard is allowed to look at -- see `build`.
+_GROUND_LEARNING_IDS = (8, 9, 10, 11, 16)
+
+
+def build(sequence: str, out_path=None, cell_m: float = 0.05,
+          max_frames: int | None = None, check_frame: bool = True):
     """M* for a SemanticKITTI sequence. Math §9.1.
 
     Reads through `perception.loader`, which is JP's and is where calibration
-    and the velodyne-to-vehicle transform live. Until that lands this raises
-    from inside the loader, loudly and with his name on it, which is the
-    correct failure -- the alternative is a reference map built on an
-    unverified frame convention, and frame confusion is the failure mode
-    `docs/frames.md` exists to prevent.
+    and the velodyne-to-vehicle transform live.
 
-    To build one from anything else -- the synthetic sequence, a recording,
-    a subset -- call `build_from_scans()` directly.
+    ⚑ **This had never been run.** It is the first step of any real-data
+      evaluation -- no reference map, no metrics, no plan regret -- and it
+      raised `ValueError: too many values to unpack` on its own first line,
+      because `loader.scans` yields three things and this unpacked two. Behind
+      that were two more, both of which would have produced a plausible map
+      rather than an error:
+
+        * it passed `poses[i]` straight through, and a `poses.txt` row is
+          Camera-0 -> World_cam, not vehicle -> world. That is the 90 degree
+          axis permutation `docs/frames.md` exists to prevent, applied to the
+          artefact every metric is measured against.
+        * it passed the loader's (N, 4) SENSOR-frame array to a function that
+          wants (N, 3) in the VEHICLE frame -- an intensity column read as a
+          coordinate, and every return 1.73 m under the road.
+
+    So the chain is composed here, once, out of JP's transforms, and the first
+    frame is checked rather than trusted: `check_frame` runs
+    `harness.assert_world_is_z_up` over the ground-classed returns. Building a
+    reference map from 40 GB with the wrong convention costs a day, and the
+    result looks entirely plausible -- it is a complete map, in the wrong
+    cells, and nothing downstream can tell.
+
+    `max_frames` builds a subset: a first pass over 200 frames answers "is the
+    frame right" in a minute instead of an hour, and it is what the demo path
+    wants when the whole sequence is not needed.
+
+    To build one from anything else -- the synthetic sequence, a recording --
+    call `build_from_scans()` directly.
     """
+    from vrgrid.eval.harness import FrameGuard
     from vrgrid.perception import loader
+    from vrgrid.perception.semantics import semantic_labels
+    from vrgrid.perception.transforms import T_S_V, vehicle_to_world
 
     def scans():
-        poses = loader.poses(sequence)
-        for i, (pts, labels) in enumerate(loader.scans(sequence)):
-            yield pts, labels, poses[i]
+        guard = FrameGuard() if check_frame else None
+        for pts, labels, pose in loader.scans(sequence, max_frames=max_frames):
+            # Sensor -> vehicle: drop the origin to the road. `transform_points`
+            # would do this too, but it also ignores the intensity column, and
+            # being explicit about which three of the four go through is the
+            # point of the bug above.
+            xyz = np.asarray(pts, dtype=np.float64)[:, :3] + T_S_V[:3, 3]
+            t_vw = vehicle_to_world(pose, sequence)
+            if guard is not None and not guard.done:
+                world = xyz @ t_vw[:3, :3].T + t_vw[:3, 3]
+                ground = np.isin(semantic_labels(labels), _GROUND_LEARNING_IDS)
+                guard.check(world, ground, t_vw[:3, 3])
+            yield xyz, labels, t_vw
 
     return build_from_scans(scans(), out_path, cell_m)
 

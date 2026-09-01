@@ -225,6 +225,63 @@ def assert_world_is_z_up(world, ground, tolerance_m: float = 2.0) -> None:
     )
 
 
+# How far the vehicle must have travelled before the frame guard's second
+# look. See `FrameGuard`.
+GUARD_BASELINE_M = 10.0
+
+
+class FrameGuard:
+    """Checks the world-frame convention on the first frame, and again once
+    the vehicle has actually gone somewhere.
+
+    ⚑ **Checking frame 0 alone is nearly worthless, and that is not obvious.**
+      A KITTI `poses.txt` starts at the identity by construction, so on frame 0
+      the wrong composition and the right one produce almost the same points:
+      feeding raw sensor points straight through an identity pose leaves them
+      in the sensor frame, which is x-forward, y-left, z-up with the ground at
+      -1.73 m -- inside this check's 2 m tolerance. The conventions only
+      separate once the pose carries real rotation or translation, which is to
+      say once the vehicle has driven.
+
+      Found by a test that was written to prove the guard fires and instead
+      proved it does not: `test_build_refuses_a_camera_convention_pose`.
+
+    So: frame 0, because a gross error should not survive one frame, and then
+    the first frame at least `GUARD_BASELINE_M` from the start, which is where
+    a convention error has become unmistakable. Two looks, then it stops
+    costing anything.
+    """
+
+    def __init__(self, baseline_m: float = GUARD_BASELINE_M,
+                 tolerance_m: float = 2.0):
+        self.baseline_m = baseline_m
+        self.tolerance_m = tolerance_m
+        self._origin = None
+        self._moved = False
+
+    @property
+    def done(self) -> bool:
+        return self._moved
+
+    def check(self, world, ground, translation) -> None:
+        """`translation` is the vehicle -> world transform's t, or None to
+        check unconditionally (a caller with no pose to hand)."""
+        if self._moved:
+            return
+        first = self._origin is None
+        if translation is None:
+            assert_world_is_z_up(world, ground, self.tolerance_m)
+            self._moved = True
+            return
+        t = np.asarray(translation, dtype=np.float64)[:3]
+        if first:
+            self._origin = t
+        far = float(np.linalg.norm(t - self._origin)) >= self.baseline_m
+        if first or far:
+            assert_world_is_z_up(world, ground, self.tolerance_m)
+        self._moved = far
+
+
 def learning_ids(raw_labels):
     """RAW SemanticKITTI ids -> 0-19 learning ids, or pass through if already
     mapped. Math §10.2.
@@ -265,9 +322,11 @@ def run_sequence(gm: GridMap, scans, recentre: bool = True,
       implementations of one convention is how a map ends up slowly rotating,
       so there is one, it is JP's, and this consumes it.
 
-      `assert_world_is_z_up` checks the first frame and raises rather than
-      letting the wrong convention through, because the failure downstream is
-      a full, plausible-looking map in the wrong cells.
+      `FrameGuard` checks the first frame and one frame after 10 m of travel,
+      and raises rather than letting the wrong convention through, because the
+      failure downstream is a full, plausible-looking map in the wrong cells.
+      The second look is the one that matters: frame 0 of a KITTI sequence is
+      the identity pose, where both conventions agree.
 
     ⚑ RAW label ids, not learning ids. `moving-*` (250-259) is what separates
       dynamic from static, and the 19-class learning map collapses every
@@ -291,15 +350,14 @@ def run_sequence(gm: GridMap, scans, recentre: bool = True,
     stats = RunStats()
     speed = 0.0
     last_xy = None
-    checked = False
+    guard = FrameGuard()
 
     for pts, labels, ground, pose in scans:
         pose = np.asarray(pose, dtype=np.float64)
         pts = np.asarray(pts, dtype=np.float64)
         world = pts @ pose[:3, :3].T + pose[:3, 3]
-        if not checked:
-            assert_world_is_z_up(world, ground)
-            checked = True
+        if not guard.done:
+            guard.check(world, ground, pose[:3, 3])
         xy = (float(pose[0, 3]), float(pose[1, 3]))
         if last_xy is not None:
             dt = gm.thresholds.get("fusion", {}).get("frame_dt_s", 0.1)

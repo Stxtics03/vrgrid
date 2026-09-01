@@ -104,22 +104,38 @@ PLAN_Y0_M = -5.5
 PLAN_LANE_CELLS = 6
 
 
-def costmaps_for(gm, reference, vehicle_x_m):
-    """(M*, M_S) on one shared planning lattice. M_S through query() only."""
-    x0 = vehicle_x_m + PLAN_BEHIND_M
-    return (costmap_from_reference(reference, x0, PLAN_Y0_M, PLAN_N, PLAN_N),
-            costmap_from_gridmap(gm, x0, PLAN_Y0_M, PLAN_N, PLAN_N,
-                                 vehicle_xy_m=(vehicle_x_m, 0.0)))
+def costmaps_for(gm, reference, vehicle_xy_m):
+    """(M*, M_S) on one shared planning lattice. M_S through query() only.
+
+    `vehicle_xy_m` is the vehicle's final world position, `(x, y)`. A float is
+    accepted and read as `(x, 0.0)` -- the synthetic sequence drives straight
+    down y = 0, and every caller here predates real data.
+
+    ⚑ The y was hardcoded to `PLAN_Y0_M` about the world origin, which is only
+      the vehicle's lane while the trajectory is a straight line along +x. On
+      a real KITTI sequence the car turns, so the window stayed near the
+      origin while the vehicle drove away from it: the regret would have been
+      measured over ground the map never saw, on both maps equally, and come
+      out as a confident zero. Worth being explicit about, because that
+      failure produces a *better-looking* number than the truth.
+    """
+    vx, vy = ((float(vehicle_xy_m), 0.0) if np.isscalar(vehicle_xy_m)
+              else (float(vehicle_xy_m[0]), float(vehicle_xy_m[1])))
+    x0 = vx + PLAN_BEHIND_M
+    y0 = vy + PLAN_Y0_M
+    return (costmap_from_reference(reference, x0, y0, PLAN_N, PLAN_N),
+            costmap_from_gridmap(gm, x0, y0, PLAN_N, PLAN_N,
+                                 vehicle_xy_m=(vx, vy)))
 
 
-def plan_regret_for(gm, reference, vehicle_x_m, mask=None):
+def plan_regret_for(gm, reference, vehicle_xy_m, mask=None):
     """R(S) for one map, through query() only. Math §8.1.
 
     `mask` restricts both maps to the common support -- ground every schedule
     in the comparison observed. Without it the number measures fill rate
     rather than coarsening; see the confound note in eval/plan_regret.py.
     """
-    star, mine = costmaps_for(gm, reference, vehicle_x_m)
+    star, mine = costmaps_for(gm, reference, vehicle_xy_m)
     if mask is not None:
         star, mine = restrict(star, mask), restrict(mine, mask)
     lane = PLAN_N // 2 - PLAN_LANE_CELLS

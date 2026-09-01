@@ -136,6 +136,29 @@ Format:
 **So what:** Fulfills the Days 5–6 writing deliverable for Track γ. Ready for direct inclusion in the final technical report and submission slide deck.
 
 ---
+## 2026-09-02 — Aakash
+**Module:** D1 — Evaluation harness, reference map
+
+**Finding:** Triage items #1 and #2, both landed on me. #1 is already closed and #2 was not what it looked like.
+
+**#1, elevation / ghost removal — no scope decision needed, it is fixed.** The triage list is timestamped 04:37 on 1 Sep; Shrestha's fix landed at 10:52 the same day (`337bb30`) and the list has not caught up. `quantise_height` takes a `datum_m`, `MapEngine._track_datum` slides the 8 m band in whole 1 m steps to follow the vehicle, heights are stored relative to that datum, and `_centres` takes a 3-vector ego to hand `visibility_cleanup` the vehicle-frame z its contract asks for. **My answer to the scope question is that it does not arise:** the fix keeps the band 8 m wide, so the dense-3D baseline in `dashboard/_config.py` counts the same voxels and the headline memory ratio is untouched — which is exactly why widening the clamp would have been the wrong fix and moving it was the right one. `test_the_ghost_clears_at_any_vehicle_elevation` is parametrised at 0, −5.8, 6.0, 12.0 and 39.0 m: seq 07's floor and seq 08's hill. **No demo routing is needed and seq 08's climbed section is safe on stage.** Verified rather than taken on trust — I ran it.
+
+Two other items on that list are also stale: the "two 15 MB per-frame allocations in `src/grid`" were closed on 1 Sep (`983f2fb`, 8.15 → 1.31 MB/frame), and the visibility scratch cap is the same commit.
+
+**#2, plan regret on real data — the blocker is not plan regret.** `reference_map.build()` is the only path from SemanticKITTI to M*, and **it had never been executed by anything.** It raised `ValueError: too many values to unpack` on its own first line: `loader.scans` yields three values and it unpacked two. Behind that were two more, both of which would have produced a plausible map rather than an error — it passed `poses[i]` straight through (a Camera-0 → World_cam row, not vehicle → world: the 90° permutation `docs/frames.md` exists to prevent, applied to the artefact every metric is measured against) and it handed the loader's (N, 4) **sensor**-frame array to a function wanting (N, 3) in the **vehicle** frame (an intensity column read as a coordinate, every return 1.73 m under the road). Nothing caught it because every test and every script calls `build_from_scans` directly, and the only caller of `build` needs the download.
+
+It does not need the download. Since 1 Sep `eval/synthetic.write_sequence` writes the layout `perception.loader` reads, so the whole real path now runs against a scene whose surface is known analytically — a stronger check than the real data gives on its own, because the heights can be asserted rather than eyeballed. `scripts/build_reference_map.py` builds and caches M* for a sequence, and exits 2 with the path it looked in when there is no data.
+
+**⚑ A guard that could not fire.** Writing the test that proves `build` rejects a camera-convention pose, it did not raise — and the reason generalises past this bug. **A KITTI `poses.txt` starts at the identity by construction**, so on frame 0 the wrong composition and the right one agree: raw sensor points through an identity pose stay in the sensor frame, which is x-forward, y-left, z-up with the ground at −1.73 m, inside the guard's 2 m tolerance. `assert_world_is_z_up` on frame 0 — which is what `run_sequence` did, and what I added on 1 Sep — would have passed every real sequence regardless of convention. `FrameGuard` now looks twice: frame 0, and the first frame at least 10 m from the start, where the conventions are unmistakably apart. Then it stops costing anything.
+
+Also generalised `costmaps_for` to place the planning window at the vehicle's final `(x, y)` rather than at `(x, PLAN_Y0_M)` about the world origin. That is only the vehicle's lane while the trajectory is a straight line along +x, which is true of the synthetic sequence and of no real one: on a sequence that turns, the window would have stayed near the origin while the vehicle drove away, and the regret would have been measured over ground neither map ever saw — coming out as a confident zero. Worth flagging because that failure produces a *better*-looking number than the truth.
+
+**Source:** `src/eval/reference_map.py` (`build`), `src/eval/harness.py` (`FrameGuard`), `scripts/build_reference_map.py`, `scripts/eval_synthetic.py` (`costmaps_for`), `tests/test_build_reference_map.py` (5), `tests/test_reference_map.py` (+3), `tests/test_frame_convention.py` (+4).
+
+**So what:** M* for 07/08 is now one command and the command is tested, so the download is the only thing left on that path — it is not an architecture gap. What remains genuinely open for a real regret number is the planning query itself: `PLAN_LANE_CELLS` runs the path where none of the scene's hazards are (Shrestha's `regret_plot.py` finding, still unresolved), and on a real sequence the start/goal need to come from the trajectory rather than from two constants. That is the Pratyushi half of item #2 and it is a smaller thing than "no real evidence exists" suggests. 508 passed, 27 skipped.
+
+---
+
 ## 2026-09-01 — Aakash
 **Module:** D1 — Evaluation harness, synthetic sequence
 

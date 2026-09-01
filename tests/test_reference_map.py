@@ -10,6 +10,7 @@ import numpy as np
 import pytest
 from vrgrid.eval.reference_map import (
     ReferenceMap,
+    build,
     build_from_scans,
     is_moving,
     load,
@@ -250,3 +251,93 @@ def test_one_definition_of_moving():
     assert list(loader.MOVING_LABEL_IDS) == list(range(250, 260)), (
         "perception/loader.py's MOVING_LABEL_IDS has drifted from the predicate"
     )
+
+
+# --- the real-data path, before the real data --------------------------------
+
+def _point_the_loader_at(tmp_path, monkeypatch, seq):
+    """`loader.DATA_ROOT` is resolved from the environment at IMPORT time, so
+    setting the variable inside a test does nothing. Patch the attributes."""
+    from vrgrid.perception import loader, transforms
+
+    monkeypatch.setattr(loader, "DATA_ROOT", tmp_path)
+    monkeypatch.setattr(loader, "GT_POSES_DIR", tmp_path / "poses")
+    monkeypatch.setattr(loader, "VELODYNE_DIR", tmp_path / "sequences")
+    monkeypatch.setattr(loader, "LABELS_DIR", tmp_path / "sequences")
+    transforms._TR_CACHE.pop(seq, None)
+
+
+def test_build_reads_a_sequence_through_the_real_loader(tmp_path, monkeypatch):
+    """⚑ `reference_map.build()` had never been run, by anything.
+
+    It is the first step of every real-data number in this project -- no M*,
+    no metrics, no plan regret -- and it raised `ValueError: too many values
+    to unpack` on its own first line. Nothing caught it because every test and
+    every script called `build_from_scans` directly, and the one caller that
+    would have exercised it needs 40 GB that has not landed.
+
+    It does not need 40 GB. `eval/synthetic.write_sequence` writes the layout
+    `perception.loader` reads, so the whole chain -- loader, calib, poses,
+    sensor -> vehicle -> world -- runs here on a scene whose true surface is
+    known analytically. That is a stronger check than the real data would give
+    on its own: the heights can be asserted, not just eyeballed.
+    """
+    _point_the_loader_at(tmp_path, monkeypatch, "99")
+    write_sequence(tmp_path, "99", n_frames=4)
+
+    ref = build("99", cell_m=0.05)
+    assert ref.count.sum() > 10_000
+
+    # Every observed cell must sit on the analytic surface. This is what the
+    # frame bugs would have broken silently: a whole map, in the wrong cells.
+    obs = np.argwhere(ref.count > 0)
+    i, j = obs[:, 0] + ref.i0, obs[:, 1] + ref.j0
+    x = (i + 0.5) * ref.cell_m
+    y = (j + 0.5) * ref.cell_m
+    got = ref.height_cm[obs[:, 0], obs[:, 1]] / 100.0
+    want = terrain_height_m(x, y, 0)
+    # 5 cm cells over a crowned road, and the class-boundary cells straddle a
+    # 12 cm kerb, so a handful are legitimately off. The median is the claim.
+    assert np.median(np.abs(got - want)) < 0.02
+
+
+def test_build_refuses_a_camera_convention_pose(tmp_path, monkeypatch):
+    """The guard that makes the day-costing failure loud.
+
+    `build()` used to hand `poses[i]` -- a Camera-0 -> World_cam row -- to a
+    function expecting vehicle -> world. The result is not an error, it is a
+    complete reference map rotated 90 degrees, and every metric measured
+    against it is meaningless in a way no downstream check can see.
+
+    ⚑ Eight frames, not two, and the number is the point. This test was
+      written with two and did NOT raise -- which is how `FrameGuard` came to
+      exist. A KITTI `poses.txt` begins at the identity, so on the first frame
+      the wrong composition and the right one agree to well inside the guard's
+      2 m tolerance; they only separate once the vehicle has driven. The guard
+      now takes a second look after `GUARD_BASELINE_M` (10 m), and at this
+      sequence's 2 m per frame that needs six. A guard that only ever saw
+      frame 0 would have passed every real sequence too.
+    """
+    from vrgrid.eval.harness import FrameConventionError
+    from vrgrid.perception import transforms
+
+    _point_the_loader_at(tmp_path, monkeypatch, "99")
+    write_sequence(tmp_path, "99", n_frames=8)
+
+    # Skip the axis permutation: exactly the composition the old code did.
+    monkeypatch.setattr(transforms, "vehicle_to_world",
+                        lambda pose, sequence="00", tr=None:
+                        np.vstack([np.asarray(pose).reshape(3, 4),
+                                   [0.0, 0.0, 0.0, 1.0]]))
+    with pytest.raises(FrameConventionError, match="not z-up"):
+        build("99", cell_m=0.05)
+
+
+def test_build_can_stop_early(tmp_path, monkeypatch):
+    """`max_frames` is what makes a first pass over a real sequence a minute
+    rather than an hour -- the difference between checking the frame
+    convention before a full build and after one."""
+    _point_the_loader_at(tmp_path, monkeypatch, "99")
+    write_sequence(tmp_path, "99", n_frames=6)
+
+    assert build("99", max_frames=2).count.sum() < build("99").count.sum()

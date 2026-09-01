@@ -15,7 +15,12 @@ exactly right for them and would be exactly wrong on the first real frame.
 
 import numpy as np
 import pytest
-from vrgrid.eval.harness import FrameConventionError, assert_world_is_z_up
+from vrgrid.eval.harness import (
+    GUARD_BASELINE_M,
+    FrameConventionError,
+    FrameGuard,
+    assert_world_is_z_up,
+)
 
 # KITTI camera convention: x right, y down, z forward. `poses.txt` is in it.
 R_VEH_TO_CAM = np.array([[0.0, -1.0, 0.0],
@@ -104,3 +109,66 @@ def test_the_harness_checks_its_first_frame():
 
     with pytest.raises(FrameConventionError):
         run_sequence(gm, [(pts, labels, ground, pose)])
+
+
+# --- FrameGuard: when the check is actually able to fire ---------------------
+
+def test_frame_zero_cannot_tell_the_conventions_apart():
+    """⚑ The reason `FrameGuard` exists, stated as the property it defends.
+
+    A KITTI `poses.txt` starts at the identity by construction. Feeding raw
+    SENSOR-frame points through an identity pose -- exactly what the broken
+    `reference_map.build()` did -- leaves them in the sensor frame, which is
+    x-forward, y-left, z-up with the ground at -1.73 m. That is inside the
+    2 m tolerance, so a single-frame check passes a sequence that is wrong
+    from frame 1 onward.
+
+    This asserts the weakness directly rather than leaving it implied, because
+    the obvious `assert_world_is_z_up(frame0)` reads like sufficient cover and
+    is not.
+    """
+    ground = _ground_sweep() - np.array([0.0, 0.0, 1.73])   # sensor frame
+    assert_world_is_z_up(ground, np.ones(len(ground), bool))  # no raise
+
+
+def test_the_guard_looks_again_once_the_vehicle_has_moved():
+    """One look at frame 0, one after GUARD_BASELINE_M, then it stops."""
+    guard = FrameGuard()
+    pts = _ground_sweep()
+    ok = np.ones(len(pts), bool)
+
+    guard.check(pts, ok, np.zeros(3))                 # frame 0, fine
+    assert not guard.done, "the guard stopped before it had seen any motion"
+
+    # Still parked: not the second look, so a bad frame here is not caught.
+    guard.check(pts, ok, np.array([1.0, 0.0, 0.0]))
+    assert not guard.done
+
+    bad = _ground_sweep() @ R_VEH_TO_CAM.T
+    with pytest.raises(FrameConventionError):
+        guard.check(bad, ok, np.array([GUARD_BASELINE_M + 1.0, 0.0, 0.0]))
+
+
+def test_the_guard_stops_costing_anything_after_the_second_look():
+    """It runs over a whole sequence, so it has to fall out of the way. Once
+    the second look has happened the guard is done and never looks again --
+    including at a frame that would fail."""
+    guard = FrameGuard()
+    pts = _ground_sweep()
+    ok = np.ones(len(pts), bool)
+
+    guard.check(pts, ok, np.zeros(3))
+    guard.check(pts, ok, np.array([0.0, GUARD_BASELINE_M + 1.0, 0.0]))
+    assert guard.done
+
+    guard.check(_ground_sweep() @ R_VEH_TO_CAM.T, ok, np.array([50.0, 0.0, 0.0]))
+
+
+def test_a_caller_with_no_pose_gets_a_single_unconditional_check():
+    """Not every caller has a translation to offer. Passing None means "check
+    now and be done", which is the old behaviour, kept deliberately rather
+    than left as an accident."""
+    guard = FrameGuard()
+    with pytest.raises(FrameConventionError):
+        guard.check(_ground_sweep() @ R_VEH_TO_CAM.T,
+                    np.ones(4000, bool), None)
