@@ -29,6 +29,7 @@ they track the vehicle. Points are world-frame and accumulate on the timeline.
 
 import numpy as np
 import rerun as rr
+from vrgrid.cell import OCC_FREE, OCC_UNKNOWN
 
 from ._config import blind_cone_radius_m, schedule_legend_markdown
 
@@ -63,6 +64,19 @@ def _height_ramp(z: np.ndarray, lo: float = -3.0, hi: float = 15.0) -> np.ndarra
     i = np.clip(t.astype(np.int64), 0, 2)
     f = (t - i)[:, None]
     return (_HEIGHT_STOPS[i] * (1.0 - f) + _HEIGHT_STOPS[i + 1] * f).astype(np.uint8)
+
+
+# Occupancy layers are drawn as three visually distinct things -- "unknown is
+# not free" is a hard invariant (CLAUDE.md, math §10.1) and the view has to keep
+# them apart:
+#   OCCUPIED  elevation-ramped solid boxes at the cell's height (`_log_occupied`)
+#   FREE      flat translucent slate tiles at the ground datum (`_log_free`) --
+#             "the sensor looked here and it is clear"
+#   UNKNOWN   the blind cone, plus any cell the map still calls UNKNOWN despite
+#             having been observed (`_log_unknown`); never-observed allocation
+#             slots are left undrawn, they are not information
+_FREE_RGBA = (110, 125, 140, 70)      # slate, ~27% opacity -- recedes behind occupied
+_UNKNOWN_RGBA = (150, 90, 160, 90)    # muted violet, matches the blind-cone "unknown" hue family
 
 
 def legend_markdown(palette: str) -> str:
@@ -152,7 +166,13 @@ class PipelineView:
             rr.TextDocument(
                 "Ghost toggle: show/hide the `world/ghosts` entity (eye icon in the "
                 "entity panel).\nvisible = ghost removal OFF (trails behind moving "
-                "objects)\nhidden  = ghost removal ON",
+                "objects)\nhidden  = ghost removal ON\n\n"
+                "Map occupancy (when a MapEngine is attached), math §10.1:\n"
+                "  `world/map/occupied`  raised solid boxes, coloured by height\n"
+                "  `world/map/free`      flat translucent slate tiles -- looked, clear\n"
+                "  `world/map/unknown`   observed-but-still-unknown cells + the blind "
+                "cone; never-observed cells are not drawn.\n"
+                "Unknown is not free -- they are separate entities on purpose.",
                 media_type=rr.MediaType.MARKDOWN,
             ),
             static=True,
@@ -199,13 +219,27 @@ class PipelineView:
             out[sel] = layout.cell_m
         return out
 
+    def _centres_world(self, slots: np.ndarray):
+        """World-frame `(x, y, z)` for arbitrary slots, via the engine's own
+        inverse of `flat_slot`. ego (0, 0) leaves the centres in the world
+        frame, exactly as `MapEngine.occupied_cells` does it for the occupied
+        set -- this just reuses it for the free / unknown sets."""
+        n = len(slots)
+        x, y, z = np.zeros(n), np.zeros(n), np.zeros(n)
+        if n:
+            self.engine._centres(slots, np.zeros(2), x, y, z)
+        return x, y, z
+
     def _log_occupied(self):
         """The real 2.5D occupied surface: every cell the map currently calls
         OCCUPIED, drawn as a box at its world xy, at its visibility height z
         (ceiling where one was seen, ground otherwise -- the same height §10.4
         tests), sized to its ring's cell. `--show-ghosts` keeps the moving
         car's cells here; the default clears them via §10.4, so this entity is
-        where the toggle actually shows on screen."""
+        where the toggle actually shows on screen.
+
+        Calling `occupied_cells()` also refreshes `engine.occ_state`, which
+        `_log_free` / `_log_unknown` then read -- so this runs first."""
         slots, x, y, z = self.engine.occupied_cells()
         if len(slots) == 0:
             rr.log("world/map/occupied", rr.Clear(recursive=True))
@@ -221,6 +255,51 @@ class PipelineView:
                        colors=_height_ramp(z), fill_mode="solid"),
         )
 
+    def _log_free(self):
+        """FREE cells -- observed and clear -- as flat translucent tiles at the
+        ground datum, sized to their ring's cell so the foveation still reads.
+        Distinct from OCCUPIED (which is solid and raised) and from UNKNOWN
+        (undrawn / blind cone): "looked and clear" is not "did not look"."""
+        free = np.flatnonzero(self.engine.occ_state == OCC_FREE)
+        if len(free) == 0:
+            rr.log("world/map/free", rr.Clear(recursive=True))
+            return
+        x, y, z = self._centres_world(free)
+        cell_m = self._cell_m_per_slot(free)
+        centres = np.stack([x, y, z], axis=1).astype(np.float32)
+        half = np.stack(
+            [cell_m / 2.0, cell_m / 2.0, np.full_like(cell_m, 0.01)], axis=1
+        ).astype(np.float32)
+        rr.log(
+            "world/map/free",
+            rr.Boxes3D(centers=centres, half_sizes=half,
+                       colors=[_FREE_RGBA], fill_mode="solid"),
+        )
+
+    def _log_unknown(self):
+        """UNKNOWN cells that were nonetheless OBSERVED at least once (blind-cone
+        cells, cells whose evidence never cleared `n_min`) -- the planner-
+        relevant unknown, drawn in the blind-cone hue. Never-observed allocation
+        slots (the bulk of the grid) are deliberately not drawn: they carry no
+        information, and 700k boxes would bury the ones that matter. The blind
+        cone itself is always drawn as a circle under the vehicle transform."""
+        obs = self.engine.handle.grid["obs_count"]
+        seen_unknown = np.flatnonzero((self.engine.occ_state == OCC_UNKNOWN) & (obs > 0))
+        if len(seen_unknown) == 0:
+            rr.log("world/map/unknown", rr.Clear(recursive=True))
+            return
+        x, y, z = self._centres_world(seen_unknown)
+        cell_m = self._cell_m_per_slot(seen_unknown)
+        centres = np.stack([x, y, z], axis=1).astype(np.float32)
+        half = np.stack(
+            [cell_m / 2.0, cell_m / 2.0, np.full_like(cell_m, 0.01)], axis=1
+        ).astype(np.float32)
+        rr.log(
+            "world/map/unknown",
+            rr.Boxes3D(centers=centres, half_sizes=half,
+                       colors=[_UNKNOWN_RGBA], fill_mode="solid"),
+        )
+
     def log_frame(self, frame):
         rr.set_time("frame", sequence=frame.index)
 
@@ -228,7 +307,9 @@ class PipelineView:
         rr.log("world/points", rr.Points3D(xyz, colors=colors, radii=0.03))
 
         if self.engine is not None:
-            self._log_occupied()
+            self._log_occupied()   # also refreshes engine.occ_state
+            self._log_free()
+            self._log_unknown()
 
         # The removed set, on its own entity -- this is what the demo toggles.
         ghosts = frame.points_world[frame.moving].astype(np.float32)
