@@ -29,7 +29,7 @@ from vrgrid.eval import metrics
 from vrgrid.eval.reference_map import ReferenceMap
 from vrgrid.gpu.allocators import allocate, bytes_allocated
 from vrgrid.gpu.kernels import CEILING_NONE
-from vrgrid.gpu.shift import RingBuffer, shift
+from vrgrid.gpu.shift import RingBuffer, shift, track_datum
 from vrgrid.grid import gate, traversability
 from vrgrid.grid.fusion import fuse, initialise, scatter
 from vrgrid.grid.pool import RefinementPool
@@ -433,11 +433,19 @@ def run_sequence(gm: GridMap, scans, recentre: bool = True,
     guard = FrameGuard()
 
     for pts, labels, ground, pose in scans:
-        if not datum_set:
-            # The first pose's elevation. One value for the run -- see the note
-            # at the `scatter` call for why it must not move.
-            gm.z_datum_m = float(np.asarray(pose)[2, 3])
-            datum_set = True
+        # ⚑ MOVING, and re-basing as it moves. A FIXED datum is enough for
+        #   seq 07 -- ground at -1.67..-1.59 m -- and not for a sequence with
+        #   relief: 08 climbs -1.65 -> +5.63 m in 40 frames and +45.7 m over
+        #   the sequence against an 8 m band, and a fixed datum still clipped
+        #   16.91% of its ground returns. `track_datum` slides the band in
+        #   whole 1 m steps and re-bases every stored height to match, so all
+        #   cells stay relative to the SAME current datum and every difference
+        #   the map computes -- slope, step, curb height, pothole depth -- is
+        #   unaffected. `metrics` adds the final datum back to compare against
+        #   the world-absolute M*.
+        gm.z_datum_m = track_datum(gm.soa, None if not datum_set else gm.z_datum_m,
+                                   float(np.asarray(pose)[2, 3]))
+        datum_set = True
         pose = np.asarray(pose, dtype=np.float64)
         pts = np.asarray(pts, dtype=np.float64)
         world = pts @ pose[:3, :3].T + pose[:3, 3]

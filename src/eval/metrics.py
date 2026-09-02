@@ -33,6 +33,7 @@ of the effect being measured.
 
 import numpy as np
 from vrgrid.cell import OCC_OCCUPIED
+from vrgrid.gpu.kernels import Z_MAX_CM, Z_MIN_CM
 from vrgrid.grid.fusion import occupancy_state
 from vrgrid.grid.query import window_cells
 
@@ -56,7 +57,37 @@ def _compared(gm, reference, ring: int, require_observed=True):
 
     keep = n_ref > 0
     if require_observed:
+        # ⚑ `obs_count > 0` is NOT enough: it counts every return, and a cell
+        #   whose returns were all NON-ground has no measured ground height at
+        #   all. `fuse` leaves such a cell's `ground_height` at its initial 0,
+        #   and 0 cm is not a neutral height -- it is THE DATUM. Scoring those
+        #   cells makes the metric depend on where the datum happens to sit:
+        #   on seq 07, moving the datum from -1.64 m to -2.00 m took ring 1's
+        #   RMSE from 3.19 cm to 6.15 cm without changing a single measurement.
+        #   A metric whose answer moves with an arbitrary offset is measuring
+        #   the offset.
+        #
+        #   `height_variance > 0` is the predicate. The variance codec maps
+        #   code 0 to MAXIMUM variance precisely so that "never fused" is
+        #   distinguishable from "fused and confident" (fusion.initialise), so
+        #   a non-zero code means ground evidence actually reached this cell.
         keep &= gm.soa["obs_count"][slots] > 0
+        keep &= gm.soa["height_variance"][slots] > 0
+        # ⚑ And not saturated at the band edge. The map is a LOCAL 8 m band
+        #   that slides with the vehicle (gpu.shift.track_datum); M* is global.
+        #   On a sequence with more relief than the band, ground the vehicle
+        #   has left behind falls out of it and clamps -- 58.6% of seq 08's
+        #   observed cells after only 40 frames of its 45.7 m climb. A clamped
+        #   cell holds the band edge, not a measurement, and scoring it against
+        #   a global reference measures the band rather than the map: it put
+        #   seq 08's ring 1 RMSE at 213 cm.
+        #
+        #   Excluded, not silently: `saturated_fraction_per_ring` reports how
+        #   much of each ring this removes, and a ring that loses most of
+        #   itself is telling you the band is too narrow for the sequence, not
+        #   that the map is accurate over what survives.
+        g = gm.soa["ground_height"][slots]
+        keep &= (g > Z_MIN_CM) & (g < Z_MAX_CM)
     # ⚑ `+ z_datum_m`. Stored heights are relative to the run's datum; M* is
     #   world-absolute. Compare them without this and the whole difference is
     #   the vehicle's starting elevation -- 162 cm on seq 07 -- dressed up as
@@ -230,3 +261,24 @@ def memory_bytes(allocation) -> int:
     from vrgrid.gpu.allocators import bytes_allocated
 
     return bytes_allocated(allocation)
+
+
+def saturated_fraction_per_ring(gm, reference):
+    """Share of each ring's OBSERVED cells sitting at the vertical band edge.
+
+    The companion to `_compared`'s exclusion of them. A high value does not
+    mean the map is wrong -- it means the 8 m band cannot hold this sequence's
+    relief, so the map has forgotten ground the vehicle drove past, and the
+    per-ring accuracy figures describe only what is still inside the band.
+    Report it beside the RMSE or the RMSE is quoted over an unstated subset.
+    """
+    out = {}
+    for ring in range(len(gm.schedule.rings)):
+        slots, _, _ = _ring_cells(gm, ring)
+        seen = gm.soa["obs_count"][slots] > 0
+        if not seen.any():
+            out[ring] = float("nan")
+            continue
+        g = gm.soa["ground_height"][slots][seen]
+        out[ring] = float(np.mean((g <= Z_MIN_CM) | (g >= Z_MAX_CM)))
+    return out

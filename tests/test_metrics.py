@@ -24,6 +24,7 @@ from vrgrid.eval.metrics import (
 )
 from vrgrid.eval.reference_map import build_from_scans
 from vrgrid.eval.synthetic import read_sequence, terrain_height_m, write_sequence
+from vrgrid.grid.quantise import quantise_variance_cm2
 from vrgrid.grid.query import slot_of
 from vrgrid.grid.schedule import load
 
@@ -67,6 +68,10 @@ def test_rmse_is_zero_when_the_map_holds_the_reference_mean(scene):
         sel = n_ref > 0
         fresh.soa["ground_height"][slots[sel]] = np.rint(mean[sel]).astype(np.int16)
         fresh.soa["obs_count"][slots[sel]] = 5
+        # A cell that HOLDS a height was fused, so it carries a variance.
+        # Code 0 means "never fused" (fusion.initialise), and `_compared`
+        # excludes those -- a hand-built fixture has to look like a real cell.
+        fresh.soa["height_variance"][slots[sel]] = quantise_variance_cm2(1.0)
 
     rmse = height_rmse_per_ring(fresh, reference)
     for ring, v in rmse.items():
@@ -88,6 +93,10 @@ def test_rmse_grows_with_the_error_written_in(scene):
             sel = n_ref > 0
             fresh.soa["ground_height"][slots[sel]] = np.rint(mean[sel] + offset)
             fresh.soa["obs_count"][slots[sel]] = 5
+            # A cell that HOLDS a height was fused, so it carries a variance.
+            # Code 0 means "never fused" (fusion.initialise) and `_compared`
+            # excludes those -- a fixture has to look like a real cell.
+            fresh.soa["height_variance"][slots[sel]] = quantise_variance_cm2(1.0)
         seen.append(height_rmse_per_ring(fresh, reference)[1])
 
     assert seen[0] < seen[1] < seen[2]
@@ -135,6 +144,10 @@ def test_rho_is_one_when_the_estimate_is_unbiased(scene):
         sel = n_ref > 0
         fresh.soa["ground_height"][slots[sel]] = np.rint(mean[sel]).astype(np.int16)
         fresh.soa["obs_count"][slots[sel]] = 5
+        # A cell that HOLDS a height was fused, so it carries a variance.
+        # Code 0 means "never fused" (fusion.initialise), and `_compared`
+        # excludes those -- a hand-built fixture has to look like a real cell.
+        fresh.soa["height_variance"][slots[sel]] = quantise_variance_cm2(1.0)
 
     out = coarsening_ratio_per_ring(fresh, reference)
     for ring, c in out.items():
@@ -157,6 +170,10 @@ def test_rho_rises_when_the_estimate_is_biased_beyond_the_terrain(scene):
         sel = n_ref > 0
         fresh.soa["ground_height"][slots[sel]] = np.rint(mean[sel] + 30)
         fresh.soa["obs_count"][slots[sel]] = 5
+        # A cell that HOLDS a height was fused, so it carries a variance.
+        # Code 0 means "never fused" (fusion.initialise), and `_compared`
+        # excludes those -- a hand-built fixture has to look like a real cell.
+        fresh.soa["height_variance"][slots[sel]] = quantise_variance_cm2(1.0)
 
     out = coarsening_ratio_per_ring(fresh, reference)
     for ring, c in out.items():

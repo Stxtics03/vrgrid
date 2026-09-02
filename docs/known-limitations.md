@@ -314,23 +314,66 @@ Two earlier conclusions here were wrong and are withdrawn.
   have mattered, because the clipping happens in `quantise_height` *before* any
   weight is applied.
 
-### ⚑ STILL OPEN: sequence 08 cannot be evaluated through this harness
+### The moving datum, and where 08 actually fails
 
-A **fixed** datum is not enough for a sequence with real relief. Sequence 08
-climbs from world z −1.65 m to +5.63 m in 40 frames and +45.7 m over the
-sequence, against an 8 m band. Measured with a fixed datum: **552,369 of
-3,266,241 ground returns still clip — 16.91%.**
+`gpu.shift.track_datum` now holds the one implementation and both callers use
+it — `MapEngine._track_datum` delegates, and `run_sequence` calls it per frame.
+The band slides in whole 1 m steps and **re-bases every stored height** as it
+moves, so all cells stay relative to the same current datum and every
+difference the map computes is unaffected.
 
-08 is the *reporting* sequence. Until `run_sequence` grows the moving datum
-`MapEngine` already has — which also means re-basing stored heights when the
-datum moves, or every difference the feature detectors compute acquires a
-spurious step — **no number produced from `run_sequence` on 08 is
-trustworthy.** That includes the curb, pothole and confidence figures
-previously quoted here from 08; §3 now quotes 07.
+Two metric defects surfaced while proving it, and both are fixed:
 
-Paths that go through `MapEngine` instead — the timing table, the ablation
-table and the ghost-removal figure — are unaffected, because the engine has
-always tracked its datum.
+1. **`obs_count > 0` was not the right predicate.** It counts every return,
+   and a cell whose returns were all NON-ground has no measured ground height
+   — `fuse` leaves it at its initial 0, and 0 cm is not a neutral height, it is
+   *the datum*. So the metric's answer moved with the datum: on seq 07, shifting
+   it from −1.64 m to −2.00 m took ring 1's RMSE from 3.19 to 6.15 cm without
+   changing a single measurement. `height_variance > 0` is the predicate — the
+   codec maps code 0 to maximum variance exactly so "never fused" is
+   distinguishable. The metric is now datum-independent, verified by A/B.
+2. **Band-saturated cells were being scored.** A cell clamped at the band edge
+   holds the edge, not a measurement. Excluded, and reported by
+   `saturated_fraction_per_ring` so a ring that loses most of itself says so.
+
+**Sequence 07 after all of it** — 40 frames, 5/10/20/40:
+
+| ring | cell | cells | RMSE | mean bias | spread | rho |
+|---|---|---|---|---|---|---|
+| 0 | 5 cm | — | **1.16 cm** | — | — | — |
+| 1 | 10 cm | 47,059 | **1.69 cm** | −0.08 | 1.07 | **1.95** |
+| 2 | 20 cm | 8,323 | **1.02 cm** | +0.14 | 2.40 | **1.11** |
+
+ρ near 1 is the thesis stated numerically: the coarsening cost only what the
+terrain's own sub-cell variability costs.
+
+### ⚑ STILL OPEN: sequence 08, and it is the GROUND MASK, not the datum
+
+08 still reports RMSE 162 cm at ring 1 after every fix above, and the tell is
+its `spread`: **116 cm**. M\* claims 1.16 m of variation *inside a 10 cm cell*.
+That is not terrain, and it is not the map — the reference itself is
+contaminated, and both sides are built from the same mask.
+
+Measured cause:
+
+```
+                 ground fraction   per-frame ground z span (p1-p99)
+    seq 07             44.0%              0.97 m
+    seq 08             66.1%              3.01 m
+```
+
+Two thirds of 08's returns are being called ground, spanning three metres of
+elevation in a single frame. **Patchwork++ is not installed on this machine**
+(`ground._HAVE_PATCHWORKPP` is False), so `real_scans` falls back to
+`ground_from_semantics` — the SemanticKITTI classes `road`, `parking`,
+`sidewalk`, `other-ground` and **`terrain`**. On 08's climb, `terrain` is the
+grassy embankment beside the road, and it legitimately spans metres.
+
+So the fallback is wrong for a sequence with relief, and the fix is to install
+Patchwork++ (`pip install -e ".[perception]"`, already declared) and re-run —
+a geometric ground-plane segmenter will not call an embankment road. Until
+then **08's per-ring numbers, and anything else built on its ground mask, are
+not reportable.** 07 is unaffected: flat, and 44% ground is a sane figure.
 
 ## What is not on this list
 

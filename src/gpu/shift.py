@@ -27,6 +27,7 @@ from dataclasses import dataclass
 
 import numpy as np
 from vrgrid.gpu.allocators import EMPTY_CELL
+from vrgrid.gpu.kernels import CEILING_NONE, Z_MAX_CM, Z_MIN_CM
 
 
 @dataclass
@@ -205,3 +206,72 @@ def flat_slot_into(buf: RingBuffer, ix, iy, out, scratch: dict):
     np.add(out, buf.offset, out=out)
     np.copyto(out, -1, where=np.logical_not(live, out=tmp))
     return out
+
+
+# The vertical band slides in whole steps of this, the way `_track_vehicle`
+# slides the horizontal window in whole cells. Continuous tracking would
+# re-base on every frame; whole steps make it rare.
+Z_DATUM_STEP_M = 1.0
+
+
+def track_datum(grid, datum_m, ego_z_m: float) -> float:
+    """Slide the 8 m vertical band to keep the vehicle inside it. Returns the
+    new datum, and RE-BASES every height already in `grid` to match.
+
+    The vertical counterpart of `_track_vehicle`, and the reason it exists:
+    `kernels.quantise_height` clamps to an 8 m band, and clamped world-absolute
+    that band is a slab from -2 to +6 m above sea level rather than 8 m around
+    the vehicle. On seq 08's 45.7 m climb every nearby cell saturated at the
+    ceiling, `visibility_cleanup` computed viewing angles past the sensor's FOV
+    limit, and ghost removal went inert for 57% of frames. Widening the clamp
+    would also have worked and would have cost the report its memory claim --
+    the dense-3D baseline counts voxels over exactly this extent, so a taller
+    band inflates our own headline ratio. Moving an 8 m band leaves that
+    arithmetic untouched.
+
+    ⚑ Heights are stored RELATIVE to the datum, so moving it means re-basing
+      every height already in the map. That is what makes a moving datum safe
+      for the feature detectors: after re-basing, every cell is relative to the
+      SAME current datum, so differences -- slope, step, curb height, pothole
+      depth -- are unaffected. A datum that moved without re-basing would put a
+      spurious step between any two cells last seen at different elevations.
+
+    ⚑ This allocates (the `seen` mask, 0.91 MB against a 10.92 MB grid) and is
+      the one path in the frame loop that does. It is freed immediately and it
+      is rare: seq 08 crosses a 1 m step 46 times in 4,071 frames. Measured at
+      4.57 ms on a frame that re-bases and 0.23 us on one that does not.
+
+    `datum_m` of None means "first frame": the map is empty, so there is
+    nothing to re-base and the band starts where the vehicle is. That also
+    keeps the first step from being a jump of the sequence's whole elevation.
+    """
+    want = float(np.floor(ego_z_m / Z_DATUM_STEP_M) * Z_DATUM_STEP_M)
+    if datum_m is None:
+        return want
+    if want == datum_m:
+        return datum_m
+
+    delta_cm = round((want - datum_m) * 100.0)
+    ground = grid["ground_height"]
+    ceiling = grid["ceiling_height"]
+    seen = ceiling != CEILING_NONE
+    if abs(delta_cm) >= Z_MAX_CM - Z_MIN_CM:
+        # The band moved further than it is wide, so nothing already in the map
+        # is inside it any more. Saturating in one fill is what the clamp would
+        # do cell by cell, and it avoids widening every height to int32 to hold
+        # an intermediate that is about to be clipped anyway.
+        end = Z_MIN_CM if delta_cm > 0 else Z_MAX_CM
+        ground[:] = end
+        ceiling[seen] = end
+        return want
+
+    # In range, so the subtraction cannot leave int16 on the way: stored heights
+    # are already inside the band and |delta| is below its span. CEILING_NONE is
+    # a sentinel, not a height -- re-basing it would turn "nothing overhead was
+    # ever seen" into a ceiling at the band's edge, and §7.1 would read that as
+    # a clearance failure over the whole map.
+    np.subtract(ground, delta_cm, out=ground)
+    np.clip(ground, Z_MIN_CM, Z_MAX_CM, out=ground)
+    np.subtract(ceiling, delta_cm, out=ceiling, where=seen)
+    np.clip(ceiling, Z_MIN_CM, Z_MAX_CM, out=ceiling, where=seen)
+    return want
