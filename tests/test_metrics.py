@@ -393,6 +393,97 @@ def test_coverage_says_how_little_of_a_coarse_footprint_M_star_saw(scene):
         "sequence is far longer than this fixture or the block is wrong")
 
 
+def test_the_sign_of_the_band_filter_follows_the_terrain_not_the_code():
+    """⚑ Why two real-data measurements of this fix disagreed about its SIGN.
+
+    The band filter drops ring L's stale interior. Whether that raises or lowers
+    RMSE_L depends on which half sits on rougher ground -- the stale interior or
+    the live annulus -- and that is a property of the scene, not of the metric.
+
+    Three scenes, identical but for where the roughness contrast is placed
+    relative to ring 2's inner boundary. Both halves are always rough; only the
+    contrast moves, so neither RMSE can collapse to zero by construction. The
+    third is a control with no contrast at all.
+
+    Measured at 60,000 returns/frame, ring 2, and stable across 10/16/24/32
+    frames: rough-near -37.5 to -48.9%, rough-far +6.1 to +17.4%, control +0.2
+    to +0.9%. **The correction spans 55 percentage points on one codebase, one
+    schedule and one frame count, purely from where the roughness sits.**
+
+    ⚑ There is a SECOND driver and this test is deliberately sized to show it.
+      At the reduced density here the control comes out near -10%, not near
+      zero: the stale population was written at longer range from fewer
+      returns, so it is the worse estimate even on statistically identical
+      ground, and that pushes the correction negative independently of
+      roughness. Its size falls as return density rises, which is why the
+      60,000-point runs show a null control and this one does not.
+
+    So the assertions are the ORDERING and the SPREAD, which hold at both
+    densities, rather than any absolute figure -- the absolutes are exactly the
+    thing that is scene- and sensor-dependent, and asserting one would be
+    asserting the bug this test exists to explain.
+    """
+    from vrgrid.eval.metrics import _cell_centres_m
+    from vrgrid.gpu.kernels import Z_MIN_CM
+    from vrgrid.grid.lattice import ring_of
+    from vrgrid.grid.query import window_cells
+
+    n_frames, step_m, split_m, ring = 10, 2.0, 25.0, 2
+    final_x = (n_frames - 1) * step_m
+    scenes = {"rough_near": (0.15, 0.03), "rough_far": (0.03, 0.15),
+              "control": (0.15, 0.15)}
+
+    def scans(mode, rng):
+        near_amp, far_amp = scenes[mode]
+        for f in range(n_frames):
+            vx = f * step_m
+            r = rng.uniform(1.0, 55.0, 25_000)        # polar: density ~ 1/r
+            th = rng.uniform(-np.pi, np.pi, 25_000)
+            wx, wy = vx + r * np.cos(th), r * np.sin(th)
+            cheb = np.maximum(np.abs(wx - final_x), np.abs(wy))
+            amp = np.where(cheb < split_m, near_amp, far_amp)
+            wz = amp * np.sin(3.1 * wx) * np.cos(2.7 * wy)
+            pose = np.eye(4)
+            pose[0, 3] = vx
+            yield (np.column_stack([wx - vx, wy, wz]),
+                   np.full(25_000, 40, dtype=np.uint32),      # raw `road`
+                   np.ones(25_000, dtype=bool), pose)
+
+    def rmse(gm, ref, banded):
+        buf = gm.buffers[ring]
+        ix, iy = window_cells(buf)
+        slots = np.arange(buf.slots, dtype=np.int64) + buf.offset
+        k = gm.schedule.k(ring)
+        if banded:
+            m = ring_of(*_cell_centres_m(gm, ring, ix, iy), gm.schedule,
+                        gm.speed_ms) == ring
+            ix, iy, slots = ix[m], iy[m], slots[m]
+        n_ref, ref_mean, _ = ref.block_stats(ix * k, iy * k, k)
+        g = gm.soa["ground_height"][slots]
+        keep = ((n_ref > 0) & (gm.soa["obs_count"][slots] > 0)
+                & (gm.soa["height_variance"][slots] > 0)
+                & (g > Z_MIN_CM) & (g < Z_MAX_CM))
+        mine = g[keep].astype(np.float64) + getattr(gm, "z_datum_m", 0.0) * 100.0
+        return float(np.sqrt(np.mean((mine - ref_mean[keep]) ** 2)))
+
+    change = {}
+    for mode in scenes:
+        ref = build_from_scans(
+            (p, l, T) for p, l, _, T in scans(mode, np.random.default_rng(7)))
+        gm = build_gridmap(load(SCHEDULE))
+        run_sequence(gm, scans(mode, np.random.default_rng(7)))
+        before = rmse(gm, ref, banded=False)
+        change[mode] = (rmse(gm, ref, banded=True) - before) / before
+
+    # Monotone in where the roughness was put -- that is the mechanism.
+    assert change["rough_near"] < change["control"] < change["rough_far"], change
+
+    # And the swing is large: moving the contrast alone moves the correction by
+    # more than 15 points, which is why no single factor can post-hoc correct
+    # the pre-fix numbers and the metric had to be fixed instead.
+    assert change["rough_far"] - change["rough_near"] > 0.15, change
+
+
 # --- §9.4: dynamic removal ---------------------------------------------------
 
 

@@ -660,6 +660,41 @@ claim understated by a factor of three and a half, because the unwritten
 interior was counted as unfilled. IoU moves the same way. Those numbers are
 synthetic and want re-running on real sequences.
 
+**⚑ The sign question is answered — mechanistically, without real data.** Two
+measurements of this fix on 07/08 disagreed, first "understated 3–12%", then
+"no consistent bias, −40% to +21%". Neither was reproducible here, so the
+mechanism was tested directly instead: three synthetic scenes, identical but
+for where a roughness contrast sits relative to ring 2's inner boundary. Both
+halves always rough, only the contrast moved. Ring 2, 60,000 returns/frame,
+stable across 10/16/24/32 frames:
+
+| scene | RMSE before | after | change |
+|---|---|---|---|
+| **rough-near** — stale interior is the rough half | 0.95 | 0.49 | **−48.2 %** |
+| **rough-far** — live annulus is the rough half | 1.46 | 1.68 | **+15.1 %** |
+| control — no contrast | 1.66 | 1.67 | +0.6 % |
+
+**The correction spans ~55 percentage points on one codebase, one schedule and
+one frame count, purely from where the roughness sits.** So the "no consistent
+bias, −40% to +21%" report is not noise and not a defect — it is the predicted
+consequence of terrain contrast varying by ring and sequence, and the earlier
+"consistent 3–12%" was the reading that could not have been right.
+
+**The consequence is that no correction factor exists.** A bias with a fixed
+direction could have been divided out of the published numbers in prose; one
+set by the terrain under each ring cannot be. Fixing the metric was the only
+option, which is what this section records. Pinned in
+`test_the_sign_of_the_band_filter_follows_the_terrain_not_the_code`.
+
+⚑ **A second driver, smaller and disclosed:** the stale population was written
+at longer range from fewer returns, so it is the worse estimate even on
+identical ground, pushing the correction negative independently of roughness.
+It shrinks as return density rises — at 25,000 returns/frame the control reads
+≈ −10 %, at 60,000 it reads ≈ 0. **Prediction for the real-data A/B: each
+sequence's sign should track its roughness contrast across each ring's inner
+boundary, not a constant.** That is falsifiable and is the thing to check when
+07/08 land.
+
 **⚑ Open, and it touches §2b's headline.** ρ = 1.45 median (ring 1, n = 11) is
 the claim we lead with. This fix changes the scored population, and on the
 synthetic sequence ρ moves by up to **0.06 per ring**. **§2b's table should be
