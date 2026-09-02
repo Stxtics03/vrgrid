@@ -96,6 +96,54 @@ class ReferenceMap:
             self._sat = (sat(obs.astype(np.float64)), sat(h), sat(h * h))
         return self._sat
 
+    def block_class(self, i_lo, j_lo, k: int):
+        """Majority semantic class in each k x k block, over OBSERVED cells.
+
+        The companion to `block_stats`, which answers heights only. Without it
+        `costmap_from_reference` cannot set §7.1 bit 4 at all, and the two
+        sides of eq. (23) end up disagreeing about semantics: on the synthetic
+        scene M* carried 0 class penalties while the two frozen schedules
+        carried 18, so a schedule was charged w_class for correctly labelling
+        ground the reference had no opinion about. Both paths are scored on
+        M*, so that is regret for routing around a hazard the scorer cannot
+        see -- a defect in the reference, not in the schedule.
+
+        Majority, not mode-of-everything: unobserved cells (count 0) hold a
+        default class byte and must not vote, or a sparsely-observed block is
+        decided by the cells nobody looked at.
+
+        ⚑ Not summed-area, unlike `block_stats`. A mode does not decompose
+          into prefix sums, and per-class tables would be 20 x H x W -- about
+          a gigabyte on a 5 cm reference. This gathers each block's cells
+          instead, which is O(k^2) per block and fine at planning-window
+          sizes (44 x 44 blocks of 5 x 5 is ~48,000 lookups); it is not
+          something to call per frame over the whole map.
+        """
+        i_lo = np.asarray(i_lo, dtype=np.int64)
+        j_lo = np.asarray(j_lo, dtype=np.int64)
+        H, W = self.shape
+
+        off = np.arange(k, dtype=np.int64)
+        rows = i_lo[..., None, None] - self.i0 + off[:, None]
+        cols = j_lo[..., None, None] - self.j0 + off[None, :]
+        inside = (rows >= 0) & (rows < H) & (cols >= 0) & (cols < W)
+        r = np.clip(rows, 0, H - 1)
+        c = np.clip(cols, 0, W - 1)
+
+        votes = self.class_id[r, c]
+        valid = inside & (self.count[r, c] > 0)
+
+        flat_votes = votes.reshape(*votes.shape[:-2], -1)
+        flat_valid = valid.reshape(*valid.shape[:-2], -1)
+        best = np.zeros(flat_votes.shape[:-1], dtype=np.uint8)
+        best_n = np.zeros(flat_votes.shape[:-1], dtype=np.int64)
+        for cid in np.unique(flat_votes[flat_valid]) if flat_valid.any() else ():
+            n = ((flat_votes == cid) & flat_valid).sum(axis=-1)
+            take = n > best_n
+            best = np.where(take, np.uint8(cid), best)
+            best_n = np.where(take, n, best_n)
+        return best
+
     def block_stats(self, i_lo, j_lo, k: int):
         """(n, mean, var) of reference heights in each k x k block.
 
@@ -158,8 +206,27 @@ class _Builder:
         self.classes = []
         self.bounds = None
 
-    def add(self, xyz_world, label_id):
+    def add(self, xyz_world, label_id, is_ground=None):
+        """Accumulate one scan's static returns.
+
+        ⚑ `is_ground` is not optional in spirit, only in signature. M* is the
+          reference GROUND surface (§9.1) and the per-ring metric compares it
+          against the map's `ground_height`, which is fused from ground returns
+          only. Without a mask this keeps every static return -- a 10 m
+          building facade lands in the same 5 cm column as the road and drags
+          the reference height metres above the surface it is supposed to be.
+
+          That could not show up before real data: the synthetic writer's scans
+          are ground everywhere, so "every static return" and "every ground
+          return" were the same set. On sequence 07 they are not, and the
+          per-ring table came out with a **+139.86 cm bias and rho 9.51**
+          against a coarsening error that should be under a centimetre.
+
+          None is still accepted so the synthetic path is byte-identical.
+        """
         keep = ~is_moving(label_id)
+        if is_ground is not None:
+            keep &= np.asarray(is_ground, dtype=bool)
         pts = np.asarray(xyz_world, dtype=np.float64)[keep]
         if pts.size == 0:
             return
@@ -204,7 +271,11 @@ class _Builder:
 
 def build_from_scans(scans, out_path=None, cell_m: float = 0.05) -> ReferenceMap:
     """M* from an iterable of (points in VEHICLE frame, RAW label ids,
-    vehicle -> world 4x4).
+    [is_ground,] vehicle -> world 4x4).
+
+    The optional third element is a ground mask. Pass it for real data: M* is
+    the reference GROUND surface and without the mask a building facade is
+    averaged into the road. See `_Builder.add`.
 
     This is the whole of §9.1 and it does not care where the scans came from,
     which is the point: the synthetic sequence and SemanticKITTI go through
@@ -220,10 +291,18 @@ def build_from_scans(scans, out_path=None, cell_m: float = 0.05) -> ReferenceMap
       scans and any disagreement between them is scored as map error.
     """
     b = _Builder(cell_m)
-    for pts, labels, pose in scans:
+    for item in scans:
+        # 3-tuple keeps every static return, which is what the synthetic writer
+        # wants because all of its returns ARE ground. 4-tuple carries the same
+        # `is_ground` mask the map is built with, which is what real data needs
+        # -- see `_Builder.add` for what happens without it.
+        if len(item) == 4:
+            pts, labels, ground, pose = item
+        else:
+            (pts, labels, pose), ground = item, None
         pts = np.asarray(pts, dtype=np.float64)
         world = pts @ np.asarray(pose)[:3, :3].T + np.asarray(pose)[:3, 3]
-        b.add(world, labels)
+        b.add(world, labels, ground)
     ref = b.finish()
     if out_path is not None:
         ref.save(out_path)

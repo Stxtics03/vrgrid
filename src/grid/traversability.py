@@ -106,40 +106,94 @@ def drivable_ids(thresholds=None) -> np.ndarray:
     return np.array(sorted(ids[n] for n in names), dtype=np.int32)
 
 
-def gradient(ground_cm, side: int, cell_m: float):
-    """Central differences over the four neighbours. Math §7.1 eq. (22).
+def baseline_k(cell_m: float, baseline_m=None) -> int:
+    """Half-width, in cells, of the §7.1 finite-difference stencil.
 
-        dz/dx = (z[i+1,j] - z[i-1,j]) / (2 c_L)
+    Eq. (22) differenced over ONE cell measures height change per metre *at
+    the cell scale*, so a step discontinuity reads steeper the finer the
+    lattice. §4.1's 12 cm kerb is a gradient of 1.200 at 5 cm, 0.600 at 10 cm
+    and 0.240 at 25 cm -- against one frozen `tan(theta_max) = 0.364`. The
+    same physical kerb is therefore a wall on the fine rings and flat ground
+    on the coarse ones and on the 25 cm reference, which is what put the two
+    sides of eq. (23) on different geometry.
 
-    In and out in the ring's flat slot order. Dimensionless (m/m): heights are
-    centimetres and `cell_m` is metres, so the 100 is the unit conversion and
-    not a fudge -- suffix discipline, CLAUDE.md.
+    A fixed physical baseline removes the scale: difference over +/-k cells
+    spanning `baseline_m`, and divide by the distance actually spanned. k is
+    at least 1, so a ring whose cells are already coarser than the baseline is
+    left exactly as it was -- it cannot resolve the baseline, and falling back
+    to one cell says so instead of inventing a sub-cell sample. That also
+    makes this a no-op wherever `2 * cell_m >= baseline_m`, which is why the
+    coarse rings, M*, and every existing caller passing no baseline are
+    unaffected.
+    """
+    if baseline_m is None:
+        return 1
+    return max(1, round(float(baseline_m) / (2.0 * cell_m)))
 
-    The values on the window border are computed by wrapping and are WRONG;
-    `bitfield()` masks them. They are returned rather than nan-ed so the array
-    stays int-clean and the caller decides.
+
+def _stencil(side: int, k: int):
+    """Clipped +/-k index arrays and the distance each pair actually spans.
+
+    Clipped, not wrapped: rolling compares the north edge of the ring against
+    ground `side * cell_m` to the south. Near the border the stencil shortens
+    and the divisor shortens with it, so the quotient stays a real gradient in
+    m/m rather than one scaled by a distance that was never spanned. The
+    outermost cell of each edge is still handed bit 5 by `border_mask()` --
+    a one-sided difference at the map edge is exactly the plausible number
+    §7.1's note refuses to fabricate.
+    """
+    idx = np.arange(side)
+    ip = np.minimum(idx + k, side - 1)
+    im = np.maximum(idx - k, 0)
+    span_cells = (ip - im).astype(np.float64)
+    return ip, im, np.where(span_cells > 0, span_cells, np.inf)
+
+
+def gradient(ground_cm, side: int, cell_m: float, baseline_m=None):
+    """Central differences over a fixed physical baseline. Math §7.1 eq. (22).
+
+        dz/dx = (z[i+k,j] - z[i-k,j]) / (2 k c_L),   k = baseline_m / (2 c_L)
+
+    With `baseline_m=None` this is k=1, the one-cell form the section was
+    written with. In and out in the ring's flat slot order. Dimensionless
+    (m/m): heights are centimetres and `cell_m` is metres, so the 100 is the
+    unit conversion and not a fudge -- suffix discipline, CLAUDE.md.
+
+    The values on the window border are one-sided; `bitfield()` masks them.
+    They are returned rather than nan-ed so the array stays int-clean and the
+    caller decides.
     """
     z = np.asarray(ground_cm, dtype=np.float64).reshape(side, side) / 100.0
-    dzdx = (np.roll(z, -1, axis=1) - np.roll(z, 1, axis=1)) / (2.0 * cell_m)
-    dzdy = (np.roll(z, -1, axis=0) - np.roll(z, 1, axis=0)) / (2.0 * cell_m)
+    ip, im, span_cells = _stencil(side, baseline_k(cell_m, baseline_m))
+    dzdx = (z[:, ip] - z[:, im]) / (span_cells * cell_m)[None, :]
+    dzdy = (z[ip, :] - z[im, :]) / (span_cells * cell_m)[:, None]
     return dzdx.reshape(-1), dzdy.reshape(-1)
 
 
-def max_step_cm(ground_cm, side: int):
+def max_step_cm(ground_cm, side: int, cell_m: float | None = None,
+                baseline_m=None):
     """max|z_c - z_nbr| over the 4-neighbourhood, in centimetres. Bit 2.
 
     The maximum, not the mean: a cell with three flat neighbours and one 20 cm
     kerb is a kerb, and averaging it away is how a step disappears from a map
     that still looks correct.
+
+    The neighbour is taken at the same +/-k as the gradient, so the step is
+    read over a fixed physical distance too. Without that, bit 2 scales the
+    other way from bit 1: a 1.5% ramp steps 1.5 mm across a 10 cm cell and
+    12 mm across an 80 cm one, and the coarse map calls a ramp a kerb. `cell_m`
+    is optional so that callers testing the one-cell form need not supply it.
     """
     z = np.asarray(ground_cm, dtype=np.int32).reshape(side, side)
-    diffs = [np.abs(np.roll(z, s, axis=a) - z) for a in (0, 1) for s in (-1, 1)]
+    k = 1 if cell_m is None else baseline_k(cell_m, baseline_m)
+    ip, im, _ = _stencil(side, k)
+    diffs = [np.abs(z[:, ip] - z), np.abs(z[:, im] - z),
+             np.abs(z[ip, :] - z), np.abs(z[im, :] - z)]
     return np.maximum.reduce(diffs).reshape(-1)
 
 
 def border_mask(side: int) -> np.ndarray:
-    """The one-cell border of a ring window, where a central difference would
-    wrap onto the opposite edge of the map."""
+    """The one-cell border of a ring window, where the stencil is one-sided."""
     m = np.zeros((side, side), dtype=bool)
     m[0, :] = m[-1, :] = m[:, 0] = m[:, -1] = True
     return m.reshape(-1)
@@ -184,11 +238,11 @@ def bitfield(soa, ring_slice: slice, side: int, cell_m: float, thresholds=None):
     # (confidence), which is the honest statement: not "there is a step here"
     # but "I have not looked". Both are untraversable; only one is true, and
     # only one lets a planner tell an obstacle from a hole in the data.
+    baseline_m = t.get("baseline_m")
+    k = baseline_k(cell_m, baseline_m)
+    ip, im, _ = _stencil(side, k)
     seen = (n >= 1).reshape(side, side)
-    geometric = seen.copy()
-    for axis in (0, 1):
-        for shift in (-1, 1):
-            geometric &= np.roll(seen, shift, axis=axis)
+    geometric = (seen & seen[:, ip] & seen[:, im] & seen[ip, :] & seen[im, :])
     geometric = geometric.reshape(-1)
 
     # bit 0 -- clearance
@@ -196,13 +250,14 @@ def bitfield(soa, ring_slice: slice, side: int, cell_m: float, thresholds=None):
     out |= np.where(ceiling - ground < h_vehicle_cm, TRAV_CLEARANCE, 0).astype(np.uint8)
 
     # bit 1 -- slope, compared as tan(theta_max) so no arctan on the hot path
-    dzdx, dzdy = gradient(ground, side, cell_m)
+    dzdx, dzdy = gradient(ground, side, cell_m, baseline_m)
     slope = np.hypot(dzdx, dzdy)
     out |= np.where(geometric & (slope > np.tan(np.radians(t["theta_max_deg"]))),
                     TRAV_SLOPE, 0).astype(np.uint8)
 
     # bit 2 -- step
-    out |= np.where(geometric & (max_step_cm(ground, side) > t["s_max_m"] * 100.0),
+    out |= np.where(geometric & (max_step_cm(ground, side, cell_m, baseline_m)
+                                 > t["s_max_m"] * 100.0),
                     TRAV_STEP, 0).astype(np.uint8)
 
     # bit 3 -- roughness. The stored variance is a log code, in cm^2 once

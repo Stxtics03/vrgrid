@@ -248,3 +248,75 @@ def test_the_moving_car_actually_moves_in_the_world(sequence):
     assert (steps > 1.0).all(), (
         f"the moving car advanced {steps} m/frame in the world -- a label "
         "that says moving on geometry that does not")
+
+
+# --- which pose file a sequence is read with ---------------------------------
+
+def test_pose_source_defaults_per_sequence():
+    """08 reads SemanticKITTI's SLAM poses; everything else the official GT.
+
+    Not a preference. Measured as the median absolute ground-height
+    disagreement between consecutive frames in 20 cm cells both frames saw:
+    seq 07 is 0.49 cm on GT and 0.66 on SLAM, so GT wins; seq 08 is 16.63 cm on
+    GT and 1.04 on SLAM. 08's GT poses put the same patch of road 16.6 cm apart
+    frame to frame, consistently, which accumulates into M* itself and put its
+    per-ring RMSE at 162 cm.
+    """
+    from vrgrid.perception import loader
+
+    assert loader.pose_source("08") == "slam"
+    assert loader.pose_source("00") == "slam"
+    for seq in ("01", "02", "06", "07", "09", "10"):
+        assert loader.pose_source(seq) == "gt", seq
+
+
+def test_the_pose_source_can_be_forced(monkeypatch):
+    """So the comparison above stays reproducible, and so a reviewer can ask
+    'what does 08 look like on GT poses' without editing the source."""
+    from vrgrid.perception import loader
+
+    monkeypatch.setenv("VRGRID_POSE_SOURCE", "gt")
+    assert loader.pose_source("08") == "gt"
+    monkeypatch.setenv("VRGRID_POSE_SOURCE", "slam")
+    assert loader.pose_source("07") == "slam"
+
+    monkeypatch.setenv("VRGRID_POSE_SOURCE", "sideways")
+    with pytest.raises(ValueError, match="gt.*slam"):
+        loader.pose_source("07")
+
+
+def test_only_08_needs_the_slam_poses():
+    """The per-sequence default, justified across every labelled sequence.
+
+    Median absolute ground-height disagreement between consecutive frames, in
+    20 cm cells both frames saw, measured 2 Sep on all of 00-10:
+
+        seq    GT poses   SLAM poses          seq    GT poses   SLAM poses
+         00      2.27cm       1.05cm           06      1.32cm       1.23cm
+         01      1.43cm       1.38cm           07      0.47cm       0.64cm
+         02      1.20cm       1.20cm           08     16.53cm       1.04cm
+         03      1.97cm       1.24cm           09      1.21cm       1.26cm
+         04      1.25cm       1.11cm           10      1.19cm       1.20cm
+         05      1.02cm       1.00cm
+
+    08 is the only pathological one on THAT measure -- 16x worse on GT, and the
+    reason its per-ring RMSE read 162 cm before the switch.
+
+    ⚑ But per-frame agreement is a weak predictor and this list must not be
+      chosen from it alone. Seq 00 disagrees by only 2.27 cm/frame and yet
+      ACCUMULATES a mean bias of -13.95 cm by ring 3, where seq 03 at a
+      comparable 1.97 cm/frame accumulates -0.80. Switching 00 to SLAM takes
+      ring 2's bias from -9.85 to -0.44 cm and ring 3 RMSE from 26.03 to 13.57.
+      Seq 06, the next worst accumulator at -5.80, was tested the same way and
+      is a wash, so it stays on GT. Only sequences with a MEASURED win are
+      overridden.
+
+    This test exists so the default cannot quietly widen to sequences that do
+    not need it, or narrow away from the one that does.
+    """
+    from vrgrid.perception import loader
+
+    assert loader.POSE_SOURCE_BY_SEQUENCE == {"00": "slam", "08": "slam"}, (
+        "the per-sequence override list changed -- re-measure before widening "
+        "it; only 00 and 08 were shown to need SLAM poses")
+    assert loader.POSE_SOURCE_DEFAULT == "gt"

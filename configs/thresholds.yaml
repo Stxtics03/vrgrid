@@ -16,9 +16,95 @@ traversability:
   h_vehicle_m: 1.8         # bit 0  clearance
   theta_max_deg: 20.0      # bit 1  slope, compared as tan(theta_max)
   s_max_m: 0.15            # bit 2  step, max |z_c - z_nbr| over 4-neighbours
+  baseline_m: 0.50         # bits 1 and 2 are differenced over THIS distance,
+                           # not over one cell. Without it the same 12 cm kerb
+                           # is a gradient of 1.200 at 5 cm and 0.240 at 25 cm
+                           # against one frozen theta_max, so a feature is a
+                           # wall on the fine rings and flat ground on the
+                           # coarse ones and on M* -- the eq. (23) asymmetry.
+                           # Bounded by the scene, not by taste: it must be
+                           # > 0.12/tan(20 deg) = 0.33 m for the 12 cm kerb to
+                           # read passable at EVERY cell size, and
+                           # < 0.40/tan(20 deg) = 1.10 m for the 40 cm pothole
+                           # rim to still fail. 0.50 m is the middle of that
+                           # window. A ring coarser than baseline_m/2 falls
+                           # back to one cell, so this is a no-op at 40 cm and
+                           # 80 cm and at the 25 cm planning lattice.
   sigma2_max_m2: 0.0025    # bit 3  roughness, (5 cm)^2
   n_min: 3                 # bit 5  confidence -- below this, fail safe
   drivable_classes: [road, parking, sidewalk, other-ground, terrain]  # bit 4
+
+# --- named features (math §7.4) ---------------------------------------------
+# The problem statement names curbs and potholes as the reason a 2D grid is not
+# enough. These are FEATURES, not traversability bits: §7.1 says whether the
+# vehicle can be somewhere, this says what is there. Reported alongside the
+# bitfield and never folded into it -- a 12 cm kerb is passable and is still a
+# kerb, and a planner wants both facts.
+features:
+  min_obs: 1               # NOT traversability.n_min. n_min = 3 asks "may the
+                           # vehicle drive here"; this asks "is this height a
+                           # measurement or the default 0". One return answers
+                           # that, and it is where bitfield()'s own `geometric`
+                           # mask draws the line. Set to 3 and the detectors go
+                           # silent on a sparse map -- 1.2% of ring 0 survives
+                           # a five-cell stencil at n_min, and none of it is a
+                           # kerb. Sparse-cell noise is rejected by the run
+                           # test and the rim pairs, not by this.
+  curb:
+    min_height_m: 0.05     # below this is road texture, not a kerb
+    max_height_m: 0.25     # above this is a wall or a vehicle, not a kerb
+    baseline_m: 0.20       # SHORT on purpose. §7.1's 0.50 m baseline smears a
+                           # kerb into a gentle slope, which is the right
+                           # answer for "can I climb it" and the wrong one for
+                           # "where is the edge".
+                           #
+                           # ⚑ TRIED 0.30 AND REVERTED, 2 Sep. Chosen from
+                           #   three sequences, where it raised the ring-0
+                           #   median (07 8.5->9.1, 08 8.6->9.8, 05 9.1->9.5).
+                           #   Across all ELEVEN it raises the median 0.7 cm
+                           #   and nearly TRIPLES the cross-sequence spread:
+                           #
+                           #       0.20 m   median 8.2   range 8.1-9.1   sd 0.36
+                           #       0.30 m   median 8.9   range 7.3-10.2  sd 0.89
+                           #
+                           #   The tight band is the claim -- eleven
+                           #   independent recordings, different dates and
+                           #   calibrations, agreeing to 1.0 cm. Trading it for
+                           #   0.7 cm of median is trading the result for the
+                           #   number. Three sequences were not enough to pick
+                           #   this and eleven were.
+                           #
+                           # ⚑ It also only ever moved ring 0. `baseline_k` is
+                           #   an integer and `round(0.30/(2*0.10))` is
+                           #   round(1.4999999999999998) = 1, so at 10 cm cells
+                           #   and coarser the span stays 2*cell_m whatever
+                           #   this says. Below baseline_m/2 the knob does
+                           #   nothing, which is worth knowing before tuning it.
+    min_run_cells: 3       # a kerb is a line; a lone raised cell is a rock.
+                           # 3 = the cell plus its two perpendicular
+                           # neighbours, which is what detect_curbs tests.
+  pothole:
+    min_depth_m: 0.08      # under 8 cm is a patch or a seam
+    max_depth_m: 0.50      # over 50 cm it is not a pothole. Bounded above for
+                           # the same reason the curb band is: on seq 08 ring 2
+                           # this found 156 "potholes" at a median 71.5 cm and
+                           # a p90 of 200 cm -- ditches, kerb-line drop-offs
+                           # and the space under parked cars. Those are real
+                           # hazards and they are a different detector.
+    rim_baseline_m: 0.75   # the surface is measured on a ring this far out --
+                           # wider than the 0.60 m pothole of §1.4 so the rim
+                           # samples land on intact road
+    min_rim_pairs: 2       # of 4 OPPOSED rim axes. Pairs, not samples: a rim
+                           # seen on one side only is a slope reading, not a
+                           # surface, and it turns every downgrade at the
+                           # window edge into a field of potholes.
+    max_depressed_rim: 0.5 # if more than half the rim is down too this is a
+                           # dip, a ditch or a downgrade -- not a pothole
+    max_rim_spread_m: 0.08 # the rim must agree with itself. Half a rim on the
+                           # road and half on a 12 cm kerb reads the whole
+                           # carriageway as a 10 cm pothole; if the surface
+                           # spans more than this there is no single surface
+                           # for a hole to be in.
 
 # --- occupancy ---------------------------------------------------------------
 occupancy:
@@ -117,13 +203,40 @@ visibility:
   # scratch at 64 B per cell against a float32 range image, exactly the way
   # `scatter.max_points_per_frame` sizes the scatter scratch.
   #
-  # ⚑ PROVISIONAL. 150,000 is an argument, not a measurement: a sweep touches
-  #   ~105,000 distinct cells a frame and the occupied set of a rolling 100 m
-  #   local map should not be several times that. The measurement needs
-  #   SemanticKITTI on disk. Raising it costs 64 B a cell and moves the
-  #   dashboard's total; lowering it silently drops candidates from the far
-  #   field, which is where over-clearing is least likely to be noticed.
-  max_candidate_cells: 150000
+  # MEASURED 2 Sep, and the answer was "do not put a number here".
+  #   scripts/measure_visibility_cap.py, real iter_pipeline -> MapEngine.step,
+  #   schedule 5/10/20/40, peak occupied cells offered to the cleanup:
+  #
+  #       seq 07, all 1,101 frames    max 314,442   (median 187,921)
+  #       seq 08, all 4,071 frames    max 455,714   (median 225,629)
+  #       seq 00, all 4,541 frames    max 278,226   (median 186,183)
+  #
+  #   The old 150,000 was an argument, not a measurement, and it was wrong by
+  #   a factor of three: it dropped 52.3% of 07's peak and 67.1% of 08's,
+  #   untested, in silence.
+  #
+  # ⚑ THE PEAK IS UNPREDICTABLE, not merely large. It does NOT scale with
+  #   sequence length -- 00 is the LONGEST of the three and has the LOWEST
+  #   peak. An earlier version of this note claimed it scaled, from two
+  #   points; the third refutes it. The driver is scene density (08 is a
+  #   dense urban loop, 00 is more open), which nothing here bounds a priori
+  #   for the 19 sequences still unmeasured. A 1.64x spread with no predictor
+  #   is why a fitted number is a bet, and losing it is silent: dropped cells
+  #   keep their occupancy, are never tested, and cannot appear in `cleared`.
+  #
+  #   `null` means "the grid's own slot count", resolved per schedule at
+  #   allocation time by `gpu.allocators.resolve_candidate_cap`. The occupied
+  #   set is bounded by construction -- a cell must exist to be occupied -- so
+  #   this makes truncation IMPOSSIBLE rather than unlikely, and turns the
+  #   bound back into the compile-time guarantee the memory claim is supposed
+  #   to be. 910,000 slots and 58.24 MB of scratch at 5/10/20/40; 570,000 and
+  #   36.48 MB at 5/10/50. Working memory, not map memory, so the cell-count
+  #   ratios in the report are unaffected either way.
+  #
+  #   An explicit integer still works, for a deliberately tighter bound on a
+  #   constrained target. `StepCounters.truncated` now counts whatever such a
+  #   cap drops and `vrgrid.run` prints it, so that trade is visible.
+  max_candidate_cells: null
 
 # --- refinement pool (master v4 §3.4) ---------------------------------------
 refinement_pool:

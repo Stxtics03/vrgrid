@@ -116,11 +116,22 @@ FIELDS = ("schedule", "megabytes", "logical_cells", "worst_ring_rmse_cm",
           "mean_rho", "regret", "frechet_m", "unknown_fraction",
           "blocked_on_reference")
 
+# ⚑ The caveat follows the DATA, not the script -- the same bug this had in
+#   ghost_removal_figure.py, where a figure drawn from 200 real frames of
+#   sequence 08 was stamped "SYNTHETIC". A false label that UNDERSTATES the
+#   result is the kind that survives review.
+def caveat_for(seq):
+    if seq:
+        return (f"REAL: SemanticKITTI sequence {seq}. Ground-truth semantics "
+                "and motion from the .label files; no learned segmentation.")
+    return CAVEAT
+
+
 CAVEAT = ("SYNTHETIC SEQUENCE - NOT REPORTABLE: analytic terrain, "
           "no sensor noise, occlusion or registration error")
 
 
-def collect(root, frames: int) -> list:
+def collect(root, frames: int, seq=None, uniform_half_m=None, family="longitudinal") -> list:
     """Run every schedule over one sequence and return the §8.2 rows.
 
     The two-pass structure is `eval_synthetic`'s and it matters: every map is
@@ -129,25 +140,53 @@ def collect(root, frames: int) -> list:
     number measures fill rate rather than coarsening, and the coarse maps win
     for the wrong reason.
     """
-    reference = build_from_scans(read_sequence(root, "99"))
-    vehicle_x = (frames - 1) * 2.0
-    schedules = ([load(n) for n in sweep.SCHEDULES]
-                 + [sweep.uniform_schedule(c, half_width_m=24.0)
-                    for c in sweep.UNIFORM_CELLS_M])
+    if seq:
+        # The same swap `eval_synthetic --seq` makes. `real_scans` yields the
+        # 4-tuple, so M* gets the SAME ground mask the maps are built with --
+        # without it the reference averages building facades into the road.
+        from vrgrid.eval.harness import final_vehicle_xy, real_scans
+        reference = build_from_scans(real_scans(seq, frames))
+        # ⚑ NOT `(frames - 1) * 2.0`. That is the synthetic car driving straight
+        #   down y = 0; a real one turns, and `costmaps_for`'s own note says a
+        #   window placed about the origin then measures ground the map never
+        #   saw and reports a confident zero.
+        vehicle_x = final_vehicle_xy(seq, frames)
+    else:
+        reference = build_from_scans(read_sequence(root, "99"))
+        vehicle_x = (frames - 1) * 2.0
+    frozen = [load(n) for n in sweep.SCHEDULES]
+    # ⚑ MATCHED EXTENT. The uniform baselines used to be built at
+    #   half_width_m=24.0 against frozen schedules reaching 100 m, so this
+    #   figure's MEMORY AXIS compared a map of 0.0400 km2 with one of 0.0023
+    #   km2 -- a seventeenth of the ground -- and drew them as comparable
+    #   points. It made us look MORE expensive than uniform 10 cm when matched
+    #   to the same ground we are 2.7x cheaper:
+    #
+    #       uniform_10cm @ 24 m    230,400 cells   18.19 MB   <- old baseline
+    #       uniform_10cm @ 100 m 4,000,000 cells   78.50 MB   <- same ground
+    #       5/10/20/40   @ 100 m   745,000 cells   29.06 MB
+    #
+    #   A memory comparison between maps of different extent is not a memory
+    #   comparison. `--uniform-half-width` overrides it so the old figure stays
+    #   reproducible, but the default now matches.
+    half = uniform_half_m or max(s.rings[-1].half_width_m for s in frozen)
+    schedules = frozen + [sweep.uniform_schedule(c, half_width_m=half)
+                          for c in sweep.UNIFORM_CELLS_M]
 
     built = []
     for schedule in schedules:
         gm = build_gridmap(schedule)
         tracks = TrackList(gm.allocation.max_tracks, arrays=gm.allocation.tracks)
-        stats = run_sequence(gm, sweep.vehicle_frame_scans(root, "99"),
-                             tracks=tracks)
+        scans = (real_scans(seq, frames) if seq
+                 else sweep.vehicle_frame_scans(root, "99"))
+        stats = run_sequence(gm, scans, tracks=tracks)
         built.append((schedule, gm, evaluate(gm, reference, stats.frames)))
 
     mask = common_support(*[sweep.costmaps_for(gm, reference, vehicle_x)[1]
                             for _, gm, _ in built])
     rows = []
     for _, gm, result in built:
-        reg = sweep.plan_regret_for(gm, reference, vehicle_x, mask)
+        reg = sweep.plan_regret_for(gm, reference, vehicle_x, mask, family=family)
         rows.append(memory_vs_regret_row(result, reg))
     return rows, float(mask.mean())
 
@@ -182,7 +221,7 @@ def monotonicity(rows) -> str:
             "claim this figure makes -- see this script's docstring.")
 
 
-def draw(rows, path: Path, mask_frac: float, frames: int) -> bool:
+def draw(rows, path: Path, mask_frac: float, frames: int, caveat=CAVEAT) -> bool:
     try:
         import matplotlib
         matplotlib.use("Agg")
@@ -222,7 +261,7 @@ def draw(rows, path: Path, mask_frac: float, frames: int) -> bool:
     ax.text(0.995, 0.985, f"{frames} frames, common support {mask_frac:.0%}",
             transform=ax.transAxes, ha="right", va="top", fontsize=7.5,
             color="0.5")
-    fig.text(0.5, 0.012, CAVEAT, ha="center", fontsize=7.5, color="#B4342F")
+    fig.text(0.5, 0.012, caveat, ha="center", fontsize=7.5, color="#B4342F")
     fig.tight_layout(rect=(0, 0.05, 1, 1))
     fig.savefig(path, bbox_inches="tight")
     fig.savefig(path.with_suffix(".png"), dpi=200, bbox_inches="tight")
@@ -238,14 +277,34 @@ def main() -> None:
                     help="directory for regret.csv and regret.svg/.png")
     ap.add_argument("--keep", default=None,
                     help="keep the generated sequence here instead of a tempdir")
+    ap.add_argument("--query", default="longitudinal",
+                    choices=("longitudinal", "lateral"),
+                    help="which planning-query family R(S) averages over. "
+                         "longitudinal runs the length of the lane (the "
+                         "historical query); lateral crosses it, road to "
+                         "verge, which is the direction that crosses the kerb "
+                         "and therefore the one whose cost depends on cell "
+                         "size.")
+    ap.add_argument("--uniform-half-width", type=float, default=None,
+                    help="half-width in m for the uniform baselines (default: "
+                         "matched to the frozen schedules' reach). 24.0 "
+                         "reproduces the pre-2-Sep figure, whose memory axis "
+                         "compared maps of different extent.")
+    ap.add_argument("--seq", default=None,
+                    help="a REAL SemanticKITTI sequence (needs "
+                         "$VRGRID_DATA_ROOT). Without it, the synthetic writer "
+                         "-- whose numbers are NOT reportable.")
     args = ap.parse_args()
 
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     root = Path(args.keep) if args.keep else Path(tempfile.mkdtemp(prefix="vrgrid-syn-"))
     try:
-        write_sequence(root, "99", n_frames=args.frames)
-        rows, mask_frac = collect(root, args.frames)
+        if not args.seq:
+            write_sequence(root, "99", n_frames=args.frames)
+        rows, mask_frac = collect(root, args.frames, seq=args.seq,
+                                  uniform_half_m=args.uniform_half_width,
+                                  family=args.query)
     finally:
         if args.keep is None:
             shutil.rmtree(root, ignore_errors=True)
@@ -263,14 +322,14 @@ def main() -> None:
           f"by every schedule")
     print(monotonicity(rows))
 
-    if draw(rows, out / "regret.svg", mask_frac, args.frames):
+    if draw(rows, out / "regret.svg", mask_frac, args.frames, caveat_for(args.seq)):
         print(f"\nwrote {out / 'regret.csv'}, {out / 'regret.svg'} "
               f"and {out / 'regret.png'}")
     else:
         print(f"\nwrote {out / 'regret.csv'}. No figure: matplotlib is not "
               f"installed -- `pip install -e \".[report]\"`. The numbers above "
               f"are the deliverable; the plot only renders them.")
-    print(f"\n{CAVEAT}")
+    print(f"\n{caveat_for(args.seq)}")
 
 
 if __name__ == "__main__":

@@ -128,10 +128,11 @@ from vrgrid.cell import (
     TRAV_SLOPE,
     TRAV_STEP,
 )
+from vrgrid.eval.harness import learning_ids
 from vrgrid.grid.lattice import OUTSIDE
 from vrgrid.grid.query import query, slot_of
 from vrgrid.grid.schedule import load_thresholds
-from vrgrid.grid.traversability import drivable_ids
+from vrgrid.grid.traversability import baseline_k, drivable_ids
 
 # Geometry decides, semantics filters (§7.1). These three say the vehicle
 # physically cannot: no weight makes them passable.
@@ -329,9 +330,13 @@ def costmap_from_gridmap(gm, x0_m, y0_m, nx, ny, cell_m=None,
     unknown = n_tot == 0
 
     trav = np.zeros((nx, ny), dtype=np.uint8)
-    trav |= np.where(_slope(z, cell_m) > np.tan(np.radians(t["theta_max_deg"])),
+    # §7.1 (22a): bits 1 and 2 differenced over `baseline_m`, not over one
+    # cell, so the same physical kerb gets one verdict on both sides here.
+    trav |= np.where(_slope(z, cell_m, t.get("baseline_m"))
+                     > np.tan(np.radians(t["theta_max_deg"])),
                      TRAV_SLOPE, 0).astype(np.uint8)
-    trav |= np.where(_max_step(z) > t["s_max_m"], TRAV_STEP, 0).astype(np.uint8)
+    trav |= np.where(_max_step(z, cell_m, t.get("baseline_m")) > t["s_max_m"],
+                     TRAV_STEP, 0).astype(np.uint8)
     trav |= np.where(var > t["sigma2_max_m2"], TRAV_ROUGHNESS, 0).astype(np.uint8)
     trav |= soft & TRAV_ROUGHNESS
     trav |= np.where(np.isin(cls, drivable_ids(th)) & ~unknown, 0,
@@ -379,35 +384,66 @@ def costmap_from_reference(reference, x0_m, y0_m, nx, ny, cell_m=None,
     z = np.where(unknown, np.nan, mean / 100.0)      # cm -> m
 
     trav = np.zeros(z.shape, dtype=np.uint8)
-    trav |= np.where(_slope(z, cell_m) > np.tan(np.radians(t["theta_max_deg"])),
+    trav |= np.where(_slope(z, cell_m, t.get("baseline_m"))
+                     > np.tan(np.radians(t["theta_max_deg"])),
                      TRAV_SLOPE, 0).astype(np.uint8)
-    trav |= np.where(_max_step(z) > t["s_max_m"], TRAV_STEP, 0).astype(np.uint8)
+    trav |= np.where(_max_step(z, cell_m, t.get("baseline_m")) > t["s_max_m"],
+                     TRAV_STEP, 0).astype(np.uint8)
     trav |= np.where(var * 1e-4 > t["sigma2_max_m2"], TRAV_ROUGHNESS, 0).astype(np.uint8)
+    # ⚑ Bit 4 belongs on BOTH sides or on neither, and the reference has the
+    #   data: `ReferenceMap` carries `class_id`, it was only `block_stats` --
+    #   heights alone -- that could not reach it. Left out, M* charged 0 class
+    #   penalties while the two frozen schedules charged 18, and since both
+    #   paths are scored on M* a schedule paid pure regret for routing around
+    #   ground it had correctly labelled non-drivable. Same combiner as
+    #   `costmap_from_gridmap`, so the two sides agree by construction.
+    #   ⚑ RAW ids, not learning ids. `ReferenceMap.class_id` holds what the
+    #     loader gave it -- 40 road, 44 parking, 48 sidewalk -- while
+    #     `drivable_ids()` returns the 19-class learning ids (8, 9, 10, 11,
+    #     16). Compared directly, nothing matches and every passable cell in
+    #     the window reads non-drivable: 1,924 of 1,924 on the synthetic
+    #     scene. The map side goes through fusion, which stores learning ids
+    #     already, so only this side needs the conversion.
+    cls = learning_ids(reference.block_class(i_lo, j_lo, k))
+    trav |= np.where(np.isin(cls, drivable_ids(th)) & ~unknown, 0,
+                     TRAV_CLASS).astype(np.uint8)
     trav |= np.where(n < t["n_min"], TRAV_CONFIDENCE, 0).astype(np.uint8)
 
     return CostMap(cell_m, x0_m, y0_m, _cost_from_bits(trav, unknown, w),
                    unknown, trav)
 
 
-def _neighbour_diffs(z):
-    """|z - z_nbr| over the 4-neighbourhood, nan where either side is unknown.
+def _stencil_1d(n: int, k: int):
+    """Clipped +/-k indices along one axis, and the cells each pair spans."""
+    idx = np.arange(n)
+    ip = np.minimum(idx + k, n - 1)
+    im = np.maximum(idx - k, 0)
+    span = (ip - im).astype(np.float64)
+    return ip, im, np.where(span > 0, span, np.inf)
 
-    Edges are excluded rather than wrapped: rolling would compare the north
+
+def _neighbour_diffs(z, k: int = 1):
+    """|z - z_nbr| at +/-k, nan where either side is unknown.
+
+    Edges are clipped rather than wrapped: rolling would compare the north
     edge against the south one, which is the same mistake the ring windows
-    have to avoid in `traversability.gradient`."""
-    out = []
-    for axis in (0, 1):
-        for shift in (-1, 1):
-            rolled = np.roll(z, shift, axis=axis)
-            sl = [slice(None), slice(None)]
-            sl[axis] = 0 if shift == -1 else -1
-            rolled[tuple(sl)] = np.nan          # the wrapped row/column
-            out.append(np.abs(rolled - z))
-    return out
+    have to avoid in `traversability.gradient`. A clipped edge cell differences
+    against itself and reads 0 -- no evidence of a step, which is the honest
+    value and never crosses `s_max`.
+    """
+    ip0, im0, _ = _stencil_1d(z.shape[0], k)
+    ip1, im1, _ = _stencil_1d(z.shape[1], k)
+    return [np.abs(z[ip0, :] - z), np.abs(z[im0, :] - z),
+            np.abs(z[:, ip1] - z), np.abs(z[:, im1] - z)]
 
 
-def _max_step(z):
+def _max_step(z, cell_m=None, baseline_m=None):
     """max|z - z_nbr| over the 4-neighbourhood, 0 where nothing is comparable.
+
+    The neighbour sits at the same +/-k as `_slope`, so §7.1's bits 1 and 2 are
+    both read over `baseline_m` -- one fixed physical distance -- rather than
+    over one cell, which is what put the same 12 cm kerb on two verdicts. With
+    no `cell_m` this is k=1, the one-cell form.
 
     A cell whose four neighbours are all unknown gives an all-NaN slice, and
     `np.nanmax` warns on those. The warning is not informative here -- an
@@ -418,15 +454,27 @@ def _max_step(z):
     """
     with np.errstate(invalid="ignore"), warnings.catch_warnings():
         warnings.simplefilter("ignore", RuntimeWarning)
-        stacked = np.stack(_neighbour_diffs(z))
+        k = 1 if cell_m is None else baseline_k(cell_m, baseline_m)
+        stacked = np.stack(_neighbour_diffs(z, k))
         return np.nan_to_num(np.nanmax(stacked, axis=0), nan=0.0)
 
 
-def _slope(z, cell_m):
-    """Central differences, eq. (22), on the planning lattice."""
+def _slope(z, cell_m, baseline_m=None):
+    """Central differences, eq. (22), on the planning lattice.
+
+    Over the same fixed physical baseline as `grid.traversability.gradient` --
+    see `baseline_k` there for why the stencil is a distance and not a cell.
+    At the frozen `plan.cell_m` of 0.25 m and a 0.50 m baseline this is k=1
+    and identical to the one-cell form; it is threaded through so that M*
+    follows `plan.cell_m` if that ever moves, rather than silently drifting
+    off the lattice the schedules are scored against.
+    """
+    k = baseline_k(cell_m, baseline_m)
     with np.errstate(invalid="ignore"):
-        dzdx = (np.roll(z, -1, axis=0) - np.roll(z, 1, axis=0)) / (2 * cell_m)
-        dzdy = (np.roll(z, -1, axis=1) - np.roll(z, 1, axis=1)) / (2 * cell_m)
+        ip0, im0, sp0 = _stencil_1d(z.shape[0], k)
+        ip1, im1, sp1 = _stencil_1d(z.shape[1], k)
+        dzdx = (z[ip0, :] - z[im0, :]) / (sp0 * cell_m)[:, None]
+        dzdy = (z[:, ip1] - z[:, im1]) / (sp1 * cell_m)[None, :]
         dzdx[[0, -1], :] = 0.0
         dzdy[:, [0, -1]] = 0.0
         return np.nan_to_num(np.hypot(dzdx, dzdy), nan=0.0)
@@ -610,21 +658,54 @@ def regret(reference_map: CostMap, compressed_map: CostMap, start, goal) -> Regr
     )
 
 
-def common_support(*costmaps) -> np.ndarray:
-    """Cells every map in the comparison has actually observed. Math §8.2.
+def common_support(*costmaps, require_confident: bool = True) -> np.ndarray:
+    """Cells every map in the comparison has adequate EVIDENCE for. Math §8.2.
 
     The ablation is only a comparison of SCHEDULES if every schedule is scored
     on the same ground. A 5 cm ring and a 40 cm ring see very different
     fractions of the same sequence, and the difference is fill rate rather
-    than information loss -- see the confound note at the top of this file.
+    than information loss.
+
+    ⚑ "Observed at all" was not a strong enough bar, and the figure it
+      produced was noise. Masking only on `unknown` equalises COVERAGE and
+      leaves EVIDENCE wildly unequal: a cell one schedule saw three times and
+      another saw thirty passes the mask, but their height estimates differ by
+      sampling rather than by cell size, and the planner routes on the
+      difference. Measured on real sequence 08, R(S) for the SAME schedule by
+      window length:
+
+          5_10_20_40    2.207 -> 0.207 -> 0.000 -> 0.414   (20/40/80/160 frames)
+          uniform_80cm  3.293 ->   inf -> 0.207 -> 0.000
+
+      Not monotone, not stable, and the ordering between schedules inverts.
+      R(S) was measuring how incompletely each map happened to be filled at
+      that window length, far more than how coarsely it represented what it
+      held -- the same fill-rate confound that was fixed in the w_unknown
+      ACCOUNTING, surviving in the PLAN because a sparser map plans
+      differently even when it is no longer charged for sparsity.
+
+      `require_confident` additionally drops cells where any map carries §7.1
+      bit 5 (`n < n_min`), so every schedule is scored where all of them have
+      real evidence. It is the default because a comparison without it is not
+      a comparison of schedules.
+
+    ⚑ This was tried once before and rejected: masking on bit 5 dropped the
+      hazard cells themselves -- a 40 cm hole is what a LiDAR gets fewest
+      returns from -- and disconnected the corridor. That was BEFORE the
+      sub-cell OR in `costmap_from_gridmap` was fixed, when bit 5 covered 100%
+      of the window; it now covers about 0.9%, so the objection no longer
+      holds. `plan()` returns `found=False` if it ever does again, which is
+      loud rather than silent.
 
     Returns a boolean mask to pass to `restrict()`.
     """
-    mask = ~costmaps[0].unknown
-    for c in costmaps[1:]:
+    mask = ~np.asarray(costmaps[0].unknown, dtype=bool)
+    for c in costmaps:
         if not costmaps[0].same_lattice(c):
             raise ValueError("common support needs one lattice for every map")
-        mask &= ~c.unknown
+        mask &= ~np.asarray(c.unknown, dtype=bool)
+        if require_confident and c.trav is not None:
+            mask &= (np.asarray(c.trav) & TRAV_CONFIDENCE) == 0
     return mask
 
 

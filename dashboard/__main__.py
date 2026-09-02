@@ -6,6 +6,7 @@ days before submission the framework must still run and still produce numbers.
     python -m vrgrid.dash                       synthetic mock (Day 0, no data)
     python -m vrgrid.dash --seq 00              real pipeline, colour by class
     python -m vrgrid.dash --seq 00 --color-by ground --frames 60
+    python -m vrgrid.dash --seq 07 --start-frame 660 --frames 30 --save shot.rrd
     python -m vrgrid.dash --seq 00 --save run.rrd      headless -> open with `rerun run.rrd`
 
 Shows: the point cloud coloured by the chosen layer, ring boundaries and the
@@ -23,6 +24,8 @@ def main(argv=None) -> None:
     p = argparse.ArgumentParser(prog="vrgrid.dash")
     p.add_argument("--seq", default=None, help="run the real pipeline on this sequence")
     p.add_argument("--frames", type=int, default=None, help="stop after N frames")
+    p.add_argument("--start-frame", type=int, default=0,
+                   help="start from this frame index (default 0); --frames counts from here")
     p.add_argument("--schedule", default="5/10/20/40")
     p.add_argument(
         "--color-by",
@@ -59,12 +62,15 @@ def main(argv=None) -> None:
                         color_by=args.color_by, ghost_removal=not args.show_ghosts,
                         palette=args.palette, engine=engine)
     n = 0
-    for frame in iter_pipeline(args.seq, args.frames, use_patchworkpp=not args.no_patchworkpp):
+    for frame in iter_pipeline(args.seq, args.frames, use_patchworkpp=not args.no_patchworkpp,
+                               start_frame=args.start_frame):
         if engine is not None:
             engine.step(frame)
         view.log_frame(frame)
         n += 1
-    print(f"{n} frames from sequence {args.seq}" + (f" -> {args.save}" if args.save else ""))
+    start = f" from frame {args.start_frame}" if args.start_frame else ""
+    print(f"{n} frames from sequence {args.seq}{start}"
+          + (f" -> {args.save}" if args.save else ""))
 
 
 if __name__ == "__main__":

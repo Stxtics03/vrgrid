@@ -470,6 +470,33 @@ class Allocation:
         return "\n".join(lines)
 
 
+def resolve_candidate_cap(configured, n_cells: int) -> int:
+    """The §10.4 cleanup's candidate cap. `None` means "the whole grid".
+
+    The occupied set is BOUNDED BY CONSTRUCTION -- a cell must exist to be
+    occupied -- so `n_cells` is a ceiling the cleanup can never exceed, and
+    sizing to it makes truncation impossible rather than merely unlikely.
+    That is what the memory claim is supposed to be: a compile-time bound, not
+    a measurement that held on the sequences someone happened to run.
+
+    ⚑ A measured cap was the alternative and it does not survive contact with
+      the data. The peak occupied set grows with sequence length: 314,442 over
+      sequence 07's 1,101 frames, 455,714 over 08's 4,071 -- frames x3.70,
+      peak x1.45. Sequences 00, 02 and 19 are all LONGER than 08 (19 is 4,981
+      frames, 22% longer), so any number fitted to 07 and 08 is a bet that
+      nobody runs the longer ones. Truncation is silent in the dangerous
+      direction: the dropped cells keep their occupancy, are never tested, and
+      cannot appear in `cleared`.
+
+    An explicit integer is still honoured, for a deliberately tighter bound on
+    a memory-constrained target -- `engine` now counts and reports whatever
+    such a cap drops, so the trade is visible rather than invisible.
+    """
+    if configured is None:
+        return int(n_cells)
+    return int(configured)
+
+
 def allocate(schedule, thresholds: dict | None = None, device: str = "cpu",
              transient_rings: int | None = None, max_tracks: int = 256,
              storage: str = "toroidal", commit_pages: bool = True,
@@ -543,7 +570,8 @@ def allocate(schedule, thresholds: dict | None = None, device: str = "cpu",
     # would copy the whole thing, which is the allocation this scratch exists
     # to avoid.
     vis_cfg = (thresholds or {}).get("visibility", {})
-    max_candidates = vis_cfg.get("max_candidate_cells", 150_000)
+    max_candidates = resolve_candidate_cap(vis_cfg.get("max_candidate_cells"),
+                                           n_cells)
     visibility = (new_visibility_scratch(max_candidates, np.float32)
                   if with_visibility else None)
 

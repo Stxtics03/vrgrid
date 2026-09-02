@@ -72,6 +72,12 @@ class GridMap:
     transient: dict | None = None
     pool: object | None = None
     speed_ms: float = 0.0
+    # World-frame elevation the stored heights are measured FROM. 0.0 is the
+    # world datum and what every caller meant while the band was world-absolute.
+    # `harness.run_sequence` sets it from the first pose so a sequence with
+    # relief does not press against the 8 m band; `metrics` adds it back before
+    # comparing against M*, which is world-absolute.
+    z_datum_m: float = 0.0
     scatter_mode: str = "sorted"
 
     # Where the vehicle is in the WORLD, in metres. Queries arrive in vehicle

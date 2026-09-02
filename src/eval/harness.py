@@ -29,7 +29,7 @@ from vrgrid.eval import metrics
 from vrgrid.eval.reference_map import ReferenceMap
 from vrgrid.gpu.allocators import allocate, bytes_allocated
 from vrgrid.gpu.kernels import CEILING_NONE
-from vrgrid.gpu.shift import RingBuffer, shift
+from vrgrid.gpu.shift import RingBuffer, shift, track_datum
 from vrgrid.grid import gate, traversability
 from vrgrid.grid.fusion import fuse, initialise, scatter
 from vrgrid.grid.pool import RefinementPool
@@ -297,7 +297,7 @@ def learning_ids(raw_labels):
       `separate()` must see the raw ids; this runs after it, on what survived.
     """
     import numpy as _np
-    from vrgrid.grid.fusion import CLASS_MAX
+    from vrgrid.grid.fusion import CLASS_MAX, CLASS_UNLABELLED
 
     ids = _np.asarray(raw_labels, dtype=_np.int64) & 0xFFFF
     if ids.size and int(ids.max()) <= CLASS_MAX:
@@ -305,7 +305,86 @@ def learning_ids(raw_labels):
 
     from vrgrid.perception.semantics import semantic_labels
 
-    return _np.asarray(semantic_labels(ids), dtype=_np.uint8)
+    mapped = _np.asarray(semantic_labels(ids), dtype=_np.int32)
+    # ⚑ `semantic_labels` reports -1 for `unlabeled` (raw 0) and for any id
+    #   outside the SemanticKITTI scheme. Straight through `astype(uint8)` that
+    #   is 255, which does not fit the 5-bit class field, and `scatter_sorted`
+    #   rejects it -- "class ids must be < 32 to pack into the class key" on
+    #   the first real frame. The synthetic sequences write learning ids and
+    #   never contain an unlabelled point, so this could not surface until the
+    #   loader was pointed at sequence 08.
+    #
+    #   Mapped, not dropped: an unlabelled return still has geometry, and a
+    #   wall nobody labelled is still a wall. CLASS_UNLABELLED is in no
+    #   drivable set, so the cell fails safe on §7.1 bit 4 -- which is the
+    #   honest verdict for a class that is not known.
+    return _np.where(mapped < 0, CLASS_UNLABELLED, mapped).astype(_np.uint8)
+
+
+def real_scans(sequence: str, max_frames=None, start_frame: int = 0,
+               use_patchworkpp: bool = True):
+    """SemanticKITTI as `run_sequence` wants it: (points in VEHICLE frame, RAW
+    label ids, is_ground, vehicle -> world T).
+
+    The seam the synthetic writer stands in for. `eval_synthetic`'s docstring
+    has said since Day 0 to "swap `read_sequence` for `perception.loader` and
+    sequence 07 when the download lands" -- this is that swap, in one place
+    rather than copied into each script that needs it.
+
+    Three conversions the loader does NOT do, each of which produced a wrong
+    answer rather than an error when guessed at:
+
+    ⚑ `loader.scans` yields (N, 4) -- x, y, z, INTENSITY -- and `run_sequence`
+      wants (N, 3). Intensity is consumed by the reflectivity path, separately.
+
+    ⚑ The points are in the SENSOR frame; the harness wants the VEHICLE frame.
+      They differ by the 1.73 m HDL-64E mounting height and nothing else
+      (docs/frames.md), so this is `transforms.sensor_to_vehicle()` and not a
+      no-op. Skip it and every height in the map is 1.73 m too high, which
+      looks like a map -- just a wrong one.
+
+    ⚑ `pose` is a raw KITTI row, Camera-0 -> World_cam, and must NOT be handed
+      over as a vehicle -> world transform. `transforms.vehicle_to_world` is
+      the composition that applies `Tr` and the axis permutation, and per
+      `run_sequence`'s own docstring it is the only thing allowed to build it.
+
+    Ground comes from Patchwork++ where the extension is installed and from the
+    semantic labels otherwise -- the same fallback `run/__main__.py` uses.
+
+    For `reference_map.build_from_scans`, which wants a 3-tuple without the
+    ground mask, drop it: `((p, l, T) for p, l, _, T in real_scans(...))`.
+    """
+    from vrgrid.perception import ground, loader, semantics, transforms
+
+    t_s_v = transforms.sensor_to_vehicle()
+    for pts, labels, pose in loader.scans(sequence, max_frames=max_frames,
+                                          start_frame=start_frame):
+        vehicle_pts = transforms.transform_points(pts[:, :3], t_s_v)
+        if use_patchworkpp and ground._HAVE_PATCHWORKPP:
+            gmask = ground.segment_ground(pts)
+        else:
+            gmask = ground.ground_from_semantics(
+                semantics.semantic_labels(labels))
+        yield (vehicle_pts, labels, gmask,
+               transforms.vehicle_to_world(pose, sequence=sequence))
+
+
+def final_vehicle_xy(sequence: str, max_frames=None) -> tuple:
+    """(x, y) of the vehicle's last pose, in world metres.
+
+    The planning window is placed relative to it. On the synthetic sequence
+    that was `(frames - 1) * 2.0` because the car drives straight down y = 0;
+    on a real sequence it turns, and `costmaps_for`'s own note says a window
+    hardcoded about the origin measures ground the map never saw and comes out
+    as a confident zero.
+    """
+    from vrgrid.perception import loader, transforms
+
+    poses = loader.poses(sequence)
+    if max_frames is not None:
+        poses = poses[:max_frames]
+    T = transforms.vehicle_to_world(poses[-1], sequence=sequence)
+    return float(T[0, 3]), float(T[1, 3])
 
 
 def run_sequence(gm: GridMap, scans, recentre: bool = True,
@@ -348,11 +427,25 @@ def run_sequence(gm: GridMap, scans, recentre: bool = True,
     two implementations of one convention is how a map ends up slowly rotating.
     """
     stats = RunStats()
+    datum_set = False
     speed = 0.0
     last_xy = None
     guard = FrameGuard()
 
     for pts, labels, ground, pose in scans:
+        # ⚑ MOVING, and re-basing as it moves. A FIXED datum is enough for
+        #   seq 07 -- ground at -1.67..-1.59 m -- and not for a sequence with
+        #   relief: 08 climbs -1.65 -> +5.63 m in 40 frames and +45.7 m over
+        #   the sequence against an 8 m band, and a fixed datum still clipped
+        #   16.91% of its ground returns. `track_datum` slides the band in
+        #   whole 1 m steps and re-bases every stored height to match, so all
+        #   cells stay relative to the SAME current datum and every difference
+        #   the map computes -- slope, step, curb height, pothole depth -- is
+        #   unaffected. `metrics` adds the final datum back to compare against
+        #   the world-absolute M*.
+        gm.z_datum_m = track_datum(gm.soa, None if not datum_set else gm.z_datum_m,
+                                   float(np.asarray(pose)[2, 3]))
+        datum_set = True
         pose = np.asarray(pose, dtype=np.float64)
         pts = np.asarray(pts, dtype=np.float64)
         world = pts @ pose[:3, :3].T + pose[:3, 3]
@@ -382,9 +475,49 @@ def run_sequence(gm: GridMap, scans, recentre: bool = True,
         # class and the §7.1 predicate marked it untraversable. `pole` and
         # `traffic-sign` became `bicycle` and `motorcycle` the same way. The
         # field is 5 bits since 1 Sep and holds the whole set.
+        # ⚑ HEIGHT COMES FROM THE WORLD FRAME, and `scatter` takes it from
+        #   `pts` -- `fusion.scatter` reads `x, y, z = pts[...]` for the height
+        #   while taking only `wx, wy` from `points_world_m`. So the map stored
+        #   VEHICLE-frame z against WORLD-anchored cells: the same patch of road
+        #   got a different stored height depending on where the vehicle was
+        #   when it saw it, and M* -- which stores world z -- disagreed by the
+        #   vehicle's elevation. On sequence 07 that is a flat +162.50 cm of
+        #   bias with a spread of 1.08 cm, i.e. the entire error.
+        #
+        #   Invisible on the synthetic scene, where the car drives at z = 0 and
+        #   the two frames coincide, which is why it survived to real data.
+        #
+        #   Fixed here rather than in `scatter` because `MapEngine` has its own
+        #   datum machinery (`_z_datum`, added back on readout) and must not be
+        #   disturbed; this is the eval harness, which already composes world
+        #   coordinates per frame, so one more per-frame array is in keeping.
+        #   The deeper question -- whether `scatter` should ever take height
+        #   from a different frame than cell identity -- is worth asking once.
+        #   Heights go in RELATIVE TO A FIXED DATUM for the run. The band is
+        #   8 m wide and world-absolute at datum 0 (kernels.quantise_height),
+        #   which holds for seq 07 -- ground at -1.67..-1.59 m -- and fails for
+        #   seq 08, whose ground climbs -1.65 -> +5.63 m in 40 frames and
+        #   +45.7 m over the sequence. `MapEngine` tracks a moving datum and
+        #   adds it back on readout; this harness had none, so world-absolute
+        #   heights press against the ceiling on any sequence with relief.
+        #
+        #   ONE datum for the whole run, not a moving one, and deliberately:
+        #   a constant offset cancels in every DIFFERENCE the map computes --
+        #   slope, step, curb height, pothole depth -- so §7.1 and §7.4 are
+        #   untouched by it. Only the comparison against M*, which is
+        #   world-absolute, needs it added back, and `metrics` does that from
+        #   `gm.z_datum_m`. A moving datum would not cancel and would put a
+        #   spurious step between any two cells last seen at different times.
+        #
+        #   `height_m` rather than a doctored `pts`: an earlier version of this
+        #   fix overwrote `pts[:, 2]` with the world z, which also corrupted the
+        #   RANGE that `scatter` computes from the same array for the
+        #   measurement-variance weighting. Height and geometry come from
+        #   different frames here and each is now named.
         agg = scatter(gm, pts[static], learning_ids(np.asarray(labels)[static]),
                       np.asarray(ground, dtype=bool)[static],
-                      points_world_m=world[static])
+                      points_world_m=world[static],
+                      height_m=world[static][:, 2] - gm.z_datum_m)
         fuse(gm.soa, agg, gm.thresholds)
 
         # Traversability before the gate: the gate consults the hazard bits,
@@ -429,6 +562,8 @@ class Result:
             c = self.coarsening[ring]
             yield {"ring": ring, "rmse_cm": self.rmse_cm[ring], "rho": c["rho"],
                "il_cm": c["il_cm"], "bias_cm": c["bias_cm"],
+               "mean_bias_cm": c.get("mean_bias_cm"),
+               "above_frac": c.get("above_frac"),
                "spread_cm": c["spread_cm"], "n": c["n"],
                "iou": self.iou[ring], "fill": self.fill[ring],
                "cov": self.coverage.get(ring, float("nan"))}
@@ -456,24 +591,35 @@ def format_result(result: Result, schedule) -> str:
             f"{result.logical_cells:,} logical cells, "
             f"{result.bytes_allocated / 1e6:.2f} MB allocated")
     cols = (f"{'ring':>4} {'cell':>6} {'reach':>7} {'cells':>8} {'RMSE':>8} "
-            f"{'bias':>7} {'spread':>7} {'IL':>7} {'rho':>6} {'cov':>6} "
+            f"{'|bias|':>7} {'mean_b':>7} {'spread':>7} {'IL':>7} {'rho':>6} "
+            f"{'cov':>6} "
             f"{'IoU':>6} {'fill':>6}")
     lines = [head, "", cols, "-" * len(cols)]
 
     def fmt(v, w, p=2):
-        return f"{'--':>{w}}" if np.isnan(v) else f"{v:>{w}.{p}f}"   # v != v is nan
+        # None as well as nan: a ring with no comparable cell returns a dict
+        # without the newer keys, and "--" is the honest rendering of both.
+        if v is None or np.isnan(v):
+            return f"{'--':>{w}}"
+        return f"{v:>{w}.{p}f}"
 
     for r in result.rows():
         ring = schedule.rings[r["ring"]]
         lines.append(
             f"{r['ring']:>4} {ring.cell_m * 100:>5.0f}c {ring.half_width_m:>6.0f}m "
             f"{r['n']:>8,} {fmt(r['rmse_cm'], 8)} {fmt(r['bias_cm'], 7)} "
+            f"{fmt(r.get('mean_bias_cm'), 7)} "
             f"{fmt(r['spread_cm'], 7)} {fmt(r['il_cm'], 7)} {fmt(r['rho'], 6)} "
             f"{fmt(r['cov'], 6)} {fmt(r['iou'], 6)} {fmt(r['fill'], 6)}"
         )
     lines += [
         "",
-        "RMSE, bias, spread, IL in cm against M*. rho = IL/spread (§9.3):",
+        "RMSE, |bias|, mean_b, spread, IL in cm against M*. rho = IL/spread (§9.3):",
+        "  |bias| is RMS and mean_b is the SIGNED mean. RMS alone cannot tell",
+        "  'systematically high' from 'randomly scattered', and on real data",
+        "  those are different defects: seq 07 ring 1 reads |bias| 20.7 with a",
+        "  mean of +4.0 (dispersion), ring 2 reads 36.0 with a mean of +23.5",
+        "  (a real offset that grows with range).",
         "  rho ~ 1  coarsening cost only the terrain's own sub-cell variability",
         "  rho >> 1 the estimate is biased beyond that -- schedule too aggressive",
         "cells = cells the ring still SERVES (not every cell in its window: the",

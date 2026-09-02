@@ -62,11 +62,21 @@ world-anchored and a cell never changes ring -- what moves is the vehicle, and
 with it which ring is RESPONSIBLE for a given place. "Migration" below always
 means that responsibility passing inward, never storage being relocated.
 
-Worse, **the confound is asymmetric across the schedules §8.2 compares.** A
-uniform baseline has one ring, `ring_of` always answers 0, and nothing can
-migrate out from under it -- so the money plot charged the foveated schedules
-for stale memory and the uniform grids for none, in the one comparison the
-whole claim rests on.
+⚑ **A uniform baseline has one ring, so it structurally cannot carry this --
+and that is the direct test of how much it costs.** `known-limitations.md` §6
+runs exactly that comparison on seq 07 with the datum fixed: one-ring uniform
+20 cm against the four-ring schedule's ring 2, **-0.26 cm and -0.41 cm**.
+Migration costs nothing measurable in height bias. An earlier version of this
+note claimed the confound distorted §8.2's money plot across schedules; that
+claim is **withdrawn**, because it rested on synthetic runs made before §6's
+datum fix and §6's real-data experiment is the better evidence.
+
+What the defect does change is WHICH CELLS ARE SCORED, so it lands on the
+population metrics rather than on height: ring 3's fill rate read 0.23 against
+0.83 over the cells it actually answers for -- the §1.3 ring-sweep claim
+understated three and a half times, because the unwritten interior counted as
+unfilled. That is a different metric from the one §6 measured and is not
+covered by it.
 
 So `_ring_cells` returns the cells the ring SERVES, not the cells it stores,
 and every metric in this file inherits that. The predicate is `ring_of` on the
@@ -117,17 +127,17 @@ is worse than no number, which is why the 3-12% that was briefly written into
 this file, §9.2 and `known-limitations.md` has been taken out rather than
 swapped for its replacement.
 
-⚑ And an inconsistent sign is an argument FOR this fix, not a reason to weigh
-it against the calendar. A bias with a known direction can be corrected for in
-the write-up without touching the metric; one that swings with where a
-sequence's rough terrain happens to fall relative to the stale region cannot
-be. What is settled is the mechanism, the population size, and that the
-confound was asymmetric across the schedules §8.2 compares. Re-measure on
-07/08 the moment M* exists.
+⚑ And it touches the headline. `known-limitations.md` §2b leads with
+**rho = 1.45 median** at ring 1 over eleven sequences; this fix changes the
+scored population, and rho moves by up to 0.06 per ring on the synthetic
+sequence. **§2b's table should be regenerated with this fix before rho is
+quoted to two decimals.** The finding survives in shape -- 0.06 does not move
+rho out of its band -- but the second decimal is not currently earned.
 """
 
 import numpy as np
 from vrgrid.cell import OCC_OCCUPIED
+from vrgrid.gpu.kernels import Z_MAX_CM, Z_MIN_CM
 from vrgrid.grid.fusion import occupancy_state
 from vrgrid.grid.lattice import ring_of
 from vrgrid.grid.query import window_cells
@@ -190,9 +200,44 @@ def _compared(gm, reference, ring: int, require_observed=True):
 
     keep = n_ref > 0
     if require_observed:
+        # ⚑ `obs_count > 0` is NOT enough: it counts every return, and a cell
+        #   whose returns were all NON-ground has no measured ground height at
+        #   all. `fuse` leaves such a cell's `ground_height` at its initial 0,
+        #   and 0 cm is not a neutral height -- it is THE DATUM. Scoring those
+        #   cells makes the metric depend on where the datum happens to sit:
+        #   on seq 07, moving the datum from -1.64 m to -2.00 m took ring 1's
+        #   RMSE from 3.19 cm to 6.15 cm without changing a single measurement.
+        #   A metric whose answer moves with an arbitrary offset is measuring
+        #   the offset.
+        #
+        #   `height_variance > 0` is the predicate. The variance codec maps
+        #   code 0 to MAXIMUM variance precisely so that "never fused" is
+        #   distinguishable from "fused and confident" (fusion.initialise), so
+        #   a non-zero code means ground evidence actually reached this cell.
         keep &= gm.soa["obs_count"][slots] > 0
+        keep &= gm.soa["height_variance"][slots] > 0
+        # ⚑ And not saturated at the band edge. The map is a LOCAL 8 m band
+        #   that slides with the vehicle (gpu.shift.track_datum); M* is global.
+        #   On a sequence with more relief than the band, ground the vehicle
+        #   has left behind falls out of it and clamps -- 58.6% of seq 08's
+        #   observed cells after only 40 frames of its 45.7 m climb. A clamped
+        #   cell holds the band edge, not a measurement, and scoring it against
+        #   a global reference measures the band rather than the map: it put
+        #   seq 08's ring 1 RMSE at 213 cm.
+        #
+        #   Excluded, not silently: `saturated_fraction_per_ring` reports how
+        #   much of each ring this removes, and a ring that loses most of
+        #   itself is telling you the band is too narrow for the sequence, not
+        #   that the map is accurate over what survives.
+        g = gm.soa["ground_height"][slots]
+        keep &= (g > Z_MIN_CM) & (g < Z_MAX_CM)
+    # ⚑ `+ z_datum_m`. Stored heights are relative to the run's datum; M* is
+    #   world-absolute. Compare them without this and the whole difference is
+    #   the vehicle's starting elevation -- 162 cm on seq 07 -- dressed up as
+    #   map error.
     return (slots[keep], n_ref[keep], ref_mean[keep], ref_var[keep],
-            gm.soa["ground_height"][slots[keep]].astype(np.float64))
+            gm.soa["ground_height"][slots[keep]].astype(np.float64)
+            + getattr(gm, "z_datum_m", 0.0) * 100.0)
 
 
 def height_rmse_per_ring(gm, reference):
@@ -263,9 +308,20 @@ def coarsening_ratio_per_ring(gm, reference):
 
         il_cm = float(np.sqrt(np.mean(il2[usable])))
         spread_cm = float(np.sqrt(np.mean(ref_var[usable])))
+        # ⚑ `bias_cm` is RMS(bias), not mean(bias), and the two answer different
+        #   questions. RMS cannot tell "systematically 20 cm high" from
+        #   "randomly +/-20 cm", and on real data those are different defects
+        #   with different causes. Measured on seq 07, 40 frames: ring 1 reads
+        #   bias_cm 20.72 but its MEAN bias is +3.98 cm -- almost all
+        #   dispersion. Ring 2 reads 36.02 with a mean of +23.46 and 75.9% of
+        #   cells above the reference, which is a real systematic offset that
+        #   grows with range. Both numbers are reported so neither can be
+        #   mistaken for the other.
         out[ring] = {
             "il_cm": il_cm,
             "bias_cm": float(np.sqrt(np.mean(bias2[usable]))),
+            "mean_bias_cm": float(np.mean((mine - ref_mean)[usable])),
+            "above_frac": float(np.mean((mine - ref_mean)[usable] > 0)),
             "spread_cm": spread_cm,
             "rho": il_cm / spread_cm if spread_cm > 1e-9 else float("nan"),
             "n": int(usable.sum()),
@@ -384,3 +440,24 @@ def memory_bytes(allocation) -> int:
     from vrgrid.gpu.allocators import bytes_allocated
 
     return bytes_allocated(allocation)
+
+
+def saturated_fraction_per_ring(gm, reference):
+    """Share of each ring's OBSERVED cells sitting at the vertical band edge.
+
+    The companion to `_compared`'s exclusion of them. A high value does not
+    mean the map is wrong -- it means the 8 m band cannot hold this sequence's
+    relief, so the map has forgotten ground the vehicle drove past, and the
+    per-ring accuracy figures describe only what is still inside the band.
+    Report it beside the RMSE or the RMSE is quoted over an unstated subset.
+    """
+    out = {}
+    for ring in range(len(gm.schedule.rings)):
+        slots, _, _ = _ring_cells(gm, ring)
+        seen = gm.soa["obs_count"][slots] > 0
+        if not seen.any():
+            out[ring] = float("nan")
+            continue
+        g = gm.soa["ground_height"][slots][seen]
+        out[ring] = float(np.mean((g <= Z_MIN_CM) | (g >= Z_MAX_CM)))
+    return out

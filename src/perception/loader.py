@@ -25,6 +25,7 @@ explicitly if your download lives elsewhere -- see the README.
 """
 
 import os
+import warnings
 from pathlib import Path
 
 import numpy as np
@@ -99,6 +100,85 @@ def load_calib(sequence: str) -> dict:
     return read_calib(_calib_path(sequence))
 
 
+# --- which pose file a sequence is read with ---------------------------------
+#
+# Two exist per sequence and they are not interchangeable:
+#
+#   poses/<seq>.txt              official KITTI ground truth, a GPS/IMU
+#                                solution optimised for TRAJECTORY evaluation
+#   sequences/<seq>/poses.txt    SemanticKITTI's own SLAM poses, optimised so
+#                                scans REGISTER into a consistent map
+#
+# README.md:21 chose the official ones on Day 0, which is right for most
+# sequences and wrong for 08. Measured as the median absolute ground-height
+# disagreement between consecutive frames, in 20 cm cells both frames saw:
+#
+#       seq        GT poses     SLAM poses
+#        07          0.49 cm       0.66 cm
+#        08         16.63 cm       1.04 cm     <-- 16x better
+#
+# 08's GT poses put the same patch of road 16.6 cm apart from one frame to the
+# next, consistently -- 16.1 to 17.6 cm across every pair, so a systematic
+# offset rather than drift. A cell seen over N frames accumulates about
+# N x 16.6 cm, which made M* itself carry a 64.5 cm median standard deviation
+# INSIDE a 10 cm footprint and put seq 08's per-ring RMSE at 162 cm.
+#
+# ⚑ THE PER-FRAME MEASURE ABOVE IS A WEAK PREDICTOR, and choosing this list
+#   from it alone was wrong. It catches 08 because 08 is catastrophic, and it
+#   misses everything subtler: seq 00 disagrees by only 2.27 cm per frame yet
+#   ACCUMULATES a mean height bias of -13.95 cm by ring 3, while seq 03 at a
+#   comparable 1.97 cm/frame accumulates -0.80. What matters is the
+#   accumulated bias, measured per ring against M*:
+#
+#       seq   per-frame   mean_b r1   mean_b r2   mean_b r3
+#        00      2.27cm       -2.86       -9.85      -13.95   <-- SLAM
+#        06      1.32cm       -0.34       -3.32       -5.80
+#        03      1.97cm       -1.91       +2.45       -0.80
+#        others  1.0-1.4cm    < |0.8|     < |2.3|     < |2.9|
+#
+#   Switching 00 to SLAM takes ring 2's bias from -9.85 to -0.44 cm and ring
+#   3's from -13.95 to -1.18, with ring 3 RMSE 26.03 -> 13.57. Sequence 06,
+#   the next worst, was tested the same way and is a WASH -- GT better at ring
+#   1, SLAM marginally better at rings 2-3 -- so it stays on GT. Only the two
+#   sequences with a measured win are overridden.
+#
+# So 08 defaults to SLAM and everything else to GT: per sequence, measured, and
+# overridable rather than assumed. `VRGRID_POSE_SOURCE` forces one globally,
+# which is how you reproduce the table above.
+POSE_SOURCE_BY_SEQUENCE = {"00": "slam", "08": "slam"}
+POSE_SOURCE_DEFAULT = "gt"
+
+
+def pose_source(sequence: str) -> str:
+    """"gt" or "slam" for this sequence. `VRGRID_POSE_SOURCE` overrides."""
+    forced = os.environ.get("VRGRID_POSE_SOURCE")
+    if forced:
+        if forced not in ("gt", "slam"):
+            raise ValueError(
+                f"VRGRID_POSE_SOURCE must be 'gt' or 'slam', not {forced!r}")
+        return forced
+    return POSE_SOURCE_BY_SEQUENCE.get(sequence, POSE_SOURCE_DEFAULT)
+
+
+def load_slam_poses(sequence: str) -> np.ndarray:
+    """SemanticKITTI's SLAM poses, at `sequences/<seq>/poses.txt`.
+
+    Same convention as the GT file -- Camera-0 -> World_cam, 3x4 row-major --
+    so it goes through exactly the same `transforms` composition. Only the
+    numbers differ, and on 08 they differ by enough to decide whether the
+    sequence is usable.
+    """
+    path = VELODYNE_DIR / sequence / "poses.txt"
+    if not path.exists():
+        raise FileNotFoundError(
+            f"SemanticKITTI SLAM poses not found: {path}. They ship with the "
+            "label archive; extract it over the same root.")
+    data = np.loadtxt(path, dtype=np.float64)
+    if data.ndim == 1:
+        data = data.reshape(1, 12)
+    return data.reshape(-1, 3, 4)
+
+
 def load_gt_poses(sequence: str) -> np.ndarray:
     """Load official KITTI ground-truth poses for a sequence.
 
@@ -148,24 +228,29 @@ def _available_frames(sequence: str) -> list[int]:
     return sorted(frames)
 
 
-def scans(sequence: str, max_frames: int | None = None):
+def scans(sequence: str, max_frames: int | None = None, start_frame: int = 0):
     """Yield (points, labels, pose) per frame for a sequence.
 
     Args:
         sequence: "00", "07", or "08"
-        max_frames: optional limit for testing (e.g., 10 frames)
+        max_frames: optional limit -- yield at most this many frames
+        start_frame: skip to this frame index before yielding (default 0);
+            `max_frames` then counts from here. Lets a demo recording start
+            partway through a sequence without streaming the frames before it.
 
     Yields:
         points: (N, 4) float32 — x, y, z, intensity in SENSOR frame
         labels: (N,) uint32 — raw SemanticKITTI labels (0-259)
         pose: (3, 4) float64 — official KITTI GT pose Vehicle → World
     """
-    gt_poses = load_gt_poses(sequence)
+    gt_poses = poses(sequence)
     available = _available_frames(sequence)
 
     if not available:
         raise FileNotFoundError(f"No velodyne frames found for sequence {sequence}")
 
+    if start_frame:
+        available = [f for f in available if f >= start_frame]
     if max_frames is not None:
         available = available[:max_frames]
 
@@ -189,14 +274,38 @@ def scans(sequence: str, max_frames: int | None = None):
         yield points, labels, pose
 
 
-def poses(sequence: str) -> np.ndarray:
-    """Return all official GT poses for a sequence as (N, 3, 4)."""
-    return load_gt_poses(sequence)
+def poses(sequence: str, source: str | None = None) -> np.ndarray:
+    """All poses for a sequence as (N, 3, 4), from whichever file it uses.
+
+    `source` is "gt", "slam", or None for the per-sequence default -- see
+    `pose_source` and `POSE_SOURCE_BY_SEQUENCE` for why 08 differs. Both files
+    carry the same convention (Camera-0 -> World_cam), so callers downstream of
+    this need no change.
+    """
+    src = pose_source(sequence) if source is None else source
+    if src != "slam":
+        return load_gt_poses(sequence)
+    # ⚑ Fall back rather than fail when the SLAM file is absent. It ships with
+    #   the label archive, so a root without it is an incomplete extract -- and
+    #   also every synthetic fixture that writes a sequence called "08" without
+    #   one. Failing hard there would make the default for ONE sequence break
+    #   test data that has nothing to do with it. The fallback is announced,
+    #   because on real 08 the GT poses are the 16.6 cm problem.
+    if not (VELODYNE_DIR / sequence / "poses.txt").exists():
+        warnings.warn(
+            f"sequence {sequence} defaults to SemanticKITTI SLAM poses but "
+            f"{VELODYNE_DIR / sequence / 'poses.txt'} is missing; falling back "
+            "to official GT poses. On real sequence 08 those disagree between "
+            "consecutive frames by 16.6 cm and the accumulated map is not "
+            "reportable -- extract the label archive over this root.",
+            RuntimeWarning, stacklevel=2)
+        return load_gt_poses(sequence)
+    return load_slam_poses(sequence)
 
 
 def get_frame_count(sequence: str) -> int:
-    """Return number of frames in sequence (from GT poses)."""
-    return load_gt_poses(sequence).shape[0]
+    """Number of frames in a sequence, from whichever pose file it uses."""
+    return poses(sequence).shape[0]
 
 
 def verify_sequence_exists(sequence: str) -> bool:

@@ -400,3 +400,57 @@ def test_regret_runs_end_to_end_through_the_query_api(scene):
     assert out.found, "no path across 8 m of road"
     assert out.regret >= -1e-9
     assert 0.0 <= out.unknown_fraction <= 1.0
+
+
+# --- what R(S) = 0.207 on the synthetic scene actually is --------------------
+
+def test_the_reference_evaluates_bit_4_like_the_map_does():
+    """§7.1 bit 4 belongs on both sides of eq. (23) or on neither.
+
+    `ReferenceMap` has always carried `class_id`, but `costmap_from_reference`
+    built from `block_stats` -- heights only -- so M* charged 0 class penalties
+    while the frozen schedules charged 18. Both paths are scored on M*, so a
+    schedule paid pure regret for routing around ground it had correctly
+    labelled non-drivable.
+
+    ⚑ And the ids are not in the same space. `ReferenceMap.class_id` holds RAW
+      SemanticKITTI ids (40 road, 44 parking, 48 sidewalk); `drivable_ids()`
+      returns learning ids (8, 9, 10, 11, 16). Compared directly nothing
+      matches and EVERY passable cell reads non-drivable -- 1,924 of 1,924 on
+      the synthetic window, which is the failure this test would have caught.
+    """
+    import numpy as np
+    from vrgrid.eval.harness import learning_ids
+    from vrgrid.grid.traversability import drivable_ids
+
+    raw_ground = np.array([40, 44, 48], dtype=np.uint8)   # road, parking, sidewalk
+    mapped = learning_ids(raw_ground)
+    assert np.isin(mapped, drivable_ids()).all(), (
+        "raw reference ids must reach the drivable set through learning_ids")
+    assert not np.isin(raw_ground, drivable_ids()).any(), (
+        "and must NOT match it raw -- that is the bug this guards")
+
+
+def test_one_lattice_jog_is_the_smallest_regret_that_can_be_reported():
+    """The floor under any non-zero R(S), and the reason 0.207 is not alarming.
+
+    A path that steps one cell sideways and back pays two diagonal steps
+    instead of two straight ones. At the frozen `plan.cell_m` of 0.25 m that is
+    exactly 2 * (sqrt(2) - 1) * 0.25 = 0.2071 -- which is, to three decimals,
+    the R(S) both frozen schedules report on the synthetic scene.
+
+    Traced to its cause it is ONE cell: column 16 of the planning window holds
+    a single cell with bit 5 set (n < n_min) and column 17 holds none, so the
+    fine schedules sidestep for the length of the corridor. The uniform
+    baselines pool more observations per cell, nothing falls under n_min, and
+    they report 0.000. So the difference between 0.207 and 0.000 there is fill
+    rate at fine resolution, not a worse decision -- and 0.207 is the smallest
+    non-zero value this lattice can express, not a knee.
+    """
+    import numpy as np
+    from vrgrid.grid.schedule import load_thresholds
+
+    cell_m = float(load_thresholds()["plan"]["cell_m"])
+    assert cell_m == 0.25, "the quantum below is quoted for the frozen 0.25 m"
+    one_jog = 2.0 * (np.sqrt(2.0) - 1.0) * cell_m
+    assert round(one_jog, 3) == 0.207

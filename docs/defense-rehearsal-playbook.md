@@ -55,7 +55,11 @@
 > 
 > Due to vertical beam divergence ($\Delta\phi = 0.427^\circ$) from a sensor at height $1.73\text{ m}$, radial ground beam spacing grows quadratically as $s_{\text{rad}}(r) = \frac{r^2 \Delta\phi}{h_s}$. At $50\text{ m}$, consecutive laser rings strike the asphalt $10.8\text{ meters}$ apart. A $30\text{ cm}$ negative obstacle is physically invisible beyond $r_{\max} = \sqrt{\frac{W \cdot h_s}{\Delta\phi}} \approx 8.3\text{ m}$ on a single scan.  
 > 
-> Rather than hallucinating a free surface, `vrgrid` explicitly marks unsampled cells beyond $8.3\text{ m}$ as `UNKNOWN`, never `FREE`."*
+> Rather than hallucinating a free surface, `vrgrid` explicitly marks unsampled cells beyond $8.3\text{ m}$ as `UNKNOWN`, never `FREE`.
+>
+> What we **do** detect, measured on both real sequences: **4,041 curb cells on 07 and 9,499 on 08**, with ring medians between **8.1 and 10.4 cm** — the low end of the 10–15 cm a real urban kerb is. Potholes: 257 cells on 07, 166 on 08. On the synthetic scene, where the answer is known, the detector returns **12.0 cm against a built 12 cm kerb** and **40.0 cm against a built 40 cm hole**."*
+
+**⚠️ Do not claim a detection rate.** SemanticKITTI has no ground truth for curb or pothole geometry. These are counts plus a plausibility check on the height distribution. Say that before you are asked.
 
 ---
 
@@ -66,3 +70,26 @@
 > - **Sequence 00:** Used exclusively for scaffold engineering and unit test validation.  
 > - **Sequence 07:** Used for mapping hyperparameter tuning and held out from final reporting.  
 > - **Sequence 08:** The completely unseen test sequence on which all final benchmark metrics, RMSE curves, and Plan Regret plots were evaluated after freezing all thresholds in `configs/thresholds.yaml`."*
+
+
+---
+
+## ❓ Question 7: *"Your traversability predicate has a scale problem — a 12 cm kerb is a 67% gradient at 5 cm cells and 24% at 25 cm. Which is it?"*
+
+### 🎙️ Your Answer:
+> *"It was both, and that was a real defect we found and fixed on 2 September. Differenced over one cell, eq. (22) measures height change per metre **at the cell scale**, so a step discontinuity reads steeper the finer the lattice: the same 12 cm kerb is a gradient of 1.200 at 5 cm, 0.600 at 10 cm and 0.240 at 25 cm, against one frozen $\tan\theta_{max} = 0.364$. It was a wall on our fine rings and flat ground on the coarse ones — which is one of the two ways the sides of our plan-regret equation ended up on different geometry.
+>
+> Eq. (22a) now differences both geometric bits over a **fixed physical baseline** of 0.50 m. The kerb reads passable at every lattice, and the baseline is bounded by the scene rather than chosen: it must exceed $0.12/\tan 20° = 0.33$ m so the kerb reads passable everywhere, and stay under $0.40/\tan 20° = 1.10$ m so a 40 cm pothole rim still fails."*
+
+---
+
+## ❓ Question 8: *"You claim a compile-time memory bound. Is it actually a bound, or a number you measured once?"*
+
+### 🎙️ Your Answer:
+> *"For the map itself it is structural — every array is allocated at startup and nothing in the frame loop grows. For the ghost-removal scratch it **was** a measured guess until 2 September, and we changed it because the guess was wrong by a factor of three.
+>
+> The cap on candidate cells was a provisional 150,000. Measured on whole sequences it drops **52.3% of sequence 07's peak occupied set and 67.1% of 08's** — and the failure is silent: dropped cells keep their occupancy, are never tested, and cannot appear in the cleared count, so a truncating run prints a healthy ghost number while the map keeps its ghosts.
+>
+> We did not simply fit a bigger number, because the peak scales with sequence length — frames ×3.70 from 07 to 08, peak ×1.45, and three sequences are longer than 08. The cap is now the grid's own slot count, because the occupied set cannot exceed the grid: **truncation is impossible by construction rather than unlikely by measurement.** And we count and print truncation now, so if anyone ever sets a tighter cap, the trade is visible."*
+
+**⚠️ Follow-up you should expect:** *"Doesn't that cost you memory?"* — Yes: 58.24 MB of scratch instead of 9.60 MB. It is **working memory, not map memory**, so the cell-count ratios in the report are unaffected, and it is off by default. Say the number; do not let them find it.

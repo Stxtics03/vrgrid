@@ -77,6 +77,11 @@ def is_moving(raw_labels: np.ndarray) -> np.ndarray:
     return (sem >= MOVING_LABEL_IDS.start) & (sem < MOVING_LABEL_IDS.stop)
 
 
+# The projection the SemanticKITTI checkpoint was TRAINED with. Not the
+# sensor's field of view -- see the note at the FRNet construction below.
+FRNET_TRAIN_FOV_UP_DEG = 3.0
+FRNET_TRAIN_FOV_DOWN_DEG = -25.0
+
 _PORT_BROKEN = (
     "FRNet inference is disabled: the standalone port in src/perception/frnet/ "
     "does not reproduce the trained network (see its header). Use "
@@ -156,8 +161,17 @@ class FRNetInference:
             num_classes=self.num_classes,
             ignore_index=19,
             output_shape=(self.sensor_cfg["num_rings"], self.sensor_cfg["num_azimuth"]),
-            fov_up=self.sensor_cfg.get("phi_max_deg", 2.0),
-            fov_down=self.sensor_cfg["phi_min_deg"],
+            # ⚑ TRAINING FOV, NOT THE SENSOR'S. These were being passed from
+            #   `sensor_cfg` -- 2.0 / -24.8, the HDL-64E's real vertical field
+            #   of view -- and that is a different quantity. The checkpoint was
+            #   trained with a FIXED spherical projection at 3.0 / -25.0, so
+            #   every point must be projected into the same grid the weights
+            #   learned, whatever sensor the points came from. Feeding the
+            #   physical FOV shifts every row of the range image against the
+            #   filters and is one of the three reasons inference collapsed to
+            #   ~15% point accuracy.
+            fov_up=FRNET_TRAIN_FOV_UP_DEG,
+            fov_down=FRNET_TRAIN_FOV_DOWN_DEG,
         )
 
         # Map checkpoint keys to our model

@@ -19,6 +19,7 @@ for the per-ring table, running the whole chain with no data and no network:
 """
 
 import argparse
+import dataclasses
 import shutil
 import tempfile
 from pathlib import Path
@@ -128,23 +129,127 @@ def costmaps_for(gm, reference, vehicle_xy_m):
                                  vehicle_xy_m=(vx, vy)))
 
 
-def plan_regret_for(gm, reference, vehicle_xy_m, mask=None):
-    """R(S) for one map, through query() only. Math §8.1.
+#: How many planning queries R(S) is averaged over. ONE was not an estimator.
+PLAN_QUERIES = 64
+
+
+PLAN_QUERY_FAMILIES = ("longitudinal", "lateral")
+
+
+def plan_queries(n_queries: int, seed: int = 0, family: str = "longitudinal"):
+    """Start/goal pairs spanning the planning window, deterministically.
+
+    ⚑ R(S) FROM A SINGLE QUERY IS NOT AN ESTIMATE. A plan is discrete: one
+      §7.1 bit flips and the path jumps a whole cell, so the statistic has no
+      continuity and a single sample has enormous variance. Measured on real
+      sequence 08, the same schedule by window length --
+
+          5_10_20_40    2.207 -> 0.207 -> 0.000 -> 0.414   (20/40/80/160 frames)
+          uniform_80cm  3.293 ->   inf -> 0.207 -> 0.000
+
+      -- not monotone, not stable, and the ordering BETWEEN schedules inverts
+      with the frame count. A figure whose conclusion you can choose by picking
+      a window length is not measuring what it claims.
+
+      Averaging over many queries is what turns it into an estimator with a
+      spread you can quote. It does not make the underlying quantity less
+      discrete; it makes the REPORTED number a mean of many discrete draws
+      rather than one of them.
+
+    ⚑ This does NOT touch PLAN_LANE_CELLS or the single-lane query, which are
+      Pratyushi's parked design decision (docs/decisions-2026-09-02.md,
+      Decision 4). The lane query is still query 0 of the set, so every
+      previous single-query number remains reproducible as
+      `plan_queries(1)[0]`.
+
+    Seeded, because the determinism test is CI-blocking and a regret that
+    moves between runs of the same map is worse than one that is noisy.
+    """
+    if family not in PLAN_QUERY_FAMILIES:
+        raise ValueError(f"family must be one of {PLAN_QUERY_FAMILIES}, "
+                         f"not {family!r}")
+    rng = np.random.default_rng(seed)
+    edge = 1
+    out = []
+
+    if family == "longitudinal":
+        # Along the lane. Query 0 is the historical one, unchanged, so every
+        # single-query number ever reported stays reproducible.
+        lane = PLAN_N // 2 - PLAN_LANE_CELLS
+        out.append(((1, lane), (PLAN_N - 2, lane)))
+        while len(out) < n_queries:
+            a = int(rng.integers(edge, PLAN_N - edge))
+            b = int(rng.integers(edge, PLAN_N - edge))
+            out.append(((edge, a), (PLAN_N - 1 - edge, b)))
+        return out
+
+    # ⚑ ACROSS the lane -- road to verge, the direction that crosses the kerb.
+    #   The longitudinal family cannot discriminate between resolutions and it
+    #   is structural, not bad luck: a query that runs the length of one lane
+    #   rewards a map that is uniformly adequate along a line, and a foveated
+    #   map's advantage is that it is SHARP WHERE THE VEHICLE IS LOOKING, which
+    #   a line down the middle never tests. Measured on seq 08 at matched
+    #   extent, every schedule from 10 cm to 40 cm scored between 0.231 and
+    #   0.488 on the lane query with the ordering inverted against cell size.
+    #
+    #   A lateral query crosses the kerb, which is the one feature in the scene
+    #   whose representation actually depends on cell size (§7.4: a 12 cm kerb
+    #   at 5 cm resolves, at 40 cm averages away). It is also only a FAIR test
+    #   since 2 Sep, when §7.1 bit 4 was put on both sides of eq. (23) -- before
+    #   that a lateral query was measured almost entirely through an asymmetry,
+    #   because crossing the kerb is exactly where the class penalty lives.
+    while len(out) < n_queries:
+        a = int(rng.integers(edge, PLAN_N - edge))
+        b = int(rng.integers(edge, PLAN_N - edge))
+        out.append(((a, edge), (b, PLAN_N - 1 - edge)))
+    return out
+
+
+def plan_regret_for(gm, reference, vehicle_xy_m, mask=None,
+                    n_queries: int = PLAN_QUERIES,
+                    family: str = "longitudinal"):
+    """R(S) for one map, averaged over `n_queries` planning problems. §8.1.
 
     `mask` restricts both maps to the common support -- ground every schedule
-    in the comparison observed. Without it the number measures fill rate
-    rather than coarsening; see the confound note in eval/plan_regret.py.
+    in the comparison observed, at comparable evidence. Without it the number
+    measures fill rate rather than coarsening.
+
+    Returns the median-regret query's `Regret`, with `regret` replaced by the
+    mean over all queries that found a path and `n_queries`/`n_found`/`spread`
+    attached. Median rather than mean for the representative query, because an
+    `inf` -- a plan into a wall -- must not be averaged away, and it is counted
+    separately in `blocked_fraction`.
     """
     star, mine = costmaps_for(gm, reference, vehicle_xy_m)
     if mask is not None:
         star, mine = restrict(star, mask), restrict(mine, mask)
-    lane = PLAN_N // 2 - PLAN_LANE_CELLS
-    return regret(star, mine, (1, lane), (PLAN_N - 2, lane))
+
+    results = [regret(star, mine, s, g)
+               for s, g in plan_queries(n_queries, family=family)]
+    found = [r for r in results if r.found]
+    finite = [r.regret for r in found if np.isfinite(r.regret)]
+    blocked = sum(1 for r in found if not np.isfinite(r.regret))
+
+    rep = found[len(found) // 2] if found else results[0]
+    rep = dataclasses.replace(
+        rep,
+        regret=float(np.mean(finite)) if finite else float("inf"),
+        frechet_m=float(np.mean([r.frechet_m for r in found])) if found else float("nan"),
+    )
+    rep.n_queries = len(results)
+    rep.n_found = len(found)
+    rep.n_blocked = blocked
+    rep.regret_sd = float(np.std(finite)) if len(finite) > 1 else 0.0
+    return rep
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--frames", type=int, default=12)
+    ap.add_argument("--seq", default=None,
+                    help="a REAL SemanticKITTI sequence (needs "
+                         "$VRGRID_DATA_ROOT). Without it, the synthetic "
+                         "writer -- whose numbers are NOT reportable.")
     ap.add_argument("--out", default=None, help="keep the sequence here")
     ap.add_argument("--keep-moving", action="store_true",
                     help="do not strip moving-* before scatter; shows what the "
@@ -158,13 +263,29 @@ def main():
 
     root = Path(args.out) if args.out else Path(tempfile.mkdtemp(prefix="vrgrid-syn-"))
     try:
-        write_sequence(root, "99", n_frames=args.frames)
-        print(f"synthetic sequence: {args.frames} frames in {root}")
-
-        reference = build_from_scans(read_sequence(root, "99"))
-        print(f"reference map:      {reference}\n")
-
-        vehicle_x = (args.frames - 1) * 2.0
+        if args.seq:
+            # The swap this file's docstring has described since Day 0. Same
+            # `build_from_scans` and same `run_sequence` -- only the source of
+            # the scans changes, which is the whole point of that seam.
+            from vrgrid.eval.harness import final_vehicle_xy, real_scans
+            print(f"sequence {args.seq}: {args.frames} frames, real data")
+            # 4-tuple: M* gets the SAME ground mask the map is built with.
+            # Without it M* averages building facades into the road surface --
+            # +139.86 cm of bias on seq 07, against a coarsening error that
+            # should be sub-centimetre.
+            reference = build_from_scans(real_scans(args.seq, args.frames))
+            print(f"reference map:      {reference}\n")
+            # ⚑ NOT `(frames - 1) * 2.0`. That is the synthetic car driving
+            #   straight down y = 0; a real one turns, and `costmaps_for`'s own
+            #   note says a window placed about the origin then measures ground
+            #   the map never saw and reports a confident zero.
+            vehicle_x = final_vehicle_xy(args.seq, args.frames)
+        else:
+            write_sequence(root, "99", n_frames=args.frames)
+            print(f"synthetic sequence: {args.frames} frames in {root}")
+            reference = build_from_scans(read_sequence(root, "99"))
+            print(f"reference map:      {reference}\n")
+            vehicle_x = (args.frames - 1) * 2.0
         schedules = ([load(n) for n in SCHEDULES]
                      + [uniform_schedule(c, half_width_m=24.0)
                         for c in UNIFORM_CELLS_M])
@@ -177,9 +298,9 @@ def main():
             gm = build_gridmap(schedule)
             tracks = TrackList(gm.allocation.max_tracks,
                                arrays=gm.allocation.tracks)
-            stats = run_sequence(
-                gm, vehicle_frame_scans(root, "99", args.keep_moving),
-                tracks=tracks)
+            scans = (real_scans(args.seq, args.frames) if args.seq
+                     else vehicle_frame_scans(root, "99", args.keep_moving))
+            stats = run_sequence(gm, scans, tracks=tracks)
             built.append((schedule, gm, evaluate(gm, reference, stats.frames), stats))
 
         mask = common_support(*[costmaps_for(gm, reference, vehicle_x)[1]

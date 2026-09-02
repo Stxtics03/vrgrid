@@ -477,11 +477,24 @@ bit 4  class       class ∉ drivable_set
 bit 5  confidence  n                 <  n_min          (fail safe)
 ```
 
-Gradient by central differences over the four neighbours, scaled by the cell size of the ring:
+Gradient by central differences over the four neighbours, differenced over a **fixed physical baseline** `b` rather than over one cell:
 
 ```
-∂z/∂x ≈ (z_{i+1,j} − z_{i−1,j}) / (2 c_L)                           (22)
+k_L  = max(1, round(b / (2 c_L)))                                   (22a)
+∂z/∂x ≈ (z_{i+k,j} − z_{i−k,j}) / (2 k_L c_L)                       (22)
 ```
+
+`b` is `traversability.baseline_m`. With `b ≤ 2 c_L` this is `k_L = 1` and (22) is the one-cell form the section was originally written with.
+
+> **Note, 2 Sep — Shrestha. Why (22) is differenced over a distance and not over a cell.**
+>
+> *One cell is not a fixed baseline, so eq. (22) as first written measured height change per metre **at the cell scale**. A step discontinuity therefore reads steeper the finer the lattice: §4.1's 12 cm kerb is a gradient of 1.200 at 5 cm, 0.600 at 10 cm, 0.300 at 20 cm and 0.240 at 25 cm — against one frozen `tan(θ_max) = 0.364`. The same physical kerb was a **wall on the fine rings and flat ground on the coarse ones and on M\***, which is one of the two ways the sides of eq. (23) came to be evaluated on different geometry. Bit 2 scaled the other way for the same reason: on a constant grade the per-neighbour step grows with the cell, so a coarse map calls a ramp a kerb. Both bits now read over `b`.*
+>
+> ***`b` is bounded by the scene, not chosen by taste.*** *It must be large enough that the 12 cm kerb reads passable everywhere — `b > 0.12/tan(θ_max) = 0.33 m` — and small enough that the 40 cm pothole rim still fails — `b < 0.40/tan(θ_max) = 1.10 m`. `b = 0.50 m` is the middle of that window. The bound is on the **span** `2 k_L c_L`, not on `b`: a ring coarser than `b/2` falls back to `k_L = 1` and spans `2 c_L`, so at 80 cm the span is 1.60 m, past the bound, and a 40 cm hazard stops firing. That is a real limit of the coarse rings — `uniform_80cm` already carried zero impassable cells because a 60 cm hole does not survive an 80 cm cell — and it is asserted in `test_the_pothole_rim_still_fails_wherever_the_lattice_can_resolve_it` rather than left to be discovered.*
+>
+> ***The stencil is clipped, not wrapped, and the border rule is unchanged.*** *Near the window edge the stencil shortens and the divisor shortens with it, so the quotient stays a gradient in m/m rather than one scaled by a distance that was never spanned. Only the outermost cell of each edge is one-sided, and it still carries bit 5 by the rule below. Widening the border mask to `k_L` cells was rejected: at 5 cm that is a 5-cell border, ~5% of a ring, and inflating the confidence bit is the very confound §8.2's `w_unknown` accounting had just been fixed for.*
+>
+> ⚑ ***On the synthetic scene this changes no R(S).*** *There, M_S is already blocked down to `plan.cell_m` before §7.1 is applied, so both sides were at 25 cm and `k_L = 1` either way. What it fixes is the **map's own** traversability layer, where a fine ring called a kerb a wall and a coarse ring did not — the layer the dashboard, ghost removal and the per-ring table all read, and the one that reaches the planner on 07/08. Expect the effect on real data, not on the synthetic sweep.*
 
 ⚑ **Geometry decides, semantics filters.** A road with a 40 cm pothole has class `road` and is not drivable; a packed grass verge has class `vegetation` and often is. Class is one bit among six, not the decision.
 
@@ -536,6 +549,68 @@ Symmetrically, if `AND_mask(B)` has bit `k` set, **every** cell fails condition 
 **Unit test.** Exhaustive: for 10⁴ random blocks, if `SAFE(B)` then assert every constituent cell is individually traversable. Any counterexample is a proof failure, not a tuning issue.
 
 ---
+
+### 7.4 Named features: curbs and potholes
+
+The problem statement names these two, and names them as the reason a 2D occupancy grid is not enough — it "loses critical height information necessary for detecting curbs, potholes". §7.1 does not answer that sentence. It answers *may the vehicle be here*, as six bits, and after (22a) it answers it at one physical scale — under which a 12 cm kerb is **passable**, 13.5° over the 0.50 m baseline, which is correct for a question about whether a wheel can climb it. A kerb still bounds the drivable corridor, and a 40 cm hole still sets bit 1 as an anonymous "slope", indistinguishable from a kerb, a ditch or the side of a parked car. Depth, height and orientation are what a planner needs and none of them survive a bitfield.
+
+So features are reported **beside** the predicate and never folded into it:
+
+```
+curb(c)     min_h ≤ ‖Δz‖_b ≤ max_h,  b = curb.baseline_m           (24)
+            ∧ the rise is linear: both neighbours ⊥ to ∇z agree, ±45°
+
+pothole(c)  median{z(c ± r·u) : u ∈ opposed axes} − z(c) ≥ min_d   (25)
+            ∧ rim spread ≤ max_spread   ∧  rim not itself depressed
+```
+
+Neither writes to the cell. `CELL_FIELDS` is frozen at 12 B and adding a field means recomputing every memory figure in the report, so detections are returned as records sized by what was found — a few hundred cells, not one byte on all 745,000. The memory bound is unchanged.
+
+**Why (24) uses its own, shorter baseline.** (22a)'s 0.50 m is chosen to make a kerb read *passable* at every lattice. That is the right answer for bit 1 and the wrong one for "where is the edge" — the same smoothing that removes the scale-dependence also removes the feature. `curb.baseline_m` is 0.20 m, short on purpose, and the two are allowed to disagree because they are answering different questions.
+
+**Why the rim of (25) is a median over opposed pairs.** A mean is dragged down by the hole's own far side once the hole is wider than the annulus, reading a deep pothole as a shallow one exactly when it matters. A rim sampled on one side only is not a surface but a slope reading: on a grade at the window edge the up-slope samples survive, the down-slope ones fall off, the estimate jumps by the whole rise, and a smooth downgrade reports as a field of potholes. Opposed pairs make a constant grade cancel exactly, which is the property that distinguishes a depression from a slope.
+
+> **Note, 2 Sep — Shrestha. Three ways this was wrong before it was right, all of them silent.**
+>
+> ***`n_min` is not the right threshold here, and using it emptied the module.*** *`n_min = 3` is §7.1 bit 5's fail-safe: below it a cell is not to be **driven on**. Applied to detection it asks the wrong question. On the synthetic scene ring 0 holds 80,719 cells with a return and 17,516 with three; requiring all five cells of a stencil to clear n_min left **936 cells, 1.2% of the observed map**, none of which straddled the kerb. The detector reported zero curbs on a scene built around a kerb, and raised nothing. What detection actually has to exclude is the DEFAULT: an unobserved cell holds `ground_height` 0, and differencing against it fabricates the feature being looked for. One return rules that out, and `bitfield()`'s own `geometric` mask draws the line in exactly that place. Sparse-cell noise belongs to the linearity test, not to this threshold.*
+>
+> ***A ring window is a torus, so a feature contiguous in the world is split in memory.*** *`ix` lives at `ix % side` and the origin moves with the vehicle. The synthetic pothole came out at memory rows 0–4 and 395–398 of a 400-row ring — one hole, two pieces, opposite ends of the array. A linear scan with edge fill falls off both. Neighbour lookups are toroidal; the one place that must **not** be differenced is the window's world edge, which sits at memory index `x0 % side` and moves — **not** at memory index 0. Both directions are pinned: `test_a_pothole_split_across_the_memory_wrap_is_still_found` and `test_nothing_is_measured_across_the_windows_world_edge`.*
+>
+> ***A rim that straddles a kerb is not a surface.*** *A cell just inside the kerb has half its rim on the road and half on the sidewalk 12 cm up; the median sits above the road and the carriageway reads as a depression. That produced **26 false potholes of ~10 cm** on good road, next to the 10 true cells at 40 cm. `max_rim_spread_m` is the fix and `test_a_kerb_adjacent_cell_is_not_a_pothole` is the guard.*
+>
+> ⚑ *Measured on the synthetic scene, 12 frames, schedule 5/10/20/40: **538 curb cells at a median 12.0 cm** against a built kerb of 12 cm, and **10 pothole cells at a median 40.0 cm** (p10 40.0, p90 40.0) against a built hole of 40 cm. Counts are scene-specific; the medians are the check that matters, because a detector can be made to find any number of things and only one of them is the right height.*
+
+### 7.5 Confidence in the verdict
+
+§7.1 returns six bits and no idea how sure it is. A planner that cannot separate *probably drivable* from *definitely drivable* must treat them as one fact, and so either trusts a cell it should have slowed for or refuses one it could have used. The margin behind each verdict is reported as four channels, each in [0, 1], each meaning "1 is as good as it gets":
+
+```
+label      share ≥ (n + κ) / 2n,  κ = Boyer-Moore counter (§10.2)      (26)
+evidence   min(1, n / n_min)
+geometry   1 − max( ‖∇z‖/tan θ_max ,  max|Δz| / s_max )
+surface    1 − σ² / σ²_max
+
+conf(c) = 0 if class(c) ∉ drivable_set, else min of the four            (27)
+```
+
+**Nothing is stored.** Every term is derived from a field the cell already carries, so `CELL_BYTES` stays 12 and no memory figure in the report moves. §10.2 already described the Boyer-Moore counter as "a confidence readout"; (26) is the first thing to read it.
+
+**(26) is a lower bound and is meant to be.** Boyer-Moore keeps `κ = votes_for − votes_against` for the surviving candidate, so `votes_for ≥ (n + κ)/2`. κ saturates at 7, which makes the bound *loosen* as a cell is seen more often: a cell observed 200 times unanimously reports a lower share than one observed 8 times, because the 3-bit register stopped counting and the evidence is genuinely no longer held. Reporting the floor is the honest reading; `saturated()` flags the cells in that regime so a low share is not misread as disagreement.
+
+**(27) takes the minimum, not the product.** A cell is as trustworthy as the least trustworthy thing known about it. A product reads lower and looks more sophisticated, and would assert an independence between slope error and label error that nobody has measured. Nothing here is calibrated against outcomes either, so these are margins and not probabilities — calling 0.6 a 60% chance of anything would be inventing precision the map cannot support.
+
+> **Note, 2 Sep — Shrestha. A ring reading 0.00 is not necessarily broken, and that had to be printed.**
+>
+> *On the synthetic scene, 12 frames, 5/10/20/40, over observed cells only:*
+>
+> | ring | cell | cells | mean | ≥0.8 | <0.2 | binding |
+> |---|---|---|---|---|---|---|
+> | 0 | 5 cm | 80,719 | 0.49 | 13% | 3% | label |
+> | 1 | 10 cm | 68,085 | 0.31 | 0% | 20% | evidence |
+> | 2 | 20 cm | 32,124 | 0.03 | 0% | 94% | not-drivable |
+> | 3 | 40 cm | 11,283 | 0.00 | 0% | 100% | not-drivable |
+>
+> *Ring 3 is not a failure. Most of the far field on this scene is the vegetation verge, and a confident "not road" is reported by (27) as **no confidence in drivability** — the correct answer, which looks exactly like a broken one. So `summarise()` names the **binding channel**, the one that most often held the verdict down, next to the number. Ring 0 binding on `label` is the κ ceiling of (26), not disagreement; ring 1 binding on `evidence` is fill rate. A confidence figure without the reason behind it is the same kind of diagnostic as the one that reported 0.9% where the truth was 91.9%.*
 
 ## 8. Plan sensitivity — coarsening measured in units of decision ⚑
 
@@ -626,7 +701,9 @@ RMSE_L = sqrt( (1/|C_L|) Σ_{c ∈ C_L} ( μ_c − h̄*(c) )² ),
 >
 > ***No cell ever moves between rings.*** *The buffers are static and world-anchored and a cell never changes ring. What moves is the vehicle, and with it which ring is* responsible *for a given place; "migration" here always means that responsibility passing inward, never storage being relocated. The wording above was read the other way once, so it is worth stating.*
 >
-> ***And the confound was asymmetric across the schedules §8.2 compares***, *which is why it mattered more than its size. A uniform baseline has one ring, `ring_of` always answers 0, and nothing can migrate out from under it — so the money plot charged the foveated schedules for stale memory and the uniform grids for none. Worst-ring RMSE, before → after: 5/10/20/40 0.40 → 0.37, 5/10/50 0.46 → 0.37, uniform 10 cm 0.35 → 0.35, uniform 20 cm 0.41 → 0.41. Only our own schedules move, and they move the way the thesis says they should.*
+> ***⛑ WITHDRAWN: "the confound is asymmetric across the schedules §8.2 compares".*** *This note originally argued that because a uniform baseline has one ring and cannot carry the defect, the money plot was charging the foveated schedules for stale memory and the uniform grids for none — on synthetic worst-ring RMSE of 0.40 → 0.37 and 0.46 → 0.37 against uniform rows that did not move. **That is exactly the comparison `known-limitations.md` §6 ran on real data with the datum fixed** — one-ring uniform 20 cm against the four-ring schedule's ring 2 — and it gives* **−0.26 cm and −0.41 cm: migration costs nothing measurable in height bias.** *The synthetic runs behind the original claim predate §6's datum fix, and §6's experiment is the better evidence. The structural point stands (a single-ring schedule cannot carry this); the claim that it distorted the money plot does not.*
+>
+> ***What the defect does change is which cells are scored***, *so it lands on the population metrics rather than on height: ring 3's fill rate read 0.23 against 0.83 over the cells it actually answers for. That is a different metric from the one §6 measured and is not covered by it. And it touches the headline —* `known-limitations.md` *§2b leads with* **ρ = 1.45 median** *at ring 1 over eleven sequences, and ρ moves by up to 0.06 per ring here, so §2b's table wants regenerating with this filter before ρ is quoted to two decimals.*
 >
 > *So `C_L` is **the cells ring L still serves**, and the predicate is `ring_of` on the cell centre — the same function `query()` routes with, so the scored set cannot drift from the set the map answers with. The centre is the convention for a cell straddling a boundary; §2.4 already says that boundary wobbles by up to one coarsest cell as the window shifts, so no finer rule would mean anything.*
 >
