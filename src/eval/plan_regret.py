@@ -128,6 +128,7 @@ from vrgrid.cell import (
     TRAV_SLOPE,
     TRAV_STEP,
 )
+from vrgrid.eval.harness import learning_ids
 from vrgrid.grid.lattice import OUTSIDE
 from vrgrid.grid.query import query, slot_of
 from vrgrid.grid.schedule import load_thresholds
@@ -389,6 +390,23 @@ def costmap_from_reference(reference, x0_m, y0_m, nx, ny, cell_m=None,
     trav |= np.where(_max_step(z, cell_m, t.get("baseline_m")) > t["s_max_m"],
                      TRAV_STEP, 0).astype(np.uint8)
     trav |= np.where(var * 1e-4 > t["sigma2_max_m2"], TRAV_ROUGHNESS, 0).astype(np.uint8)
+    # ⚑ Bit 4 belongs on BOTH sides or on neither, and the reference has the
+    #   data: `ReferenceMap` carries `class_id`, it was only `block_stats` --
+    #   heights alone -- that could not reach it. Left out, M* charged 0 class
+    #   penalties while the two frozen schedules charged 18, and since both
+    #   paths are scored on M* a schedule paid pure regret for routing around
+    #   ground it had correctly labelled non-drivable. Same combiner as
+    #   `costmap_from_gridmap`, so the two sides agree by construction.
+    #   ⚑ RAW ids, not learning ids. `ReferenceMap.class_id` holds what the
+    #     loader gave it -- 40 road, 44 parking, 48 sidewalk -- while
+    #     `drivable_ids()` returns the 19-class learning ids (8, 9, 10, 11,
+    #     16). Compared directly, nothing matches and every passable cell in
+    #     the window reads non-drivable: 1,924 of 1,924 on the synthetic
+    #     scene. The map side goes through fusion, which stores learning ids
+    #     already, so only this side needs the conversion.
+    cls = learning_ids(reference.block_class(i_lo, j_lo, k))
+    trav |= np.where(np.isin(cls, drivable_ids(th)) & ~unknown, 0,
+                     TRAV_CLASS).astype(np.uint8)
     trav |= np.where(n < t["n_min"], TRAV_CONFIDENCE, 0).astype(np.uint8)
 
     return CostMap(cell_m, x0_m, y0_m, _cost_from_bits(trav, unknown, w),

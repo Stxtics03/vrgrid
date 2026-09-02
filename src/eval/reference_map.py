@@ -96,6 +96,54 @@ class ReferenceMap:
             self._sat = (sat(obs.astype(np.float64)), sat(h), sat(h * h))
         return self._sat
 
+    def block_class(self, i_lo, j_lo, k: int):
+        """Majority semantic class in each k x k block, over OBSERVED cells.
+
+        The companion to `block_stats`, which answers heights only. Without it
+        `costmap_from_reference` cannot set §7.1 bit 4 at all, and the two
+        sides of eq. (23) end up disagreeing about semantics: on the synthetic
+        scene M* carried 0 class penalties while the two frozen schedules
+        carried 18, so a schedule was charged w_class for correctly labelling
+        ground the reference had no opinion about. Both paths are scored on
+        M*, so that is regret for routing around a hazard the scorer cannot
+        see -- a defect in the reference, not in the schedule.
+
+        Majority, not mode-of-everything: unobserved cells (count 0) hold a
+        default class byte and must not vote, or a sparsely-observed block is
+        decided by the cells nobody looked at.
+
+        ⚑ Not summed-area, unlike `block_stats`. A mode does not decompose
+          into prefix sums, and per-class tables would be 20 x H x W -- about
+          a gigabyte on a 5 cm reference. This gathers each block's cells
+          instead, which is O(k^2) per block and fine at planning-window
+          sizes (44 x 44 blocks of 5 x 5 is ~48,000 lookups); it is not
+          something to call per frame over the whole map.
+        """
+        i_lo = np.asarray(i_lo, dtype=np.int64)
+        j_lo = np.asarray(j_lo, dtype=np.int64)
+        H, W = self.shape
+
+        off = np.arange(k, dtype=np.int64)
+        rows = i_lo[..., None, None] - self.i0 + off[:, None]
+        cols = j_lo[..., None, None] - self.j0 + off[None, :]
+        inside = (rows >= 0) & (rows < H) & (cols >= 0) & (cols < W)
+        r = np.clip(rows, 0, H - 1)
+        c = np.clip(cols, 0, W - 1)
+
+        votes = self.class_id[r, c]
+        valid = inside & (self.count[r, c] > 0)
+
+        flat_votes = votes.reshape(*votes.shape[:-2], -1)
+        flat_valid = valid.reshape(*valid.shape[:-2], -1)
+        best = np.zeros(flat_votes.shape[:-1], dtype=np.uint8)
+        best_n = np.zeros(flat_votes.shape[:-1], dtype=np.int64)
+        for cid in np.unique(flat_votes[flat_valid]) if flat_valid.any() else ():
+            n = ((flat_votes == cid) & flat_valid).sum(axis=-1)
+            take = n > best_n
+            best = np.where(take, np.uint8(cid), best)
+            best_n = np.where(take, n, best_n)
+        return best
+
     def block_stats(self, i_lo, j_lo, k: int):
         """(n, mean, var) of reference heights in each k x k block.
 

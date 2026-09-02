@@ -87,7 +87,16 @@ def main():
         print(f"  {name:>7} {int(v):>10,}")
     print(f"  cleared total {sum(cleared):,} over {sum(tested):,} tested")
 
-    current = th["visibility"]["max_candidate_cells"]
+    # Resolved, not raw: since 2 Sep the shipped value is `null`, meaning the
+    # grid's own slot count. A raw read gets None and every format below fails.
+    from vrgrid.gpu.allocators import resolve_candidate_cap
+    n_slots = engine.handle.grid["log_odds"].size
+    configured = th["visibility"]["max_candidate_cells"]
+    current = resolve_candidate_cap(configured, n_slots)
+    if configured is None:
+        print(f"\nconfigured cap is `null` -> the grid itself, "
+              f"{n_slots:,} slots. Truncation is impossible by construction;")
+        print("the numbers below say how much headroom that leaves.")
     proposed = int(np.ceil(occ.max() * args.headroom / 10_000) * 10_000)
     print(f"\ncurrent cap   {current:>10,}   "
           f"{visibility_scratch_bytes(current, np.float32)/1e6:>6.2f} MB")

@@ -333,16 +333,18 @@ def main() -> int:
     print(f"   M* cells carrying a class penalty:  {star_class}")
     print(f"   M_S cells carrying one (worst schedule): {mine_class}")
     if star_class == 0 and mine_class > 0:
-        print("   ⚑ M* has no opinion about class -- `costmap_from_reference` "
-              "builds from")
-        print("     `block_stats`, which is heights, though `ReferenceMap` does "
-              "carry `class_id`.")
-        print("     So every one of those cells is w_class of pure regret for "
-              "the schedule that")
-        print("     labels it, against a reference that charges nothing. A "
-              "LATERAL query -- road")
-        print("     to verge, the natural way to cross the kerb -- is measured "
-              "through this.")
+        print("   ⚑ Both sides now evaluate bit 4: `costmap_from_reference` "
+              "reads")
+        print("     `ReferenceMap.block_class` and maps its RAW ids through "
+              "`learning_ids`")
+        print("     before comparing against the drivable set. Until 2 Sep it "
+              "read heights")
+        print("     only, so M* charged nothing and every labelled cell in a "
+              "schedule was")
+        print("     w_class of pure regret. A residual difference here is a "
+              "real disagreement")
+        print("     about semantics, not the metric asking two different "
+              "questions.")
     print()
 
     # 5. Common support. A query is only posable where every schedule looked.
