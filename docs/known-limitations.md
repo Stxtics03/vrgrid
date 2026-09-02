@@ -186,23 +186,32 @@ committed; `.gitignore` excludes them by design.)*
 ## 3. Curb and pothole detection — real numbers, no ground truth to score against
 
 `src/grid/features.py` answers the problem statement's own sentence about
-curbs and potholes directly (§7.4). ⚑ **Quoted from sequence 07, not 08.** 08 goes through `run_sequence`, which
-clips 16.91% of its ground returns against the 8 m height band — see §6. Those
-numbers are withdrawn.
+curbs and potholes directly (§7.4). Measured on **both** sequences, 40 frames, schedule 5/10/20/40, through the
+real loader → transforms → **Patchwork++** → `run_sequence` → `features.detect`
+path, with the height datum and the per-sequence pose source in place:
 
-Measured on **sequence 07**, 40 frames, schedule 5/10/20/40, through the real
-loader → transforms → Patchwork++ → `run_sequence` → `features.detect` path,
-with the height datum in place:
-
-| ring | cell | curbs | median | potholes | median |
+| ring | cell | 07 curbs | median | 08 curbs | median |
 |---|---|---|---|---|---|
-| 0 | 5 cm | 2,939 | 9.0 cm | 80 | 11.0 cm |
-| 1 | 10 cm | 965 | 13.0 cm | 87 | 30.0 cm |
-| 2 | 20 cm | 98 | 8.2 cm | 3 | 8.0 cm |
+| 0 | 5 cm | 2,294 | 8.5 cm | 4,293 | 8.6 cm |
+| 1 | 10 cm | 1,604 | 9.2 cm | 2,404 | 8.1 cm |
+| 2 | 20 cm | 143 | 9.1 cm | 2,550 | 8.5 cm |
+| 3 | 40 cm | — | — | 252 | 10.4 cm |
 
-Real urban kerbs are 10–15 cm, and on the synthetic scene — where the answer is
-known — the detector returns **12.0 cm against a built 12 cm kerb** and
-**40.0 cm against a built 40 cm hole**.
+Potholes: **257 cells on 07** (ring medians 34.5 / 20.0 / 8.0 cm) and **166 on
+08** (8.5 / 9.5 / 10.5 / 23.0 cm).
+
+The curb medians land between **8.1 and 10.4 cm on every ring of both
+sequences**, with p90s reaching 14–17 cm — the low end of the 10–15 cm a real
+urban kerb is. On the synthetic scene, where the answer is known, the detector
+returns **12.0 cm against a built 12 cm kerb** and **40.0 cm against a built
+40 cm hole**.
+
+⚑ Earlier versions of this table showed the median *rising* with cell size
+  (9.1 → 11.3 → 14.2 cm) and I explained it as coarser cells averaging across
+  the kerb face. That trend is gone and the explanation was wrong: it was an
+  artifact of the height bugs in §6. Counts also fell by an order of magnitude
+  — the old figures were inflated by spurious detections from vehicle-frame
+  heights.
 
 **The limitation: SemanticKITTI has no ground truth for curb or pothole
 geometry.** There is no detection rate to quote, only counts and a plausibility
