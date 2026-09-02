@@ -170,6 +170,41 @@ cells at 1.00× — and a graded curve needs a graded cost field. The real §8.2
 plot needs sequence 08, which is now on disk. See
 `docs/decisions-2026-09-02.md` for the query-design question this leaves open.
 
+### The money plot on real data — first run, and it is not monotone
+
+`regret_plot.py --seq 08` now exists (it had no `--seq` either) and has run on
+real sequence 08, 40 frames:
+
+| schedule | MB | cells | R(S) | Fréchet |
+|---|---|---|---|---|
+| 5_10_20_40 | 29.06 | 745,000 | 0.207 | 0.75 m |
+| 5_10_50 | 23.62 | 520,000 | 0.207 | 0.75 m |
+| uniform 10 cm | 18.19 | 230,400 | **0.000** | 0.25 m |
+| uniform 20 cm | 10.71 | 57,600 | **0.000** | 0.25 m |
+| uniform 40 cm | 7.82 | 14,400 | 0.207 | 0.25 m |
+| uniform 80 cm | 7.09 | 3,600 | **inf** | 1.25 m |
+
+**The script's own guard fires: `NOT MONOTONE, 5_10_50 → uniform_10cm`.** A
+coarser map scoring lower regret than a finer one is the opposite of what §8.2
+claims, and it is not a rendering problem — the two frozen schedules take a
+one-cell lateral jog that uniform 10 cm and 20 cm do not.
+
+0.207 is again exactly `2·(√2−1)·plan.cell_m`, the **smallest non-zero regret
+the 25 cm planning lattice can express**. So the honest reading is that on this
+window every schedule down to 40 cm makes either the same decision or a
+one-cell-different one, and the differences sit at the lattice floor rather
+than anywhere a curve could be drawn through.
+
+The one real result is **uniform 80 cm at `inf`** — it plans through something
+M\* calls impassable. That is a safety failure rather than a worse route, and
+it is the honest shape of the claim: coarsening is free until it is not, and
+between 40 cm and 80 cm it stops being free.
+
+**What this figure cannot yet do is show a knee.** Four of six schedules are at
+0.000 or the lattice quantum. Whether that is the planning query (it runs one
+lane, longitudinally — see `docs/decisions-2026-09-02.md`, Decision 4) or the
+40-frame window is untested; both are cheap to vary and neither has been.
+
 ### Scope
 
 The memory reduction and the per-ring geometric accuracy against M\* are the
