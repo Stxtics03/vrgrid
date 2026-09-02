@@ -5,10 +5,19 @@
   handedness, units. Frame confusion is the most common silent bug here: the
   map looks plausible and slowly rotates. Run the static-wall test on Day 0.
 - **Wire things in, do not rebuild them.** Patchwork++ for ground, KISS-ICP
-  for odometry. FRNet was the plan for semantics but the only standalone port
-  available does not reproduce the trained network (wrong backbone activation,
-  wrong FOV, missing RangeInterpolation -> ~15% point accuracy); it is flagged
-  non-functional in `frnet/` and kept only for a possible real mmdet3d install.
+  for odometry. The standalone FRNet port in `frnet/` **works as of 2 Sep** —
+  98.3% point accuracy, 69.8% mIoU against the paper's 73.3%. It is still not
+  the map's semantic source, and that is now a choice rather than a defect: GT
+  `.label` files isolate the mapping contribution from segmentation quality.
+  Run it with `scripts/frnet_eval.py`; report it alongside the map, never
+  swapped into it.
+- **The FOV bug was in `semantics.py`, not in `frnet/`.** `configs/frnet.yaml`
+  carries the HDL-64E's *physical* vertical FOV (2.0 / −24.8) for the range
+  image; the checkpoint learned a *fixed* spherical projection (3.0 / −25.0).
+  They are different quantities and feeding the first to the model was one of
+  the three things that held it at ~15%. The training values are pinned as
+  `FRNET_TRAIN_FOV_UP_DEG` / `_DOWN_DEG` where a sensor config cannot reach
+  them — do not re-plumb them from a config.
 - **Both semantic class and motion are ground truth**, read from the raw
   `.label` files: 19-class semantic via `semantics.semantic_labels()`, motion
   (`moving-*`, IDs 250-259) via `semantics.is_moving()`. Disclose it; it

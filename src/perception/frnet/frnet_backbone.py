@@ -1,10 +1,12 @@
-# NON-FUNCTIONAL -- see the header of frnet.py. This standalone port does not
-# FIXED 2 Sep: this backbone used nn.LeakyReLU throughout, but the checkpoint
-# was trained with HSwish (act_cfg=dict(type='HSwish') in
-# configs/_base_/models/frnet.py). Kept, not deleted, for a possible real
-# FRNet install later. semantics.py uses ground-truth .label files instead.
+# WORKING as of 2 Sep -- see the header of frnet.py for all three fixes.
+# DIVERGENCE 1 of 3, and the one the old header got RIGHT: this backbone used
+# nn.LeakyReLU at 7 sites where the checkpoint was trained with HSwish
+# (act_cfg=dict(type='HSwish') in configs/_base_/models/frnet.py). mmcv's
+# HSwish is x*relu6(x+3)/6, which is exactly torch's nn.Hardswish, so the fix
+# is a straight substitution. semantics.py still takes the map's labels from
+# the ground-truth .label files, by choice rather than by necessity.
 
-"""FRNet Backbone — standalone, no mmcv/mmdet3d/torch_scatter deps. NON-FUNCTIONAL."""
+"""FRNet Backbone — standalone, no mmcv/mmdet3d/torch_scatter deps."""
 
 import torch
 import torch.nn as nn

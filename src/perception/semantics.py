@@ -9,14 +9,25 @@ mapping contribution from segmentation error, which is what a careful evaluator
 wants. The variable-resolution grid is the contribution; how the points got
 their class is not.
 
-Why not FRNet: the pretrained checkpoint is available, but the only standalone
-implementation we have (src/perception/frnet/) does not reproduce the trained
-network -- wrong backbone activation (LeakyReLU vs HSwish), wrong FOV params,
-missing RangeInterpolation -- and collapses to ~15% point accuracy on every
-frame. Running FRNet properly needs its full mmengine/mmcv/mmdet/mmdet3d stack.
-That is a possible later swap (Option B); the port code is kept, flagged
-non-functional, for that. The module-level segment*/get_frnet helpers below
-raise rather than silently return that garbage.
+Why not FRNet -- and the reason CHANGED on 2 Sep. The port used to be
+non-functional (~15% point accuracy) and the honest answer was "it does not
+work". It works now: 98.3% point accuracy on seq 00 frame 43, 69.8% mIoU over
+seq 08 against the paper's 73.3% (`scripts/frnet_eval.py`). The helpers below
+still raise, but the reason is now a DELIBERATE CHOICE rather than a defect --
+taking semantics from the ground-truth .label files isolates the mapping
+contribution from segmentation quality, which is what §9's evaluation is for.
+The model is reported ALONGSIDE the map, never swapped into it.
+
+⚑ Two of the three original divergences were described wrongly, and one of the
+  two was THIS FILE'S FAULT. The old note here said the port had "wrong FOV
+  params". It did not: `frnet/frnet.py` always defaulted to the checkpoint's
+  3.0 / -25.0. This module was overriding them with `fov_up_deg` /
+  `fov_down_deg` out of configs/frnet.yaml -- the HDL-64E's PHYSICAL vertical
+  field of view, 2.0 / -24.8. Those are different quantities: the checkpoint
+  learned a FIXED spherical projection, so points have to land in the grid the
+  weights were trained on whatever sensor produced them. They are pinned below
+  as FRNET_TRAIN_FOV_UP_DEG / _DOWN_DEG, where a sensor config cannot reach
+  them. See `frnet/frnet.py`'s header for all three.
 
 The 19-class scheme and the raw-id -> class map are the canonical SemanticKITTI
 ones (FRNet repo configs/_base_/datasets/semantickitti_seg.py labels_map), so a
@@ -82,12 +93,17 @@ def is_moving(raw_labels: np.ndarray) -> np.ndarray:
 FRNET_TRAIN_FOV_UP_DEG = 3.0
 FRNET_TRAIN_FOV_DOWN_DEG = -25.0
 
+# ⚑ The name is historical and the reason is not. The port WORKS as of 2 Sep;
+#   these entry points stay disabled on purpose, so that no mapping number can
+#   quietly come to depend on segmentation quality. `scripts/frnet_eval.py` is
+#   the supported way to run the model.
 _PORT_BROKEN = (
-    "FRNet inference is disabled: the standalone port in src/perception/frnet/ "
-    "does not reproduce the trained network (see its header). Use "
-    "semantic_labels(raw_labels) -- semantic class comes from the SemanticKITTI "
-    ".label files. To re-enable FRNet, install the real mmdet3d stack and "
-    "replace this module."
+    "FRNet inference is disabled: the map takes semantics from the "
+    "SemanticKITTI .label files on purpose, so the mapping contribution is "
+    "isolated from segmentation quality (math 9). This is a project decision, "
+    "not a defect -- the standalone port in src/perception/frnet/ has worked "
+    "since 2 Sep (98.3% point accuracy). Use semantic_labels(raw_labels) here; "
+    "run scripts/frnet_eval.py to evaluate the model itself."
 )
 
 

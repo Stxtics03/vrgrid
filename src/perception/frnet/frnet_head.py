@@ -1,9 +1,11 @@
-# NON-FUNCTIONAL -- see the header of frnet.py. This standalone port does not
-# reproduce the trained network (wrong backbone activation, wrong FOV params,
-# missing RangeInterpolation). Kept, not deleted, for a possible real FRNet
-# install later. semantics.py uses ground-truth .label files instead.
+# WORKING as of 2 Sep -- see the header of frnet.py, which names all three
+# divergences and which two of them the original header described wrongly.
+# Nothing in THIS file was ever at fault: the activation was the backbone's,
+# the FOV was the caller's (perception/semantics.py), and RangeInterpolation
+# belongs to the test pipeline in frnet.py. semantics.py still takes the map's
+# labels from the ground-truth .label files, by choice rather than necessity.
 
-"""FRNet Decode Head — standalone, no mmcv/mmdet3d deps. NON-FUNCTIONAL."""
+"""FRNet Decode Head — standalone, no mmcv/mmdet3d deps."""
 
 import torch
 import torch.nn as nn
