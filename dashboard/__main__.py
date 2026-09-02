@@ -42,6 +42,11 @@ def main(argv=None) -> None:
     p.add_argument("--no-map", action="store_true",
                    help="perception only; skip the map back end and its occupied-cell surface")
     p.add_argument("--no-patchworkpp", action="store_true")
+    p.add_argument("--features", action="store_true",
+                   help="draw the curb/pothole (math 7.4) and confidence (7.5) "
+                        "layers. Recomputed every 20 frames and once at the end, "
+                        "not every frame: the detector is a full-window pass and "
+                        "costs ~1.1 s")
     args = p.parse_args(argv)
 
     if args.seq is None:
@@ -60,7 +65,7 @@ def main(argv=None) -> None:
     engine = None if args.no_map else MapEngine(sched, ghost_removal=not args.show_ghosts)
     view = PipelineView(sched, spawn=args.save is None, save_path=args.save,
                         color_by=args.color_by, ghost_removal=not args.show_ghosts,
-                        palette=args.palette, engine=engine)
+                        palette=args.palette, engine=engine, features=args.features)
     n = 0
     for frame in iter_pipeline(args.seq, args.frames, use_patchworkpp=not args.no_patchworkpp,
                                start_frame=args.start_frame):
@@ -68,6 +73,7 @@ def main(argv=None) -> None:
             engine.step(frame)
         view.log_frame(frame)
         n += 1
+    view.log_features()   # final state; no-op unless --features
     start = f" from frame {args.start_frame}" if args.start_frame else ""
     print(f"{n} frames from sequence {args.seq}{start}"
           + (f" -> {args.save}" if args.save else ""))

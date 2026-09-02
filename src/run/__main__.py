@@ -169,6 +169,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--palette", default="semantickitti", choices=["semantickitti", "groups"],
                    help="class colours: the 19-class standard, or 7 colourblind-safe groups")
     p.add_argument("--no-patchworkpp", action="store_true", help="use the semantic-class ground proxy")
+    p.add_argument("--features", action="store_true",
+                   help="dashboard: draw the curb/pothole (math 7.4) and confidence "
+                        "(7.5) layers. Recomputed every 20 frames, not every frame -- "
+                        "the detector is a full-window pass and costs ~1.1 s")
     return p
 
 
@@ -196,7 +200,8 @@ def main(argv=None) -> int:
         # `--show-ghosts` visibly change the screen (Gate 3).
         view = PipelineView(sched, spawn=args.viz, save_path=args.save,
                             color_by=args.color_by, ghost_removal=not args.show_ghosts,
-                            palette=args.palette, engine=engine)
+                            palette=args.palette, engine=engine,
+                            features=args.features)
 
     n, cleared, protected = 0, 0, 0
     truncated_frames, truncated_peak = 0, 0
@@ -219,6 +224,8 @@ def main(argv=None) -> int:
                         f"{counters.cleared:,} cleared, {counters.protected:,} protected")
             print(msg)
 
+    if view is not None:
+        view.log_features()   # final state; no-op unless --features
     print(f"done: {n} frames, sequence {args.seq}")
     if engine is not None:
         # The number the Gate 3 demo is actually about. With --show-ghosts it
