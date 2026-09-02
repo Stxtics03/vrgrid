@@ -472,8 +472,10 @@ def format_result(result: Result, schedule) -> str:
         "RMSE, bias, spread, IL in cm against M*. rho = IL/spread (§9.3):",
         "  rho ~ 1  coarsening cost only the terrain's own sub-cell variability",
         "  rho >> 1 the estimate is biased beyond that -- schedule too aggressive",
-        "cells = ring cells with an observed reference footprint AND >1 reference",
-        "        return; everything else is dropped rather than scored as agreement.",
+        "cells = cells the ring still SERVES (not every cell in its window --",
+        "        the vehicle migrates cells inward and they stop updating), with an",
+        "        observed reference footprint AND >1 reference return. Everything",
+        "        else is dropped rather than scored as agreement. See metrics.py.",
     ]
     return "\n".join(lines)
 

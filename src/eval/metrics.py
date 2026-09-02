@@ -29,27 +29,127 @@ counted as agreement. The far rings extend well past where a short sequence
 ever drove, and scoring "we predicted nothing and the truth is nothing" as a
 hit would make every metric improve with range, which is the exact opposite
 of the effect being measured.
+
+⚑ **And a ring is scored only where it is still the ring that ANSWERS.** Ring
+L's buffer is a square of half-width `R_L`, so it physically covers the hole
+that the finer rings serve; `ring_of` hands a place to the FINEST ring that
+contains it, so ring L only ever receives returns from the annulus
+`[R_{L-1}, R_L)`. The vehicle then drives, that annulus sweeps outward across
+the world, and every cell it leaves behind keeps its last far-range value for
+as long as it stays in the window. Nothing clears it -- a toroidal shift only
+clears the edge coming into view (§2.4) -- and nothing reads it either, because
+`query()` routes that place to a finer ring now.
+
+Scoring those cells compares a value frozen at 60 m against a reference that
+went on accumulating the close-range returns the cell never received, and the
+population is not small. On the synthetic sequence, stale share of each ring's
+scored cells:
+
+    driven      ring 1    ring 2
+     22 m         19%       21%
+     46 m         20%       26%
+
+Ring 3 shows 13 cells and not a fraction, and that is the scene rather than
+the effect: the synthetic terrain has a hard forward edge near x = 54 m, so
+after the first frames nothing enters ring 3's forward band at all and its
+50-100 m annulus is populated laterally and to the rear, where a straight
+drive migrates nothing. On a real sequence, where the far band is fed
+continuously for kilometres, ring 3 is the ring that carries most of this.
+
+Worse, **the confound is asymmetric across the schedules §8.2 compares.** A
+uniform baseline has one ring, `ring_of` always answers 0, and nothing can
+migrate out from under it -- so the money plot charged the foveated schedules
+for stale memory and the uniform grids for none, in the one comparison the
+whole claim rests on.
+
+So `_ring_cells` returns the cells the ring SERVES, not the cells it stores,
+and every metric in this file inherits that. The predicate is `ring_of` on the
+cell centre -- the same function `query()` routes with, so the scored set
+cannot drift from the set the map actually answers with. See
+`test_a_ring_is_scored_only_where_it_still_answers`.
+
+⚑ **What that does NOT fix, and why it is left.** A cell the ring still serves
+is scored against every reference return in its footprint, including returns
+fired from outside the ring's band -- the ground behind the vehicle was driven
+over at 2 m before it fell back to 40 m, and M* kept all of it while ring 2's
+cell only ever integrated the 25-50 m returns. Fixing that properly means a
+range-stratified M*: (n, sum, sum^2) per band per 5 cm cell, roughly 4x the
+reference's memory and 4x its summed-area tables, on an array that is already
+205 MB for a 12-frame synthetic scene. Measured against a reference rebuilt
+from band-restricted returns instead, on the 12-frame sequence:
+
+    ring    band      RMSE vs M*   RMSE vs M*|band
+     1     10-25 m       0.37            0.32
+     2     25-50 m       0.32            0.30
+     3    50-100 m       0.33            0.32
+
+At most 0.05 cm, which is under the 0.29 cm quantisation floor §9.3 already
+puts on any of these numbers -- so it is second order to the migration
+confound above (0.40 -> 0.37 on the same ring, and 0.39 -> 0.72 on its IoU)
+and the memory is not worth spending on it. Stated rather than hidden, and
+the measurement is `scripts/`-free on purpose: it is a one-off, and it wants
+re-running on real data, where the rear band has a kerb in it and this
+sequence has smooth analytic terrain.
 """
 
 import numpy as np
 from vrgrid.cell import OCC_OCCUPIED
 from vrgrid.grid.fusion import occupancy_state
+from vrgrid.grid.lattice import ring_of
 from vrgrid.grid.query import window_cells
 
 
+def _cell_centres_m(gm, ring: int, ix, iy):
+    """Vehicle-frame centres of a ring's cells, in metres.
+
+    The vectorised twin of `gate._cell_centre`, which is O(1) per cell because
+    it is called from the frame loop; this one is handed a whole window at
+    once and is not. Same arithmetic, and
+    `test_cell_centres_agree_with_the_frame_path` pins that they agree --
+    two spellings of a cell's position is how a metric ends up scoring the
+    cell next door.
+    """
+    cell_m = gm.schedule.rings[ring].cell_m
+    return ((ix + 0.5) * cell_m - gm.vehicle_xy_m[0],
+            (iy + 0.5) * cell_m - gm.vehicle_xy_m[1])
+
+
 def _ring_cells(gm, ring: int):
-    """(slots, i_lo, j_lo) for one ring: every slot in its window, and the
-    base-lattice corner of the reference block each one subsumes."""
+    """(slots, i_lo, j_lo) for the cells ring `ring` still SERVES, and the
+    base-lattice corner of the reference block each one subsumes.
+
+    Not every slot in the window. The window is a square of half-width `R_L`
+    and therefore contains the hole the finer rings serve; the cells in it hold
+    whatever they were last written with before the vehicle migrated them
+    inward, and nobody reads them. See the note in the module docstring for
+    what scoring them costs.
+
+    `ring_of` on the cell centre is the predicate, because it is exactly what
+    `slot_of` routes a query with -- pinned in
+    `test_the_scored_set_is_the_set_query_routes_to`. The centre is the
+    convention for a cell straddling a ring boundary; §2.4 already says that
+    boundary wobbles by up to one coarsest cell as the window shifts, so no
+    finer rule would mean anything.
+    """
     buf = gm.buffers[ring]
     ix, iy = window_cells(buf)
     slots = np.arange(buf.slots, dtype=np.int64) + buf.offset
     k = gm.schedule.k(ring)
-    return slots, ix * k, iy * k
+
+    serves = ring_of(*_cell_centres_m(gm, ring, ix, iy),
+                     gm.schedule, gm.speed_ms) == ring
+    return slots[serves], ix[serves] * k, iy[serves] * k
 
 
 def _compared(gm, reference, ring: int, require_observed=True):
     """The cells of `ring` that can honestly be scored, with their reference
-    statistics. Returns (slots, n_ref, ref_mean_cm, ref_var_cm2, mine_cm)."""
+    statistics. Returns (slots, n_ref, ref_mean_cm, ref_var_cm2, mine_cm).
+
+    Three conditions, and they are three different questions: `_ring_cells`
+    asks whether the ring still answers for the place, `n_ref > 0` whether the
+    reference knows anything about it, and `require_observed` whether this map
+    ever wrote it. A cell has to pass all three to be an honest comparison.
+    """
     slots, i_lo, j_lo = _ring_cells(gm, ring)
     k = gm.schedule.k(ring)
     n_ref, ref_mean, ref_var = reference.block_stats(i_lo, j_lo, k)
@@ -167,9 +267,16 @@ def fill_rate_per_ring(gm, reference=None):
     """Fraction of cells with at least one observation, per ring.
 
     Measured over the cells the reference says exist, when one is given --
-    otherwise over the ring's whole window, which includes the toroidal
-    padding and the hole covered by the finer ring, and would report a fill
-    rate diluted by memory that was never meant to hold anything.
+    otherwise over everything the ring serves, which still includes cells no
+    return has ever reached and so reports a fill rate diluted by memory that
+    was never meant to hold anything.
+
+    ⚑ The hole this docstring used to warn about is gone at the source:
+      `_ring_cells` no longer returns the cells the finer rings serve. It had
+      been dropping them here by `n_ref > 0`, which is not the same test and
+      does not do it -- the reference has plenty of returns under the hole,
+      which is the whole problem. Ring 3 counted cells frozen at 60 m as
+      "filled" and reported a far-field fill rate the ring had not earned.
 
     Expect this to be low and to RISE with frame count, not with a single
     frame's geometry: past ~25 m the far field is filled by ego-motion sweeping

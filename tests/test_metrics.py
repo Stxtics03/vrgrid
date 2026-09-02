@@ -95,6 +95,113 @@ def test_rmse_grows_with_the_error_written_in(scene):
     assert seen[2] == pytest.approx(20.0, abs=0.6)
 
 
+def test_a_ring_is_scored_only_where_it_still_answers(scene):
+    """⚑ The migration confound. Ring L's buffer is a square of half-width
+    `R_L`, so it physically covers the hole the finer rings serve, and every
+    cell the vehicle migrates inward keeps its last far-range value there
+    forever -- nothing clears it, and `query()` no longer reads it.
+
+    Scoring those cells asks a value frozen at 60 m to match a reference that
+    kept accumulating the close-range returns the cell never received. So a
+    deliberately absurd height written into a migrated cell must not move
+    RMSE_L by so much as a rounding error, while the same height written into
+    a cell the ring still answers for must move it a lot. If the second
+    assertion ever fails the filter has stopped letting anything through and
+    the first one is passing for the wrong reason.
+    """
+    gm, reference, _ = scene
+    from vrgrid.eval.metrics import _cell_centres_m, _ring_cells
+    from vrgrid.grid.query import window_cells
+
+    ring = 2
+    ix, iy = window_cells(gm.buffers[ring])
+    cx, cy = _cell_centres_m(gm, ring, ix, iy)
+    served = set(_ring_cells(gm, ring)[0].tolist())
+    all_slots = np.arange(gm.buffers[ring].slots) + gm.buffers[ring].offset
+
+    inside = np.maximum(np.abs(cx), np.abs(cy)) < gm.schedule.rings[0].half_width_m
+    migrated = [s for s in all_slots[inside].tolist() if s not in served]
+    assert migrated, "no cell has migrated inward; the fixture drove too little"
+
+    before = height_rmse_per_ring(gm, reference)[ring]
+
+    # The fixture is module-scoped, so both writes are put back -- including
+    # obs_count, which is what `require_observed` reads.
+    def rmse_with_nonsense_in(cells):
+        cells = list(cells)
+        keep = (gm.soa["ground_height"][cells].copy(),
+                gm.soa["obs_count"][cells].copy())
+        gm.soa["ground_height"][cells] = 30_000       # 300 m of nonsense
+        gm.soa["obs_count"][cells] = np.maximum(gm.soa["obs_count"][cells], 5)
+        try:
+            return height_rmse_per_ring(gm, reference)[ring]
+        finally:
+            gm.soa["ground_height"][cells], gm.soa["obs_count"][cells] = keep
+
+    assert rmse_with_nonsense_in(migrated) == pytest.approx(before)
+    assert rmse_with_nonsense_in(sorted(served)[: len(migrated)]) > before * 10
+
+
+def test_the_scored_set_is_the_set_query_routes_to(scene):
+    """The band predicate has to be the map's own routing rule, not a second
+    opinion about it. `slot_of` is what `query()` uses; every cell scored for
+    ring L must be the cell `slot_of` hands back at that place, or the metric
+    is measuring memory the planner cannot reach."""
+    gm = scene[0]
+    rng = np.random.default_rng(0)
+    from vrgrid.eval.metrics import _cell_centres_m, _ring_cells
+
+    for ring in range(len(gm.schedule.rings)):
+        slots, i_lo, j_lo = _ring_cells(gm, ring)
+        if not slots.size:
+            continue
+        k = gm.schedule.k(ring)
+        pick = rng.choice(slots.size, size=min(200, slots.size), replace=False)
+        cx, cy = _cell_centres_m(gm, ring, i_lo[pick] // k, j_lo[pick] // k)
+        for slot, x_m, y_m in zip(slots[pick], cx, cy):
+            assert slot_of(gm, float(x_m), float(y_m)) == (ring, int(slot))
+
+
+def test_cell_centres_agree_with_the_frame_path(scene):
+    """Two spellings of a cell's position is how a metric ends up scoring the
+    cell next door. `gate._cell_centre` is the frame loop's O(1) version and
+    this is the vectorised one; they must agree exactly."""
+    gm = scene[0]
+    from vrgrid.eval.metrics import _cell_centres_m
+    from vrgrid.grid.gate import _cell_centre
+    from vrgrid.grid.query import window_cells
+
+    rng = np.random.default_rng(1)
+    for ring in range(len(gm.schedule.rings)):
+        buf = gm.buffers[ring]
+        ix, iy = window_cells(buf)
+        cx, cy = _cell_centres_m(gm, ring, ix, iy)
+        for local in rng.choice(buf.slots, size=50, replace=False):
+            assert (cx[local], cy[local]) == _cell_centre(
+                gm, ring, int(local) + buf.offset)
+
+
+def test_a_single_ring_schedule_gives_up_nothing_to_the_band_filter(scene):
+    """⚑ Why the confound was not merely noise: it was ASYMMETRIC across the
+    schedules §8.2 compares. A uniform baseline has one ring, `ring_of` always
+    answers 0, and no cell can ever migrate out from under it -- so the money
+    plot charged the foveated schedules for stale memory and the uniform grids
+    for none. The only cells a single-ring schedule loses here are the ones
+    that fall outside the map altogether."""
+    from vrgrid.eval.harness import uniform_schedule
+    from vrgrid.eval.metrics import _cell_centres_m, _ring_cells
+    from vrgrid.grid.query import window_cells
+
+    gm = build_gridmap(uniform_schedule(0.20, half_width_m=24.0))
+    buf = gm.buffers[0]
+    ix, iy = window_cells(buf)
+    cx, cy = _cell_centres_m(gm, 0, ix, iy)
+    kept = np.isin(np.arange(buf.slots) + buf.offset, _ring_cells(gm, 0)[0])
+
+    reach = gm.schedule.rings[0].half_width_m
+    assert np.all(np.maximum(np.abs(cx), np.abs(cy))[~kept] >= reach)
+
+
 def test_a_ring_nobody_drove_through_reports_nan_not_zero(scene):
     """Zero error on a ring with nothing in it would read as a perfect score
     and would make every metric improve with range -- the exact opposite of

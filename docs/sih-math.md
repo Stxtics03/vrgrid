@@ -610,6 +610,26 @@ RMSE_L = sqrt( (1/|C_L|) Σ_{c ∈ C_L} ( μ_c − h̄*(c) )² ),
          h̄*(c) = mean_{f ∈ F(c)} h*_f                               (26)
 ```
 
+> **⚑ Correction, 3 Sep — Aakash. `C_L` is not "ring L's cells", and reading it that way scored each ring against a reference holding observations it never received.** *The section never says what `C_L` is, and the implementation took the obvious reading: every cell in ring L's buffer. That buffer is a square of half-width `R_L`, so it physically covers the hole the finer rings serve, while `ring_of` hands each place to the FINEST ring containing it — so ring L only ever receives returns from the annulus `[R_{L-1}, R_L)`.*
+>
+> *The vehicle then drives and that annulus sweeps outward across the world. Every cell it leaves behind keeps its last far-range value for as long as it stays in the window: nothing clears it — a toroidal shift clears only the edge coming into view (§2.4) — and nothing reads it, because `query()` routes that place to a finer ring now. Scoring it asks a height frozen at 60 m to match an `M*` that went on accumulating the close-range returns the cell never got.*
+>
+> *Measured on the 12-frame synthetic sequence, 5/10/20/40 — stale share of each ring's scored population, and what dropping it does:*
+>
+> | ring | stale | RMSE_L cm | IoU | fill |
+> |---|---|---|---|---|
+> | 1 | 19% | 0.40 → **0.37** | 0.59 → **0.68** | 0.59 → **0.68** |
+> | 2 | 21% | 0.37 → **0.32** | 0.39 → **0.72** | 0.39 → **0.72** |
+> | 3 | 13 cells | 0.33 → 0.33 | 0.23 → **0.83** | 0.23 → **0.83** |
+>
+> *Occupancy and fill move furthest because the hole is full of ground `M*` knows about and the ring never wrote: ring 3's far-field fill rate was reported as 0.23 when the ring fills 0.83 of what it actually answers for. Ring 3's RMSE does not move because this scene has a hard forward edge near x = 54 m, so its 50–100 m annulus is populated laterally and to the rear, where a straight drive migrates nothing — 13 cells in total. On a real sequence, where the far band is fed for kilometres, ring 3 is the ring that carries most of this.*
+>
+> ***And the confound was asymmetric across the schedules §8.2 compares***, *which is why it mattered more than its size. A uniform baseline has one ring, `ring_of` always answers 0, and nothing can migrate out from under it — so the money plot charged the foveated schedules for stale memory and the uniform grids for none. Worst-ring RMSE, before → after: 5/10/20/40 0.40 → 0.37, 5/10/50 0.46 → 0.37, uniform 10 cm 0.35 → 0.35, uniform 20 cm 0.41 → 0.41. Only our own schedules move, and they move the way the thesis says they should.*
+>
+> *So `C_L` is **the cells ring L still serves**, and the predicate is `ring_of` on the cell centre — the same function `query()` routes with, so the scored set cannot drift from the set the map answers with. The centre is the convention for a cell straddling a boundary; §2.4 already says that boundary wobbles by up to one coarsest cell as the window shifts, so no finer rule would mean anything.*
+>
+> ***What this does not fix.*** *A cell the ring still serves is scored against every return in its footprint, including returns fired from outside the ring's band — the ground behind the vehicle was driven over at 2 m before it fell back to 40 m, and `M*` kept all of it. Fixing that needs a range-stratified `M*`: (n, Σh, Σh²) per band per 5 cm cell, ~4x the reference's memory and 4x its summed-area tables. Against a reference rebuilt from band-restricted returns the difference is at most 0.05 cm (ring 1: 0.37 → 0.32, ring 2: 0.32 → 0.30, ring 3: 0.33 → 0.32) — under the 0.29 cm quantisation floor §9.3 already puts on these numbers. Left deliberately, and it wants re-measuring on real data, where the rear band has a kerb in it and this sequence has smooth analytic terrain.*
+
 ### 9.3 ⚑ The coarsening-justification ratio
 
 The number that expresses the thesis. For coarse cell `c`, define information loss against the individual fine cells (not their mean):

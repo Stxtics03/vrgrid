@@ -136,6 +136,32 @@ Format:
 **So what:** Fulfills the Days 5–6 writing deliverable for Track γ. Ready for direct inclusion in the final technical report and submission slide deck.
 
 ---
+## 2026-09-03 — Aakash
+**Module:** D1 — Information-loss metrics (§9.2, §9.3)
+
+**Finding:** §9.2 scored each ring against a reference holding observations that ring never received. `C_L` was read as "every cell in ring L's buffer", and that buffer is a square of half-width `R_L` — it physically covers the hole the finer rings serve. `ring_of` hands a place to the *finest* ring containing it, so ring L only ever receives returns from the annulus `[R_{L-1}, R_L)`. The vehicle drives, that annulus sweeps outward, and every cell it leaves behind keeps its last far-range value for as long as it stays in the window: nothing clears it (a toroidal shift clears only the edge coming into view, §2.4) and nothing reads it, because `query()` routes that place to a finer ring now. So the metric asked a height frozen at 60 m to match an M* that went on accumulating the close-range returns the cell never got.
+
+Stale share of each ring's scored population, 5/10/20/40 on the synthetic sequence: **19% of ring 1 and 21% of ring 2 after 22 m driven, 20% and 26% after 46 m.** Dropping them, before → after:
+
+| ring | RMSE_L cm | IoU | fill |
+|---|---|---|---|
+| 1 | 0.40 → **0.37** | 0.59 → **0.68** | 0.59 → **0.68** |
+| 2 | 0.37 → **0.32** | 0.39 → **0.72** | 0.39 → **0.72** |
+| 3 | 0.33 → 0.33 | 0.23 → **0.83** | 0.23 → **0.83** |
+
+Occupancy and fill move furthest because the hole is full of ground M* knows about and the ring never wrote — **ring 3's far-field fill rate was being reported as 0.23 when the ring fills 0.83 of what it actually answers for**, which is the §1.3 ring-sweep claim being understated by a factor of three and a half. `fill_rate_per_ring`'s own docstring already warned about "the hole covered by the finer ring" and thought `n_ref > 0` handled it; it does not, and cannot — the reference has plenty of returns under the hole, which is the whole problem.
+
+**⚑ The confound was asymmetric across the schedules §8.2 compares, which is why it mattered more than its size.** A uniform baseline has one ring, `ring_of` always answers 0, and nothing can migrate out from under it. The money plot was charging the foveated schedules for stale memory and the uniform grids for none. Worst-ring RMSE before → after: 5/10/20/40 **0.40 → 0.37**, 5/10/50 **0.46 → 0.37**, uniform 10 cm 0.35 → 0.35, uniform 20 cm 0.41 → 0.41. Only our own schedules move, and 5/10/50 stops reading worse than uniform 20 cm on a difference that was never real.
+
+**⚑ Ring 3 shows 13 migrated cells, not a fraction, and that is this scene rather than the effect.** The synthetic terrain has a hard forward edge near x = 54 m, so after the first frames nothing enters ring 3's forward band and its 50–100 m annulus is populated laterally and to the rear, where a straight-line drive migrates nothing. On a real sequence the far band is fed continuously for kilometres and ring 3 is the ring that carries most of this. **The synthetic numbers above are a floor on the effect, not an estimate of it.**
+
+**⚑ What is deliberately not fixed.** A cell the ring still serves is scored against every return in its footprint, including returns fired from outside the ring's band — ground behind the vehicle was driven over at 2 m before it fell back to 40 m, and M* kept all of it. Fixing that needs a range-stratified M*: (n, Σh, Σh²) per band per 5 cm cell, ~4× its memory and 4× its summed-area tables, on an array already at 205 MB for a 12-frame synthetic scene. Measured against a reference rebuilt from band-restricted returns, the difference is **at most 0.05 cm** (ring 1: 0.37 → 0.32, ring 2: 0.32 → 0.30, ring 3: 0.33 → 0.32) — under the 0.29 cm quantisation floor §9.3 already puts on these numbers. Second order to the migration confound, and the memory is not worth spending on it *on this sequence*; it wants re-measuring on real data, where the rear band has a kerb in it and this one has smooth analytic terrain.
+
+**Source:** `src/eval/metrics.py` (`_ring_cells`, `_cell_centres_m`), `docs/sih-math.md` §9.2 correction, `tests/test_metrics.py::test_a_ring_is_scored_only_where_it_still_answers`, `::test_the_scored_set_is_the_set_query_routes_to`, `::test_cell_centres_agree_with_the_frame_path`, `::test_a_single_ring_schedule_gives_up_nothing_to_the_band_filter`.
+
+**So what:** §8.2's money plot is comparable across schedules for the first time — the axis it varies is now the schedule and not how much stale memory each schedule happens to carry. Every per-ring number measured before today needs re-reading, and the far-field fill rate needs re-reading hardest. The predicate is `ring_of` on the cell centre, the same function `query()` routes with, so the scored set cannot drift from the set the map answers with; that identity is pinned against `slot_of` rather than asserted.
+
+---
 ## 2026-09-02 — Aakash
 **Module:** D1 — Plan regret (§8.1 eq. 23)
 
