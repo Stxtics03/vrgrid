@@ -282,3 +282,33 @@ def test_the_pose_source_can_be_forced(monkeypatch):
     monkeypatch.setenv("VRGRID_POSE_SOURCE", "sideways")
     with pytest.raises(ValueError, match="gt.*slam"):
         loader.pose_source("07")
+
+
+def test_only_08_needs_the_slam_poses():
+    """The per-sequence default, justified across every labelled sequence.
+
+    Median absolute ground-height disagreement between consecutive frames, in
+    20 cm cells both frames saw, measured 2 Sep on all of 00-10:
+
+        seq    GT poses   SLAM poses          seq    GT poses   SLAM poses
+         00      2.27cm       1.05cm           06      1.32cm       1.23cm
+         01      1.43cm       1.38cm           07      0.47cm       0.64cm
+         02      1.20cm       1.20cm           08     16.53cm       1.04cm
+         03      1.97cm       1.24cm           09      1.21cm       1.26cm
+         04      1.25cm       1.11cm           10      1.19cm       1.20cm
+         05      1.02cm       1.00cm
+
+    08 is the only pathological one -- 16x worse on GT, and the reason its
+    per-ring RMSE read 162 cm before the switch. Everything else registers to
+    0.47-2.27 cm on GT, and the SLAM wins elsewhere are sub-centimetre: within
+    noise, and not worth changing numbers for.
+
+    This test exists so the default cannot quietly widen to sequences that do
+    not need it, or narrow away from the one that does.
+    """
+    from vrgrid.perception import loader
+
+    assert loader.POSE_SOURCE_BY_SEQUENCE == {"08": "slam"}, (
+        "the per-sequence override list changed -- re-measure before widening "
+        "it; only 08 was shown to need SLAM poses")
+    assert loader.POSE_SOURCE_DEFAULT == "gt"

@@ -467,6 +467,23 @@ on Day 0 — right for most sequences, wrong for 08.
 GT, and `VRGRID_POSE_SOURCE=gt|slam` forces one globally so the table above
 stays reproducible.
 
+**Checked across every labelled sequence**, same measure, 2 Sep:
+
+| seq | GT | SLAM | | seq | GT | SLAM |
+|---|---|---|---|---|---|---|
+| 00 | 2.27 | 1.05 | | 06 | 1.32 | 1.23 |
+| 01 | 1.43 | 1.38 | | 07 | **0.47** | 0.64 |
+| 02 | 1.20 | 1.20 | | 08 | **16.53** | **1.04** |
+| 03 | 1.97 | 1.24 | | 09 | 1.21 | 1.26 |
+| 04 | 1.25 | 1.11 | | 10 | 1.19 | 1.20 |
+| 05 | 1.02 | 1.00 | | | | |
+
+**08 is the only pathological sequence.** Everything else registers to
+0.47–2.27 cm on the official poses, and the SLAM wins elsewhere are
+sub-centimetre — within noise, and not worth changing numbers for. So the
+override list is exactly `{"08": "slam"}`, and
+`test_only_08_needs_the_slam_poses` pins it so it cannot quietly widen.
+
 **Ruled out along the way, each by measurement:** the height datum (07 is clean
 on the same code), band saturation, the ground mask, frame alignment (08 is
 4,071/4,071/4,071), the calibration (07 and 08 have *byte-identical* `Tr`), and
