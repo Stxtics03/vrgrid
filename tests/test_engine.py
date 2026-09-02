@@ -369,3 +369,31 @@ def test_the_band_follows_the_vehicle_rather_than_the_world_datum():
     assert np.median(z) > 30.0, (
         f"median occupied height {np.median(z):.1f} m with the vehicle at 39 m "
         "-- heights are still being clamped against the world datum")
+
+
+def test_the_visibility_cap_reports_what_it_dropped():
+    """A cap that silently drops cells is the dangerous half of §10.4.
+
+    Truncated cells keep their occupancy and are never tested against the range
+    image, so a ghost among them is permanent -- and `cleared` cannot reveal it,
+    because `cleared` only counts what was offered. On sequence 07 the
+    provisional cap of 150,000 dropped 164,442 cells at peak, 52.3% of the
+    occupied set, and nothing said so.
+    """
+    from vrgrid.run.engine import StepCounters
+
+    c = StepCounters(index=0, points=0, binned=0, cells_touched=0,
+                     occupied=200_000, tested=150_000, cleared=0, protected=0,
+                     out_of_view=0, truncated=50_000)
+    assert c.truncated_fraction == 0.25
+
+    held = StepCounters(index=0, points=0, binned=0, cells_touched=0,
+                        occupied=120_000, tested=120_000, cleared=7, protected=1,
+                        out_of_view=0)
+    assert held.truncated == 0, "the default must be 'nothing was dropped'"
+    assert held.truncated_fraction == 0.0
+
+    empty = StepCounters(index=0, points=0, binned=0, cells_touched=0,
+                         occupied=0, tested=0, cleared=0, protected=0,
+                         out_of_view=0)
+    assert empty.truncated_fraction == 0.0, "no divide by zero on an empty frame"

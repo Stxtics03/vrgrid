@@ -199,12 +199,16 @@ def main(argv=None) -> int:
                             palette=args.palette, engine=engine)
 
     n, cleared, protected = 0, 0, 0
+    truncated_frames, truncated_peak = 0, 0
     for frame in iter_pipeline(args.seq, args.frames, use_patchworkpp=not args.no_patchworkpp,
                                start_frame=args.start_frame):
         counters = engine.step(frame) if engine is not None else None
         if counters is not None:
             cleared += counters.cleared
             protected += counters.protected
+            if counters.truncated:
+                truncated_frames += 1
+                truncated_peak = max(truncated_peak, counters.truncated)
         if view is not None:
             view.log_frame(frame)
         n += 1
@@ -221,6 +225,20 @@ def main(argv=None) -> int:
         # is zero by construction, which is the point of printing it.
         print(f"ghost removal: {cleared:,} cells cleared, {protected:,} spared by "
               f"the current-return guard")
+        # ⚑ Loud, and above any other summary, because it invalidates the line
+        #   printed just before it. A truncated cell is never tested, keeps its
+        #   occupancy, and cannot appear in `cleared` -- so a run that
+        #   truncates reports a healthy ghost count while the map keeps its
+        #   ghosts. Silence here used to be the only signal that the cap held.
+        if truncated_frames:
+            print(f"⚑ visibility cap TRUNCATED on {truncated_frames} of {n} "
+                  f"frames, up to {truncated_peak:,} occupied cells dropped "
+                  f"and never tested.")
+            print("  Raise visibility.max_candidate_cells; the ghost numbers "
+                  "above are a floor, not a measurement.")
+        elif cleared or protected:
+            print("  visibility cap held on every frame: the whole occupied "
+                  "set was tested.")
     if args.save:
         print(f"recording written to {args.save}")
     return 0

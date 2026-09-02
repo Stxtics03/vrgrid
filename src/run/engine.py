@@ -77,11 +77,26 @@ class StepCounters:
     cleared: int
     protected: int           # would have cleared; had a return this scan
     out_of_view: int
+    truncated: int = 0       # occupied cells DROPPED by max_candidate_cells
 
     @property
     def protected_fraction(self) -> float:
         would = self.protected + self.cleared
         return self.protected / would if would else 0.0
+
+    @property
+    def truncated_fraction(self) -> float:
+        """Share of the occupied set the cap refused to look at.
+
+        ⚑ This is the number that must be zero on a reportable run. A
+          truncated cell keeps its occupancy and is never tested against the
+          range image, so a ghost among them is PERMANENT -- and `cleared`
+          cannot show it, because `cleared` only counts what was offered. The
+          ghost counter stays healthy while the map quietly keeps its ghosts.
+          Measured on sequence 07 the provisional cap of 150,000 dropped
+          164,442 cells at peak, 52.3% of the occupied set, in silence.
+        """
+        return self.truncated / self.occupied if self.occupied else 0.0
 
 
 def class_ids_fit(semantic) -> bool:
@@ -400,6 +415,15 @@ class MapEngine:
         if len(occupied) > self.max_candidates:
             # Deterministic, not random: a cap that changes which cells it drops
             # from run to run would break the determinism test.
+            #
+            # ⚑ COUNTED, not just dropped. Silent truncation is the dangerous
+            #   half of this cap: the cells past the cut keep their occupancy,
+            #   are never tested, and `cleared` cannot reveal them because it
+            #   only counts what was offered. Recording it is what turns "the
+            #   cap is too small" from an invisible correctness bug into a
+            #   number on the counter. `occupied` is already the true count --
+            #   it is set above, before this line.
+            counters.truncated = len(occupied) - self.max_candidates
             occupied = occupied[:self.max_candidates]
 
         m = len(occupied)
