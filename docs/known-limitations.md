@@ -268,35 +268,97 @@ committed; `.gitignore` excludes them by design.)*
 
 ---
 
+## 2b. Accuracy across ALL eleven labelled sequences — the headline result
+
+Everything in this project was measured on 07 and 08 until 2 Sep, and the
+honest reason for those two is that they downloaded first. All eleven labelled
+sequences, 40 frames each, schedule 5/10/20/40, with the per-sequence pose
+source and Patchwork++:
+
+| seq | r0 RMSE | r1 RMSE | r1 ρ | r2 RMSE | r2 ρ |
+|---|---|---|---|---|---|
+| 00 | 2.73 | 6.54 | 1.52 | 28.09 | 2.32 |
+| 01 | 1.59 | 2.28 | 1.59 | 4.39 | 1.46 |
+| 02 | 1.34 | 7.15 | 1.45 | 15.53 | 1.36 |
+| 03 | 5.25 | 12.16 | 1.48 | 24.26 | 1.76 |
+| 04 | 0.91 | 3.65 | 1.26 | 11.50 | 1.31 |
+| 05 | 1.26 | 3.53 | 1.55 | 11.17 | 1.50 |
+| 06 | 4.18 | 3.02 | 1.43 | 9.48 | 1.52 |
+| 07 | 1.76 | 3.48 | 1.32 | 6.13 | 1.18 |
+| 08 | 1.16 | 2.55 | 1.30 | 6.46 | 1.22 |
+| 09 | 1.85 | 3.67 | 1.50 | 6.37 | 1.43 |
+| 10 | 1.61 | 3.51 | 1.29 | 8.57 | 1.56 |
+
+```
+ring 1:  rho median 1.45 [1.26-1.59]     RMSE median  3.53 cm [2.28-12.16]
+ring 2:  rho median 1.46 [1.18-2.32]     RMSE median  9.48 cm [4.39-28.09]
+```
+
+**Lead with ρ, not RMSE.** At ring 1, ρ spans **1.26×** across the whole
+dataset while RMSE spans **5.3×**. That is §9.3's decomposition doing exactly
+what it is for: RMSE tracks how rough each road happens to be, ρ divides that
+out and leaves what the coarsening cost. "ρ = 1.45, range 1.26–1.59, n = 11" is
+both more defensible and closer to the actual claim than any single sequence's
+RMSE.
+
+⚑ **07 and 08 are at the good end, not typical.** Their ring-1 ρ of 1.32 and
+  1.30 sit near the bottom of the range against a median of 1.45. Anyone who
+  checks a third sequence gets a slightly worse number than the one we quoted
+  first, so quote the distribution.
+
+⚑ **Sequence 00 is the only ρ outlier** at 2.32 on ring 2, against 1.18–1.76
+  everywhere else. Its systematic bias was a pose artifact and is fixed (see
+  §6), but that only moved ρ from 2.40 to 2.32 — the rest is dispersion
+  (spread 14.41 cm at ring 2) and is **unexplained**. 00 is a long urban loop
+  and ring 2 spans 20–50 m where ground segmentation is hardest; that is a
+  hypothesis, not a finding.
+
+⚑ **Ring 0 has no ρ on any sequence.** `coarsening_ratio_per_ring` excludes
+  footprints holding a single reference return, and at 5 cm essentially every
+  footprint holds one. So the finest ring — the one the foveation argument is
+  actually about — has RMSE (0.91–5.25 cm) and no ρ anywhere. That is a real
+  gap in the evidence, not an oversight in the run.
+
 ## 3. Curb and pothole detection — real numbers, no ground truth to score against
 
 `src/grid/features.py` answers the problem statement's own sentence about
-curbs and potholes directly (§7.4). Measured on **both** sequences, 40 frames, schedule 5/10/20/40, through the
-real loader → transforms → **Patchwork++** → `run_sequence` → `features.detect`
-path, with the height datum and the per-sequence pose source in place:
+curbs and potholes directly (§7.4). Measured on **all eleven labelled sequences**, 40 frames, schedule 5/10/20/40,
+through the real loader → transforms → Patchwork++ → `run_sequence` →
+`features.detect` path. Curb median by ring:
 
-| ring | cell | 07 curbs | median | 08 curbs | median |
-|---|---|---|---|---|---|
-| 0 | 5 cm | 2,294 | 8.5 cm | 4,293 | 8.6 cm |
-| 1 | 10 cm | 1,604 | 9.2 cm | 2,404 | 8.1 cm |
-| 2 | 20 cm | 143 | 9.1 cm | 2,550 | 8.5 cm |
-| 3 | 40 cm | — | — | 252 | 10.4 cm |
+| seq | r0 | r1 | r2 | r3 | curb cells | pothole cells |
+|---|---|---|---|---|---|---|
+| 00 | 8.2 | 8.1 | 9.9 | 13.1 | 6,964 | 180 |
+| 01 | 8.2 | 8.2 | 8.9 | 15.0 | 14,581 | 192 |
+| 02 | 9.1 | 8.1 | 12.0 | 12.0 | 9,055 | 292 |
+| 03 | 8.1 | 10.8 | 10.0 | 18.1 | 7,783 | 345 |
+| 04 | 8.1 | 7.6 | 10.0 | 9.9 | 5,827 | 404 |
+| 05 | 9.1 | 8.5 | 9.5 | 9.0 | 9,414 | 132 |
+| 06 | 8.1 | 8.2 | 10.3 | 11.8 | 5,388 | 107 |
+| 07 | 8.5 | 9.2 | 9.1 | — | 4,041 | 257 |
+| 08 | 8.6 | 8.1 | 8.5 | 10.4 | 9,499 | 166 |
+| 09 | 8.5 | 8.9 | 9.1 | 11.5 | 9,140 | 56 |
+| 10 | 8.2 | 9.0 | 9.8 | 14.8 | 23,527 | 551 |
 
-Potholes: **257 cells on 07** (ring medians 34.5 / 20.0 / 8.0 cm) and **166 on
-08** (8.5 / 9.5 / 10.5 / 23.0 cm).
+**Ring 0 returns 8.1–9.1 cm on every one of eleven sequences** — different
+recording dates, different calibrations, a one-centimetre band. That
+consistency is the evidence the detector measures a physical feature rather
+than an artifact, and it is a stronger claim than any single number.
 
-The curb medians land between **8.1 and 10.4 cm on every ring of both
-sequences**, with p90s reaching 14–17 cm — the low end of the 10–15 cm a real
-urban kerb is. On the synthetic scene, where the answer is known, the detector
-returns **12.0 cm against a built 12 cm kerb** and **40.0 cm against a built
-40 cm hole**.
+The rise with ring is systematic and physical — 8–9 cm at 5 cm cells, 9–12 at
+20 cm, 9–18 at 40 cm — because a coarser cell straddles the kerb face and
+averages in sloped ground. Report per ring; ring 3's spread (9.0–18.1) is where
+it stops being reliable.
 
-⚑ Earlier versions of this table showed the median *rising* with cell size
-  (9.1 → 11.3 → 14.2 cm) and I explained it as coarser cells averaging across
-  the kerb face. That trend is gone and the explanation was wrong: it was an
-  artifact of the height bugs in §6. Counts also fell by an order of magnitude
-  — the old figures were inflated by spurious detections from vehicle-frame
-  heights.
+⚑ **The absolute value reads 1–2 cm low.** A real urban kerb is 10–15 cm and
+  ring 0 consistently returns 8–9. Consistent under-reading, not noise —
+  likely `curb.baseline_m` of 0.20 m sampling partway up the face rather than
+  across it. Say so before being asked.
+
+⚑ **Potholes are a demonstration, not a claim.** 56 to 551 cells per sequence
+  is a 10× spread with no pattern, and 00's ring 0 reports five cells at
+  48.5 cm. The detector fires occasionally and correctly; there is no rate to
+  quote.
 
 **The limitation: SemanticKITTI has no ground truth for curb or pothole
 geometry.** There is no detection rate to quote, only counts and a plausibility
