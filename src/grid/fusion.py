@@ -402,7 +402,7 @@ def mark_blind(soa, slots) -> None:
 
 
 def scatter(gm, points_m, class_id, is_ground, reflectivity=None,
-            points_world_m=None):
+            points_world_m=None, height_m=None):
     """One scan into the variable-resolution grid. Math §3, master v4 §3.5.
 
     ⚑ TWO frames, and they are not interchangeable. This is the single most
@@ -469,6 +469,20 @@ def scatter(gm, points_m, class_id, is_ground, reflectivity=None,
     # far field onto the origin. `bin_points` returns -1 for both cases, so
     # the separate OUTSIDE mask this used to apply is gone with it.
 
+    # ⚑ RULED OUT, 2 Sep: grazing incidence is NOT the cause of the
+    #   range-dependent height bias. `measurement_variance_cm2` takes a
+    #   `cos_incidence` and this calls it head-on, which is wrong on its face
+    #   for a ground return -- at 40 m the true cos_inc is 0.043 and eq. (13)
+    #   divides by cos^2, so a far ground return's variance is understated by
+    #   two orders of magnitude. Passing the real incidence changes the weights
+    #   enormously (at 20 m, 83 -> 1) and changes the measured bias by 0.01 cm:
+    #   seq 07 ring 2 mean bias 21.63 -> 21.62.
+    #
+    #   So the weighting is not what holds the far-field estimate high, and a
+    #   change to frozen fusion semantics that alters every weight for no
+    #   measured gain is not worth making. Left as it was, with the experiment
+    #   recorded so nobody repeats it. The cause is still open -- see
+    #   docs/known-limitations.md.
     ranges = np.linalg.norm(pts, axis=1)
     w_q = quantise_weight(measurement_variance_cm2(ranges))
     refl = (np.zeros(pts.shape[0], dtype=np.int32) if reflectivity is None
@@ -478,7 +492,8 @@ def scatter(gm, points_m, class_id, is_ground, reflectivity=None,
     # allocates per call -- fine in a test, and 19 MB a frame in the loop,
     # which is more than the whole grid. See gpu/CLAUDE.md.
     scratch = getattr(getattr(gm, "allocation", None), "scratch", None)
-    args = (slots, quantise_height(z), w_q, refl,
+    args = (slots, quantise_height(z if height_m is None else
+                            np.asarray(height_m, dtype=np.float64)), w_q, refl,
             np.asarray(class_id, dtype=np.uint8), np.asarray(is_ground, dtype=bool))
     if gm.scatter_mode == "sorted":
         return scatter_sorted(*args, scratch=scratch)

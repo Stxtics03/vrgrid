@@ -479,11 +479,15 @@ def run_sequence(gm: GridMap, scans, recentre: bool = True,
         #   coordinates per frame, so one more per-frame array is in keeping.
         #   The deeper question -- whether `scatter` should ever take height
         #   from a different frame than cell identity -- is worth asking once.
-        pts_h = np.array(pts, dtype=np.float64, copy=True)
-        pts_h[:, 2] = world[:, 2]
-        agg = scatter(gm, pts_h[static], learning_ids(np.asarray(labels)[static]),
+        #   `height_m` rather than a doctored `pts`: an earlier version of this
+        #   fix overwrote `pts[:, 2]` with the world z, which also corrupted the
+        #   RANGE that `scatter` computes from the same array for the
+        #   measurement-variance weighting. Height and geometry come from
+        #   different frames here and each is now named.
+        agg = scatter(gm, pts[static], learning_ids(np.asarray(labels)[static]),
                       np.asarray(ground, dtype=bool)[static],
-                      points_world_m=world[static])
+                      points_world_m=world[static],
+                      height_m=world[static][:, 2])
         fuse(gm.soa, agg, gm.thresholds)
 
         # Traversability before the gate: the gate consults the hazard bits,

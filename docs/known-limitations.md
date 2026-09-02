@@ -254,6 +254,68 @@ not growth, is the case for the structural bound. See
 
 ---
 
+## 6. A range-dependent height bias on real data — OPEN, cause unknown
+
+The per-ring accuracy table now runs on real sequences (`eval_synthetic.py
+--seq 07`). After fixing two bugs that only real data could expose — M\* built
+from every static return rather than the ground, and the map storing
+vehicle-frame height against world-anchored cells — a **systematic positive
+bias remains, and it grows with range**.
+
+Sequence 07, 40 frames, schedule 5/10/20/40:
+
+| ring | cell | cells | RMSE | \|bias\| | mean bias | spread | rho |
+|---|---|---|---|---|---|---|---|
+| 1 | 10 cm | 47,802 | 22.02 | 20.72 | **3.47** | 1.08 | 19.21 |
+| 2 | 20 cm | 8,486 | 37.95 | 36.02 | **21.63** | 2.41 | 14.98 |
+| 3 | 40 cm | 32 | 174.64 | 180.02 | 154.86 | 2.50 | 72.14 |
+
+Mean bias against distance from the final pose:
+
+```
+ring 2   20-30 m   2,749 cells   +15.32 cm      ring 1   10-20 m   +2.50 cm
+         30-50 m   8,288 cells   +25.49 cm               20-30 m   +4.26 cm
+         50-80 m     138 cells   +67.12 cm
+```
+
+It also falls with revisits: ring 2 reads +29.85 cm at `obs_count` 1 and
++16.01 cm at `obs_count` ≥ 17.
+
+**Ring 1 is dispersion, not offset.** Its `|bias|` of 20.72 is RMS; the signed
+mean is 3.47. The table prints both since 2 Sep precisely so these cannot be
+confused — RMS alone cannot tell "systematically high" from "randomly
+scattered", and they are different defects.
+
+### What has been ruled out
+
+- **Grazing incidence in the measurement weighting.** `measurement_variance_cm2`
+  accepts a `cos_incidence` and `scatter` calls it head-on, which is wrong on
+  its face for a ground return — at 40 m the true value is 0.043 and eq. (13)
+  divides by cos². Passing the real incidence changes the weights enormously
+  (at 20 m, 83 → 1) and changes the measured bias by **0.01 cm**: 21.63 →
+  21.62. So the weighting is not what holds the far-field estimate high. The
+  change was reverted rather than shipped, since altering frozen fusion
+  semantics for no measured gain is a bad trade; the experiment is recorded in
+  `fusion.scatter` so nobody repeats it.
+- **The 8 m height band saturating.** `kernels.py` warns that seq 07 sits at
+  world-z −5.8 m and saturates the floor. Measured over these frames the ground
+  is at −1.61 m, 0.39 m inside the −2.00 m floor. Not clamped here.
+
+### What this means for the report
+
+**The per-ring RMSE beyond ~25 m is not currently reportable as coarsening
+error,** because most of it is not coarsening. Ring 1 — which is the claim that
+matters, since it is where the fine resolution lives — is 22.02 cm RMSE of
+which only 3.47 cm is systematic. Ring 3's 174 cm is 32 cells and is noise.
+
+Two further caveats belong with any ρ that gets quoted. **ρ's denominator is
+thin**: `spread` is estimated from a median of 3–4 reference returns per
+footprint at these rings, which understates true sub-cell variability and
+inflates ρ. And real ρ = 19.21 must not be set beside the synthetic scene's
+1.50 as though they measured the same thing.
+
+---
+
 ## What is not on this list
 
 For the avoidance of doubt, the following are **settled**, not open questions:
