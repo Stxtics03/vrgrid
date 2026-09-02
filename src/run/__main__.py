@@ -10,7 +10,8 @@ Stages (all JP's, `src/perception/`):
     transforms              sensor -> vehicle -> world  (docs/frames.md)
     range_image.project()   64x512 spherical image + inverse index (sensor frame)
     semantics               semantic_labels() 19-class + is_moving()  (GT .label)
-    ground.segment_ground() Patchwork++ ground / non-ground mask
+    ground.segment_ground_or_fallback()  Patchwork++ mask, or the semantic-class
+                            fallback (loudly) when pypatchworkpp is absent
     reflectivity.normalise() rho_hat -> one byte  (KITTI: rho_hat = I; the
                              eq-31 r^2/cos terms are firmware-redundant here)
 
@@ -54,6 +55,7 @@ class PerceptionFrame:
     reflectivity8: np.ndarray      # (N,) uint8, 0 where not projected this frame
     range_image: np.ndarray        # (H, W, 5)
     inverse_index: np.ndarray      # (H, W) int32
+    ground_method: str             # "patchworkpp" | "semantic_fallback" (ground.py)
 
 
 def iter_pipeline(seq: str, max_frames: int | None, use_patchworkpp: bool = True,
@@ -109,10 +111,8 @@ def iter_pipeline(seq: str, max_frames: int | None, use_patchworkpp: bool = True
             moving = semantics.is_moving(raw_labels)
 
         with stage("ground"):
-            if use_patchworkpp and ground._HAVE_PATCHWORKPP:
-                gmask = ground.segment_ground(points)
-            else:
-                gmask = ground.ground_from_semantics(semantic)
+            gmask, ground_method = ground.segment_ground_or_fallback(
+                points, semantic, use_patchworkpp=use_patchworkpp)
 
         with stage("reflectivity"):
             refl = reflectivity.normalise(ri)
@@ -136,6 +136,7 @@ def iter_pipeline(seq: str, max_frames: int | None, use_patchworkpp: bool = True
             reflectivity8=rho8,
             range_image=ri,
             inverse_index=inv,
+            ground_method=ground_method,
         )
         i += 1
 
@@ -200,8 +201,10 @@ def main(argv=None) -> int:
 
     n, cleared, protected = 0, 0, 0
     truncated_frames, truncated_peak = 0, 0
+    ground_method = None
     for frame in iter_pipeline(args.seq, args.frames, use_patchworkpp=not args.no_patchworkpp,
                                start_frame=args.start_frame):
+        ground_method = frame.ground_method
         counters = engine.step(frame) if engine is not None else None
         if counters is not None:
             cleared += counters.cleared
@@ -220,6 +223,12 @@ def main(argv=None) -> int:
             print(msg)
 
     print(f"done: {n} frames, sequence {args.seq}")
+    if ground_method == "semantic_fallback":
+        print("[!] ground: SEMANTIC-CLASS FALLBACK, not Patchwork++ -- every "
+              "ground-derived number this run produced (heights, curbs, "
+              "traversability) is on the fallback. See the RuntimeWarning above.")
+    elif ground_method == "patchworkpp":
+        print("ground: Patchwork++ (geometric segmenter)")
     if engine is not None:
         # The number the Gate 3 demo is actually about. With --show-ghosts it
         # is zero by construction, which is the point of printing it.

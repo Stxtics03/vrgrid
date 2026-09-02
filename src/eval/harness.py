@@ -349,7 +349,8 @@ def real_scans(sequence: str, max_frames=None, start_frame: int = 0,
       `run_sequence`'s own docstring it is the only thing allowed to build it.
 
     Ground comes from Patchwork++ where the extension is installed and from the
-    semantic labels otherwise -- the same fallback `run/__main__.py` uses.
+    semantic labels otherwise -- `ground.segment_ground_or_fallback`, the same
+    path `run/__main__.py` uses, which warns once when the fallback stands in.
 
     For `reference_map.build_from_scans`, which wants a 3-tuple without the
     ground mask, drop it: `((p, l, T) for p, l, _, T in real_scans(...))`.
@@ -360,11 +361,8 @@ def real_scans(sequence: str, max_frames=None, start_frame: int = 0,
     for pts, labels, pose in loader.scans(sequence, max_frames=max_frames,
                                           start_frame=start_frame):
         vehicle_pts = transforms.transform_points(pts[:, :3], t_s_v)
-        if use_patchworkpp and ground._HAVE_PATCHWORKPP:
-            gmask = ground.segment_ground(pts)
-        else:
-            gmask = ground.ground_from_semantics(
-                semantics.semantic_labels(labels))
+        gmask, _ = ground.segment_ground_or_fallback(
+            pts, semantics.semantic_labels(labels), use_patchworkpp=use_patchworkpp)
         yield (vehicle_pts, labels, gmask,
                transforms.vehicle_to_world(pose, sequence=sequence))
 

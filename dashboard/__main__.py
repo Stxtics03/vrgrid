@@ -62,8 +62,10 @@ def main(argv=None) -> None:
                         color_by=args.color_by, ghost_removal=not args.show_ghosts,
                         palette=args.palette, engine=engine)
     n = 0
+    ground_method = None
     for frame in iter_pipeline(args.seq, args.frames, use_patchworkpp=not args.no_patchworkpp,
                                start_frame=args.start_frame):
+        ground_method = frame.ground_method
         if engine is not None:
             engine.step(frame)
         view.log_frame(frame)
@@ -71,6 +73,9 @@ def main(argv=None) -> None:
     start = f" from frame {args.start_frame}" if args.start_frame else ""
     print(f"{n} frames from sequence {args.seq}{start}"
           + (f" -> {args.save}" if args.save else ""))
+    if ground_method == "semantic_fallback":
+        print("[!] ground: SEMANTIC-CLASS FALLBACK, not Patchwork++ (see the "
+              "RuntimeWarning above)")
 
 
 if __name__ == "__main__":

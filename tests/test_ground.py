@@ -6,11 +6,16 @@ proxy as the fallback and the sanity reference.
 
 import numpy as np
 import pytest
+from vrgrid.perception import ground as ground_mod
 from vrgrid.perception.ground import (
     _HAVE_PATCHWORKPP,
     GROUND_CLASSES,
+    GROUND_METHOD_FALLBACK,
+    GROUND_METHOD_PATCHWORKPP,
     ground_from_semantics,
+    reset_fallback_warning,
     segment_ground,
+    segment_ground_or_fallback,
 )
 from vrgrid.perception.loader import (
     _label_path,
@@ -43,6 +48,50 @@ def test_ground_classes_are_the_walkable_surfaces():
 def test_ground_from_semantics_shape_and_dtype():
     out = ground_from_semantics(np.zeros(13, dtype=np.int32))
     assert out.shape == (13,) and out.dtype == bool
+
+
+# --- segment_ground_or_fallback: the method tag + the loud warning ---------
+
+
+def test_or_fallback_reports_which_method_ran():
+    pts = np.random.default_rng(0).normal(size=(400, 4)).astype(np.float64)
+    pts[:, 2] -= 1.6
+    sem = np.full(400, 8, dtype=np.int32)  # all "road"
+    reset_fallback_warning()
+    _, method = segment_ground_or_fallback(pts, sem)
+    expected = GROUND_METHOD_PATCHWORKPP if _HAVE_PATCHWORKPP else GROUND_METHOD_FALLBACK
+    assert method == expected
+
+
+def test_or_fallback_warns_loudly_once_when_patchworkpp_is_missing(monkeypatch):
+    """The signal this whole helper exists to make unmissable."""
+    monkeypatch.setattr(ground_mod, "_HAVE_PATCHWORKPP", False)
+    reset_fallback_warning()
+    sem = np.array([8, 8, 12, 0, 16], dtype=np.int32)
+    pts = np.zeros((5, 4))
+
+    with pytest.warns(RuntimeWarning, match="semantic-class FALLBACK"):
+        mask, method = segment_ground_or_fallback(pts, sem, use_patchworkpp=True)
+
+    assert method == GROUND_METHOD_FALLBACK
+    assert mask.tolist() == [True, True, False, False, True]
+
+    # once per process: the second call is silent
+    import warnings
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")  # any warning would raise
+        segment_ground_or_fallback(pts, sem, use_patchworkpp=True)
+
+
+def test_or_fallback_deliberate_opt_out_is_still_flagged(monkeypatch):
+    monkeypatch.setattr(ground_mod, "_HAVE_PATCHWORKPP", True)
+    reset_fallback_warning()
+    sem = np.array([8, 16, 12], dtype=np.int32)
+    with pytest.warns(RuntimeWarning, match="opted out"):
+        _, method = segment_ground_or_fallback(
+            np.zeros((3, 4)), sem, use_patchworkpp=False)
+    assert method == GROUND_METHOD_FALLBACK
 
 
 # --- Patchwork++ ----------------------------------------------------------
