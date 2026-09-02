@@ -32,6 +32,33 @@ def test_iter_pipeline_yields_aligned_perception_frames():
 
 
 @needs_data
+def test_start_frame_skips_ahead_and_index_is_the_real_frame_number():
+    plain = list(iter_pipeline("00", max_frames=3))
+    shifted = list(iter_pipeline("00", max_frames=3, start_frame=50))
+
+    assert len(shifted) == 3
+    # PerceptionFrame.index carries the real sequence frame number
+    assert [f.index for f in plain] == [0, 1, 2]
+    assert [f.index for f in shifted] == [50, 51, 52]
+    # it is genuinely a different part of the sequence, not frame 0 relabelled
+    assert not np.array_equal(plain[0].points_sensor, shifted[0].points_sensor)
+    assert not np.allclose(plain[0].vehicle_xyz_world, shifted[0].vehicle_xyz_world)
+    # and it matches iterating from 0 and slicing to [50:53]
+    ref = list(iter_pipeline("00", max_frames=53))[50:53]
+    assert all(np.array_equal(a.points_sensor, b.points_sensor)
+               for a, b in zip(ref, shifted))
+    assert [f.index for f in ref] == [50, 51, 52]
+
+
+@needs_data
+def test_start_frame_zero_is_unchanged():
+    a = next(iter_pipeline("00", max_frames=1))
+    b = next(iter_pipeline("00", max_frames=1, start_frame=0))
+    assert a.index == b.index == 0
+    assert np.array_equal(a.points_sensor, b.points_sensor)
+
+
+@needs_data
 def test_world_points_are_a_rigid_transform_of_the_scan():
     f = next(iter_pipeline("00", max_frames=1))
     origin_world = sensor_to_world(f.pose, sequence="00")[:3, 3]
