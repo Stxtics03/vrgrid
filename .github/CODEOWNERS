@@ -2,23 +2,32 @@
 # three devs and eight days, structuring the repo so two people rarely touch
 # the same file is cheaper insurance than any branching model.
 #
-# TODO Day 0: replace the placeholder handles below with real GitHub usernames.
-# A handle that does not exist fails silently — CODEOWNERS stops matching and
-# nobody gets requested. Verify by opening one PR and checking the reviewer.
+# Handles verified on 3 Sep against the repo's collaborator list and against
+# commit authorship — see the PR that changed this file for the evidence per
+# handle. Four of the six here were placeholders (`@aakash-handle`,
+# `@jp-handle`, `@srinivas-handle`, `@hriday-handle`) and had been since Day 0.
+#
+# ⚑ A handle that does not exist fails SILENTLY. CODEOWNERS simply stops
+#   matching and nobody is requested — there is no warning, and the PR looks
+#   normal. Measured on 2 Sep: of five open PRs, three had ZERO reviewers and
+#   `src/eval/`'s owner was not requested on a PR that changed `src/eval/`.
+#   After any edit here, open one PR and check a reviewer is actually added.
 
 # include/vrgrid/ is the only genuinely shared surface. Frozen in the first two
 # hours of Day 0 and treated as immutable. Any change needs all three devs.
-/include/vrgrid/    @aakash-handle @Stxtics03 @jp-handle
+/include/vrgrid/    @AakashH2006 @Stxtics03 @victorysingh
 
-/src/grid/          @aakash-handle
-/src/eval/          @aakash-handle
+/src/grid/          @AakashH2006
+/src/eval/          @AakashH2006
 /src/gpu/           @Stxtics03
-/src/perception/    @jp-handle
-/dashboard/         @jp-handle
+/src/perception/    @victorysingh
+/dashboard/         @victorysingh
 
 # Configs are frozen before the schedule comparison — changing one after that
 # invalidates the ablation, so it gets the same three-way review.
-/configs/           @aakash-handle @Stxtics03 @jp-handle
+/configs/           @AakashH2006 @Stxtics03 @victorysingh
 
-# Research modules. Srinivas, Hriday and Pratyushi append findings here.
-/docs/research-log.md  @srinivas-handle @hriday-handle @Prathyushree
+# Research modules. Shriniwas (R1), Hriday (R2) and Prathyushree (R3) append
+# findings here. README calls R1's author "Srinivas"; the commits and the
+# collaborator list both say Shriniwas Gade / @Parzival-7926.
+/docs/research-log.md  @Parzival-7926 @zero-odds @Prathyushree
