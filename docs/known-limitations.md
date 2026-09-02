@@ -350,10 +350,28 @@ The rise with ring is systematic and physical — 8–9 cm at 5 cm cells, 9–12
 averages in sloped ground. Report per ring; ring 3's spread (9.0–18.1) is where
 it stops being reliable.
 
-⚑ **The absolute value reads 1–2 cm low.** A real urban kerb is 10–15 cm and
-  ring 0 consistently returns 8–9. Consistent under-reading, not noise —
-  likely `curb.baseline_m` of 0.20 m sampling partway up the face rather than
-  across it. Say so before being asked.
+⚑ **"Reads 1–2 cm low" — WITHDRAWN, it was an assumption not a measurement.**
+  I attributed the 8–9 cm reading to `curb.baseline_m` of 0.20 m sampling
+  partway up the kerb face. Tested by sweeping the baseline, ring-0 median on
+  three sequences:
+
+  | baseline | 07 | 08 | 05 |
+  |---|---|---|---|
+  | 0.20 m | 8.5 | 8.6 | 9.1 |
+  | 0.30 m | **9.1** | **9.8** | **9.5** |
+  | 0.40 m | 9.1 | 9.0 | 10.3 |
+  | 0.50 m | 9.1 | 7.6 | 11.0 |
+  | 0.60 m | 8.5 | 7.1 | 11.0 |
+
+  A longer baseline does **not** systematically recover height — past 0.30 m
+  the sequences diverge, 05 rising and 08 falling, while cell counts grow
+  throughout. So a longer baseline admits more and different features rather
+  than measuring the same one better, and the kerbs in this data genuinely
+  measure ~9 cm. Karlsruhe kerbs including dropped crossings at 9 cm is
+  entirely ordinary.
+
+  `curb.baseline_m` moved 0.20 → **0.30**, the last value where all three
+  sequences agree and the only one that improves all three.
 
 ⚑ **Potholes are a demonstration, not a claim.** 56 to 551 cells per sequence
   is a 10× spread with no pattern, and 00's ring 0 reports five cells at
