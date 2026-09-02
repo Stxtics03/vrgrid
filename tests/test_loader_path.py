@@ -265,7 +265,8 @@ def test_pose_source_defaults_per_sequence():
     from vrgrid.perception import loader
 
     assert loader.pose_source("08") == "slam"
-    for seq in ("00", "01", "07", "09", "10"):
+    assert loader.pose_source("00") == "slam"
+    for seq in ("01", "02", "06", "07", "09", "10"):
         assert loader.pose_source(seq) == "gt", seq
 
 
@@ -298,17 +299,24 @@ def test_only_08_needs_the_slam_poses():
          04      1.25cm       1.11cm           10      1.19cm       1.20cm
          05      1.02cm       1.00cm
 
-    08 is the only pathological one -- 16x worse on GT, and the reason its
-    per-ring RMSE read 162 cm before the switch. Everything else registers to
-    0.47-2.27 cm on GT, and the SLAM wins elsewhere are sub-centimetre: within
-    noise, and not worth changing numbers for.
+    08 is the only pathological one on THAT measure -- 16x worse on GT, and the
+    reason its per-ring RMSE read 162 cm before the switch.
+
+    ⚑ But per-frame agreement is a weak predictor and this list must not be
+      chosen from it alone. Seq 00 disagrees by only 2.27 cm/frame and yet
+      ACCUMULATES a mean bias of -13.95 cm by ring 3, where seq 03 at a
+      comparable 1.97 cm/frame accumulates -0.80. Switching 00 to SLAM takes
+      ring 2's bias from -9.85 to -0.44 cm and ring 3 RMSE from 26.03 to 13.57.
+      Seq 06, the next worst accumulator at -5.80, was tested the same way and
+      is a wash, so it stays on GT. Only sequences with a MEASURED win are
+      overridden.
 
     This test exists so the default cannot quietly widen to sequences that do
     not need it, or narrow away from the one that does.
     """
     from vrgrid.perception import loader
 
-    assert loader.POSE_SOURCE_BY_SEQUENCE == {"08": "slam"}, (
+    assert loader.POSE_SOURCE_BY_SEQUENCE == {"00": "slam", "08": "slam"}, (
         "the per-sequence override list changed -- re-measure before widening "
-        "it; only 08 was shown to need SLAM poses")
+        "it; only 00 and 08 were shown to need SLAM poses")
     assert loader.POSE_SOURCE_DEFAULT == "gt"

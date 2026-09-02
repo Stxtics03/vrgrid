@@ -123,10 +123,29 @@ def load_calib(sequence: str) -> dict:
 # N x 16.6 cm, which made M* itself carry a 64.5 cm median standard deviation
 # INSIDE a 10 cm footprint and put seq 08's per-ring RMSE at 162 cm.
 #
+# ⚑ THE PER-FRAME MEASURE ABOVE IS A WEAK PREDICTOR, and choosing this list
+#   from it alone was wrong. It catches 08 because 08 is catastrophic, and it
+#   misses everything subtler: seq 00 disagrees by only 2.27 cm per frame yet
+#   ACCUMULATES a mean height bias of -13.95 cm by ring 3, while seq 03 at a
+#   comparable 1.97 cm/frame accumulates -0.80. What matters is the
+#   accumulated bias, measured per ring against M*:
+#
+#       seq   per-frame   mean_b r1   mean_b r2   mean_b r3
+#        00      2.27cm       -2.86       -9.85      -13.95   <-- SLAM
+#        06      1.32cm       -0.34       -3.32       -5.80
+#        03      1.97cm       -1.91       +2.45       -0.80
+#        others  1.0-1.4cm    < |0.8|     < |2.3|     < |2.9|
+#
+#   Switching 00 to SLAM takes ring 2's bias from -9.85 to -0.44 cm and ring
+#   3's from -13.95 to -1.18, with ring 3 RMSE 26.03 -> 13.57. Sequence 06,
+#   the next worst, was tested the same way and is a WASH -- GT better at ring
+#   1, SLAM marginally better at rings 2-3 -- so it stays on GT. Only the two
+#   sequences with a measured win are overridden.
+#
 # So 08 defaults to SLAM and everything else to GT: per sequence, measured, and
 # overridable rather than assumed. `VRGRID_POSE_SOURCE` forces one globally,
 # which is how you reproduce the table above.
-POSE_SOURCE_BY_SEQUENCE = {"08": "slam"}
+POSE_SOURCE_BY_SEQUENCE = {"00": "slam", "08": "slam"}
 POSE_SOURCE_DEFAULT = "gt"
 
 

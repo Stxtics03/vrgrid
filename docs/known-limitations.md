@@ -478,10 +478,28 @@ stays reproducible.
 | 04 | 1.25 | 1.11 | | 10 | 1.19 | 1.20 |
 | 05 | 1.02 | 1.00 | | | | |
 
-**08 is the only pathological sequence.** Everything else registers to
-0.47–2.27 cm on the official poses, and the SLAM wins elsewhere are
-sub-centimetre — within noise, and not worth changing numbers for. So the
-override list is exactly `{"08": "slam"}`, and
+**08 is the only pathological sequence on that measure.** But per-frame
+agreement turned out to be a **weak predictor**, and choosing the override list
+from it alone was wrong. What matters is the bias that ACCUMULATES, measured
+per ring against M\*:
+
+| seq | per-frame | mean_b r1 | mean_b r2 | mean_b r3 | |
+|---|---|---|---|---|---|
+| 00 | 2.27 cm | −2.86 | −9.85 | **−13.95** | → SLAM |
+| 06 | 1.32 cm | −0.34 | −3.32 | −5.80 | wash, stays GT |
+| 03 | 1.97 cm | −1.91 | +2.45 | −0.80 | fine |
+| others | 1.0–1.4 cm | < \|0.8\| | < \|2.3\| | < \|2.9\| | fine |
+
+Sequence 00 disagrees by only 2.27 cm per frame yet accumulates **−13.95 cm**
+by ring 3, while 03 at a comparable 1.97 cm/frame accumulates −0.80. Switching
+00 to SLAM takes ring 2's bias from −9.85 to **−0.44 cm**, ring 3's from −13.95
+to −1.18, and ring 3 RMSE from 26.03 to **13.57**.
+
+Sequence 06, the next worst accumulator, was tested the same way and is a
+**wash** — GT better at ring 1, SLAM marginally better at rings 2–3 — so it
+stays on GT. Only sequences with a measured win are overridden.
+
+So the list is `{"00": "slam", "08": "slam"}`, and
 `test_only_08_needs_the_slam_poses` pins it so it cannot quietly widen.
 
 **Ruled out along the way, each by measurement:** the height datum (07 is clean
