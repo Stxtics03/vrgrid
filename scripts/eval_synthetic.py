@@ -145,6 +145,10 @@ def plan_regret_for(gm, reference, vehicle_xy_m, mask=None):
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--frames", type=int, default=12)
+    ap.add_argument("--seq", default=None,
+                    help="a REAL SemanticKITTI sequence (needs "
+                         "$VRGRID_DATA_ROOT). Without it, the synthetic "
+                         "writer -- whose numbers are NOT reportable.")
     ap.add_argument("--out", default=None, help="keep the sequence here")
     ap.add_argument("--keep-moving", action="store_true",
                     help="do not strip moving-* before scatter; shows what the "
@@ -158,13 +162,29 @@ def main():
 
     root = Path(args.out) if args.out else Path(tempfile.mkdtemp(prefix="vrgrid-syn-"))
     try:
-        write_sequence(root, "99", n_frames=args.frames)
-        print(f"synthetic sequence: {args.frames} frames in {root}")
-
-        reference = build_from_scans(read_sequence(root, "99"))
-        print(f"reference map:      {reference}\n")
-
-        vehicle_x = (args.frames - 1) * 2.0
+        if args.seq:
+            # The swap this file's docstring has described since Day 0. Same
+            # `build_from_scans` and same `run_sequence` -- only the source of
+            # the scans changes, which is the whole point of that seam.
+            from vrgrid.eval.harness import final_vehicle_xy, real_scans
+            print(f"sequence {args.seq}: {args.frames} frames, real data")
+            # 4-tuple: M* gets the SAME ground mask the map is built with.
+            # Without it M* averages building facades into the road surface --
+            # +139.86 cm of bias on seq 07, against a coarsening error that
+            # should be sub-centimetre.
+            reference = build_from_scans(real_scans(args.seq, args.frames))
+            print(f"reference map:      {reference}\n")
+            # ⚑ NOT `(frames - 1) * 2.0`. That is the synthetic car driving
+            #   straight down y = 0; a real one turns, and `costmaps_for`'s own
+            #   note says a window placed about the origin then measures ground
+            #   the map never saw and reports a confident zero.
+            vehicle_x = final_vehicle_xy(args.seq, args.frames)
+        else:
+            write_sequence(root, "99", n_frames=args.frames)
+            print(f"synthetic sequence: {args.frames} frames in {root}")
+            reference = build_from_scans(read_sequence(root, "99"))
+            print(f"reference map:      {reference}\n")
+            vehicle_x = (args.frames - 1) * 2.0
         schedules = ([load(n) for n in SCHEDULES]
                      + [uniform_schedule(c, half_width_m=24.0)
                         for c in UNIFORM_CELLS_M])
@@ -177,9 +197,9 @@ def main():
             gm = build_gridmap(schedule)
             tracks = TrackList(gm.allocation.max_tracks,
                                arrays=gm.allocation.tracks)
-            stats = run_sequence(
-                gm, vehicle_frame_scans(root, "99", args.keep_moving),
-                tracks=tracks)
+            scans = (real_scans(args.seq, args.frames) if args.seq
+                     else vehicle_frame_scans(root, "99", args.keep_moving))
+            stats = run_sequence(gm, scans, tracks=tracks)
             built.append((schedule, gm, evaluate(gm, reference, stats.frames), stats))
 
         mask = common_support(*[costmaps_for(gm, reference, vehicle_x)[1]

@@ -321,6 +321,72 @@ def learning_ids(raw_labels):
     return _np.where(mapped < 0, CLASS_UNLABELLED, mapped).astype(_np.uint8)
 
 
+def real_scans(sequence: str, max_frames=None, start_frame: int = 0,
+               use_patchworkpp: bool = True):
+    """SemanticKITTI as `run_sequence` wants it: (points in VEHICLE frame, RAW
+    label ids, is_ground, vehicle -> world T).
+
+    The seam the synthetic writer stands in for. `eval_synthetic`'s docstring
+    has said since Day 0 to "swap `read_sequence` for `perception.loader` and
+    sequence 07 when the download lands" -- this is that swap, in one place
+    rather than copied into each script that needs it.
+
+    Three conversions the loader does NOT do, each of which produced a wrong
+    answer rather than an error when guessed at:
+
+    ⚑ `loader.scans` yields (N, 4) -- x, y, z, INTENSITY -- and `run_sequence`
+      wants (N, 3). Intensity is consumed by the reflectivity path, separately.
+
+    ⚑ The points are in the SENSOR frame; the harness wants the VEHICLE frame.
+      They differ by the 1.73 m HDL-64E mounting height and nothing else
+      (docs/frames.md), so this is `transforms.sensor_to_vehicle()` and not a
+      no-op. Skip it and every height in the map is 1.73 m too high, which
+      looks like a map -- just a wrong one.
+
+    ⚑ `pose` is a raw KITTI row, Camera-0 -> World_cam, and must NOT be handed
+      over as a vehicle -> world transform. `transforms.vehicle_to_world` is
+      the composition that applies `Tr` and the axis permutation, and per
+      `run_sequence`'s own docstring it is the only thing allowed to build it.
+
+    Ground comes from Patchwork++ where the extension is installed and from the
+    semantic labels otherwise -- the same fallback `run/__main__.py` uses.
+
+    For `reference_map.build_from_scans`, which wants a 3-tuple without the
+    ground mask, drop it: `((p, l, T) for p, l, _, T in real_scans(...))`.
+    """
+    from vrgrid.perception import ground, loader, semantics, transforms
+
+    t_s_v = transforms.sensor_to_vehicle()
+    for pts, labels, pose in loader.scans(sequence, max_frames=max_frames,
+                                          start_frame=start_frame):
+        vehicle_pts = transforms.transform_points(pts[:, :3], t_s_v)
+        if use_patchworkpp and ground._HAVE_PATCHWORKPP:
+            gmask = ground.segment_ground(pts)
+        else:
+            gmask = ground.ground_from_semantics(
+                semantics.semantic_labels(labels))
+        yield (vehicle_pts, labels, gmask,
+               transforms.vehicle_to_world(pose, sequence=sequence))
+
+
+def final_vehicle_xy(sequence: str, max_frames=None) -> tuple:
+    """(x, y) of the vehicle's last pose, in world metres.
+
+    The planning window is placed relative to it. On the synthetic sequence
+    that was `(frames - 1) * 2.0` because the car drives straight down y = 0;
+    on a real sequence it turns, and `costmaps_for`'s own note says a window
+    hardcoded about the origin measures ground the map never saw and comes out
+    as a confident zero.
+    """
+    from vrgrid.perception import loader, transforms
+
+    poses = loader.poses(sequence)
+    if max_frames is not None:
+        poses = poses[:max_frames]
+    T = transforms.vehicle_to_world(poses[-1], sequence=sequence)
+    return float(T[0, 3]), float(T[1, 3])
+
+
 def run_sequence(gm: GridMap, scans, recentre: bool = True,
                  tracks: TrackList | None = None) -> RunStats:
     """Drive the map through a sequence. Returns what it did.
@@ -395,7 +461,27 @@ def run_sequence(gm: GridMap, scans, recentre: bool = True,
         # class and the §7.1 predicate marked it untraversable. `pole` and
         # `traffic-sign` became `bicycle` and `motorcycle` the same way. The
         # field is 5 bits since 1 Sep and holds the whole set.
-        agg = scatter(gm, pts[static], learning_ids(np.asarray(labels)[static]),
+        # ⚑ HEIGHT COMES FROM THE WORLD FRAME, and `scatter` takes it from
+        #   `pts` -- `fusion.scatter` reads `x, y, z = pts[...]` for the height
+        #   while taking only `wx, wy` from `points_world_m`. So the map stored
+        #   VEHICLE-frame z against WORLD-anchored cells: the same patch of road
+        #   got a different stored height depending on where the vehicle was
+        #   when it saw it, and M* -- which stores world z -- disagreed by the
+        #   vehicle's elevation. On sequence 07 that is a flat +162.50 cm of
+        #   bias with a spread of 1.08 cm, i.e. the entire error.
+        #
+        #   Invisible on the synthetic scene, where the car drives at z = 0 and
+        #   the two frames coincide, which is why it survived to real data.
+        #
+        #   Fixed here rather than in `scatter` because `MapEngine` has its own
+        #   datum machinery (`_z_datum`, added back on readout) and must not be
+        #   disturbed; this is the eval harness, which already composes world
+        #   coordinates per frame, so one more per-frame array is in keeping.
+        #   The deeper question -- whether `scatter` should ever take height
+        #   from a different frame than cell identity -- is worth asking once.
+        pts_h = np.array(pts, dtype=np.float64, copy=True)
+        pts_h[:, 2] = world[:, 2]
+        agg = scatter(gm, pts_h[static], learning_ids(np.asarray(labels)[static]),
                       np.asarray(ground, dtype=bool)[static],
                       points_world_m=world[static])
         fuse(gm.soa, agg, gm.thresholds)
