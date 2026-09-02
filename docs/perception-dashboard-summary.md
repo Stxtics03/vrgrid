@@ -8,9 +8,8 @@ and metrics are covered in `docs/master-v4.md` and `docs/sih-math.md`.*
 Every number below is from a script or a full-sequence soak run this week, not
 an estimate. Sources are named inline.
 
-*Status note (active development): the occupancy layers (§2), instance
-clustering (§1) and `dashboard/_config.py` (§2) are on open pull requests
-(#17, #19, #20) at the time of writing; everything else is on `main`.*
+*Status note: everything described here is merged to `main` (PRs #17–#27). The
+elevation/vertical-extent issue in §5 was fixed on 2026-09-01.*
 
 ---
 
@@ -194,37 +193,38 @@ asphalt, range-stable.
 
 ---
 
-## 5. Known limitation — world-absolute vertical extent (documented scope boundary)
+## 5. Elevation / vertical-extent issue — found and fixed
 
-The map accumulates heights on a **world-absolute** band of `[−2.0, +6.0] m`
-(`quantise_height` in `src/gpu/kernels.py`, matching `vertical_extent_m` in the
-schedule config — the project explicitly scopes out "overpasses and
-multi-storey"). The visibility cleanup is fed cell heights in that same
-world-absolute frame.
+**This was an open limitation earlier in the week; it is now fixed** (`51bff0f`,
+2026-09-01). Recorded here because older notes still reference it.
 
-On a sequence that **climbs**, once the vehicle's own world-z rises much above 0,
-near-field cell heights saturate at the +6 m ceiling and every cleanup candidate
-projects outside the sensor's vertical FOV — so **ghost removal stops working**.
-Measured on seq 08 (climbs +45.7 m over its loop):
+**The bug.** Heights entered the map on a **world-absolute** band of
+`[−2.0, +6.0] m` (`quantise_height`, matching `vertical_extent_m` — the project
+scopes out "overpasses and multi-storey"), and the visibility cleanup was fed
+cell heights in that same world-absolute frame. On a climbing sequence the
+near-field heights saturated at the +6 m ceiling while the sensor sat metres
+higher, so every cleanup candidate projected outside the sensor's vertical FOV
+and **ghost removal stopped working**. Pre-fix on seq 08: 2,304 of 4,071 frames
+(57 %) fully inert; seq 07's −5.8 m elevation similarly saturated the floor of
+the band and degraded it there.
 
-| vehicle world-z | cells cleared / frame |
-|---|---|
-| −6.7 … +2.4 m | 15,580 (healthy) |
-| +2.4 … +11.6 m | 1,022 (degraded ~15×) |
-| +11.6 … +20.7 m | 35 |
-| +20.7 … +39.0 m | 0 (inert) |
+**The fix.** `quantise_height` takes a `datum_m`; `MapEngine._track_datum`
+slides the 8 m band in whole 1 m steps to follow the vehicle and re-bases the
+stored heights when it moves; `_centres` hands the cleanup vehicle-frame z. The
+band stays 8 m wide, so the dense-3D baseline count and the 286× memory ratio
+are unchanged.
 
-On seq 08, **2,304 of 4,071 frames (57 %)** have the cleanup fully inert.
-seq 07 (flat, world-z −5.8 … −1.0 m) is unaffected — 0 inert frames. seq 00 has
-two inert stretches (frames 2071–3244) on its mid-sequence hill.
+**Verified.** `tests/test_engine.py::test_the_ghost_clears_at_any_vehicle_elevation`
+(parametrised at 0, −5.8, 6.0, 12.0, 39.0 m); a re-run of the Gate 3 scene
+through the real engine at each of those elevations; and a full-sequence
+re-soak — seq 08 now **0 of 4,071 frames inert**, clearing flat at ~15–20 k
+cells/frame across every elevation band, occupied-cell heights tracking the
+vehicle (`occ_z [36.0, 44.0] m` at veh_z 38.4). The ghost toggle demos at any
+elevation, including seq 08's full climb. See `docs/known-limitations.md` §1 for
+the full numbers.
 
-**Scope, not a silent bug:** the point cloud and every `--color-by` mode are
-unaffected (they never touch `quantise_height`); only the map's height layer and
-the ghost-removal cleanup degrade, and only on the climbing portions.
-`docs/demo-safe-ranges.md` lists the exact safe frame ranges per sequence for a
-live demo. The fix — a vehicle-relative vertical window, or subtracting ego-z in
-the cleanup's cell-centre inverse — is a mapping-engine change and is tracked
-for that team.
+**Never affected:** the point cloud and every `--color-by` mode — they do not
+touch `quantise_height`.
 
 ---
 
