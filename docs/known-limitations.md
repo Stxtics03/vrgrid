@@ -370,8 +370,25 @@ it stops being reliable.
   measure ~9 cm. Karlsruhe kerbs including dropped crossings at 9 cm is
   entirely ordinary.
 
-  `curb.baseline_m` moved 0.20 → **0.30**, the last value where all three
-  sequences agree and the only one that improves all three.
+  I then moved `curb.baseline_m` 0.20 → 0.30 on that three-sequence evidence
+  and **reverted it** after running all eleven. It raises the ring-0 median
+  0.7 cm and nearly triples the cross-sequence spread:
+
+  | baseline | median | range | sd |
+  |---|---|---|---|
+  | **0.20 m** | 8.2 cm | **8.1–9.1** | **0.36** |
+  | 0.30 m | 8.9 cm | 7.3–10.2 | 0.89 |
+
+  The tight band *is* the claim — eleven independent recordings, different
+  dates and calibrations, agreeing to 1.0 cm. Trading it for 0.7 cm of median
+  trades the result for the number. Three sequences were not enough to choose
+  this; eleven were.
+
+  ⚑ It also only ever moved ring 0. `baseline_k` is an integer and
+  `round(0.30/(2×0.10))` is `round(1.4999999999999998)` = 1, so at 10 cm cells
+  and coarser the span stays `2×cell_m` whatever the config says. **Below
+  `baseline_m`/2 the knob does nothing** — worth knowing before anyone tunes
+  it.
 
 ⚑ **Potholes are a demonstration, not a claim.** 56 to 551 cells per sequence
   is a 10× spread with no pattern, and 00's ring 0 reports five cells at

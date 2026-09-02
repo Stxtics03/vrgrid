@@ -53,27 +53,33 @@ features:
   curb:
     min_height_m: 0.05     # below this is road texture, not a kerb
     max_height_m: 0.25     # above this is a wall or a vehicle, not a kerb
-    baseline_m: 0.30       # SHORT on purpose. §7.1's 0.50 m baseline smears a
+    baseline_m: 0.20       # SHORT on purpose. §7.1's 0.50 m baseline smears a
                            # kerb into a gentle slope, which is the right
                            # answer for "can I climb it" and the wrong one for
                            # "where is the edge".
                            #
-                           # 0.20 -> 0.30 measured 2 Sep. Ring-0 curb median
-                           # against baseline, three sequences:
+                           # ⚑ TRIED 0.30 AND REVERTED, 2 Sep. Chosen from
+                           #   three sequences, where it raised the ring-0
+                           #   median (07 8.5->9.1, 08 8.6->9.8, 05 9.1->9.5).
+                           #   Across all ELEVEN it raises the median 0.7 cm
+                           #   and nearly TRIPLES the cross-sequence spread:
                            #
-                           #   baseline   seq 07   seq 08   seq 05
-                           #     0.20m      8.5      8.6      9.1
-                           #     0.30m      9.1      9.8      9.5
-                           #     0.40m      9.1      9.0     10.3
-                           #     0.50m      9.1      7.6     11.0
-                           #     0.60m      8.5      7.1     11.0
+                           #       0.20 m   median 8.2   range 8.1-9.1   sd 0.36
+                           #       0.30 m   median 8.9   range 7.3-10.2  sd 0.89
                            #
-                           # 0.30 improves all three. Past it they DIVERGE --
-                           # 05 keeps rising, 08 falls -- while cell counts
-                           # grow steadily throughout, so a longer baseline is
-                           # admitting more and different features rather than
-                           # measuring the same one better. 0.30 is the last
-                           # value at which the sequences agree.
+                           #   The tight band is the claim -- eleven
+                           #   independent recordings, different dates and
+                           #   calibrations, agreeing to 1.0 cm. Trading it for
+                           #   0.7 cm of median is trading the result for the
+                           #   number. Three sequences were not enough to pick
+                           #   this and eleven were.
+                           #
+                           # ⚑ It also only ever moved ring 0. `baseline_k` is
+                           #   an integer and `round(0.30/(2*0.10))` is
+                           #   round(1.4999999999999998) = 1, so at 10 cm cells
+                           #   and coarser the span stays 2*cell_m whatever
+                           #   this says. Below baseline_m/2 the knob does
+                           #   nothing, which is worth knowing before tuning it.
     min_run_cells: 3       # a kerb is a line; a lone raised cell is a rock.
                            # 3 = the cell plus its two perpendicular
                            # neighbours, which is what detect_curbs tests.
