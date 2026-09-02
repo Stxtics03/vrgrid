@@ -550,6 +550,36 @@ Symmetrically, if `AND_mask(B)` has bit `k` set, **every** cell fails condition 
 
 ---
 
+### 7.4 Named features: curbs and potholes
+
+The problem statement names these two, and names them as the reason a 2D occupancy grid is not enough — it "loses critical height information necessary for detecting curbs, potholes". §7.1 does not answer that sentence. It answers *may the vehicle be here*, as six bits, and after (22a) it answers it at one physical scale — under which a 12 cm kerb is **passable**, 13.5° over the 0.50 m baseline, which is correct for a question about whether a wheel can climb it. A kerb still bounds the drivable corridor, and a 40 cm hole still sets bit 1 as an anonymous "slope", indistinguishable from a kerb, a ditch or the side of a parked car. Depth, height and orientation are what a planner needs and none of them survive a bitfield.
+
+So features are reported **beside** the predicate and never folded into it:
+
+```
+curb(c)     min_h ≤ ‖Δz‖_b ≤ max_h,  b = curb.baseline_m           (24)
+            ∧ the rise is linear: both neighbours ⊥ to ∇z agree, ±45°
+
+pothole(c)  median{z(c ± r·u) : u ∈ opposed axes} − z(c) ≥ min_d   (25)
+            ∧ rim spread ≤ max_spread   ∧  rim not itself depressed
+```
+
+Neither writes to the cell. `CELL_FIELDS` is frozen at 12 B and adding a field means recomputing every memory figure in the report, so detections are returned as records sized by what was found — a few hundred cells, not one byte on all 745,000. The memory bound is unchanged.
+
+**Why (24) uses its own, shorter baseline.** (22a)'s 0.50 m is chosen to make a kerb read *passable* at every lattice. That is the right answer for bit 1 and the wrong one for "where is the edge" — the same smoothing that removes the scale-dependence also removes the feature. `curb.baseline_m` is 0.20 m, short on purpose, and the two are allowed to disagree because they are answering different questions.
+
+**Why the rim of (25) is a median over opposed pairs.** A mean is dragged down by the hole's own far side once the hole is wider than the annulus, reading a deep pothole as a shallow one exactly when it matters. A rim sampled on one side only is not a surface but a slope reading: on a grade at the window edge the up-slope samples survive, the down-slope ones fall off, the estimate jumps by the whole rise, and a smooth downgrade reports as a field of potholes. Opposed pairs make a constant grade cancel exactly, which is the property that distinguishes a depression from a slope.
+
+> **Note, 2 Sep — Shrestha. Three ways this was wrong before it was right, all of them silent.**
+>
+> ***`n_min` is not the right threshold here, and using it emptied the module.*** *`n_min = 3` is §7.1 bit 5's fail-safe: below it a cell is not to be **driven on**. Applied to detection it asks the wrong question. On the synthetic scene ring 0 holds 80,719 cells with a return and 17,516 with three; requiring all five cells of a stencil to clear n_min left **936 cells, 1.2% of the observed map**, none of which straddled the kerb. The detector reported zero curbs on a scene built around a kerb, and raised nothing. What detection actually has to exclude is the DEFAULT: an unobserved cell holds `ground_height` 0, and differencing against it fabricates the feature being looked for. One return rules that out, and `bitfield()`'s own `geometric` mask draws the line in exactly that place. Sparse-cell noise belongs to the linearity test, not to this threshold.*
+>
+> ***A ring window is a torus, so a feature contiguous in the world is split in memory.*** *`ix` lives at `ix % side` and the origin moves with the vehicle. The synthetic pothole came out at memory rows 0–4 and 395–398 of a 400-row ring — one hole, two pieces, opposite ends of the array. A linear scan with edge fill falls off both. Neighbour lookups are toroidal; the one place that must **not** be differenced is the window's world edge, which sits at memory index `x0 % side` and moves — **not** at memory index 0. Both directions are pinned: `test_a_pothole_split_across_the_memory_wrap_is_still_found` and `test_nothing_is_measured_across_the_windows_world_edge`.*
+>
+> ***A rim that straddles a kerb is not a surface.*** *A cell just inside the kerb has half its rim on the road and half on the sidewalk 12 cm up; the median sits above the road and the carriageway reads as a depression. That produced **26 false potholes of ~10 cm** on good road, next to the 10 true cells at 40 cm. `max_rim_spread_m` is the fix and `test_a_kerb_adjacent_cell_is_not_a_pothole` is the guard.*
+>
+> ⚑ *Measured on the synthetic scene, 12 frames, schedule 5/10/20/40: **538 curb cells at a median 12.0 cm** against a built kerb of 12 cm, and **10 pothole cells at a median 40.0 cm** (p10 40.0, p90 40.0) against a built hole of 40 cm. Counts are scene-specific; the medians are the check that matters, because a detector can be made to find any number of things and only one of them is the right height.*
+
 ## 8. Plan sensitivity — coarsening measured in units of decision ⚑
 
 The headline contribution. Every adaptive-mapping paper measures reconstruction error; reconstruction error is a *proxy* for what matters. This measures the thing itself.

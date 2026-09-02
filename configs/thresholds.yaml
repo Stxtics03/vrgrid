@@ -34,6 +34,49 @@ traversability:
   n_min: 3                 # bit 5  confidence -- below this, fail safe
   drivable_classes: [road, parking, sidewalk, other-ground, terrain]  # bit 4
 
+# --- named features (math §7.4) ---------------------------------------------
+# The problem statement names curbs and potholes as the reason a 2D grid is not
+# enough. These are FEATURES, not traversability bits: §7.1 says whether the
+# vehicle can be somewhere, this says what is there. Reported alongside the
+# bitfield and never folded into it -- a 12 cm kerb is passable and is still a
+# kerb, and a planner wants both facts.
+features:
+  min_obs: 1               # NOT traversability.n_min. n_min = 3 asks "may the
+                           # vehicle drive here"; this asks "is this height a
+                           # measurement or the default 0". One return answers
+                           # that, and it is where bitfield()'s own `geometric`
+                           # mask draws the line. Set to 3 and the detectors go
+                           # silent on a sparse map -- 1.2% of ring 0 survives
+                           # a five-cell stencil at n_min, and none of it is a
+                           # kerb. Sparse-cell noise is rejected by the run
+                           # test and the rim pairs, not by this.
+  curb:
+    min_height_m: 0.05     # below this is road texture, not a kerb
+    max_height_m: 0.25     # above this is a wall or a vehicle, not a kerb
+    baseline_m: 0.20       # SHORT on purpose. §7.1's 0.50 m baseline smears a
+                           # kerb into a gentle slope, which is the right
+                           # answer for "can I climb it" and the wrong one for
+                           # "where is the edge".
+    min_run_cells: 3       # a kerb is a line; a lone raised cell is a rock.
+                           # 3 = the cell plus its two perpendicular
+                           # neighbours, which is what detect_curbs tests.
+  pothole:
+    min_depth_m: 0.08      # under 8 cm is a patch or a seam
+    rim_baseline_m: 0.75   # the surface is measured on a ring this far out --
+                           # wider than the 0.60 m pothole of §1.4 so the rim
+                           # samples land on intact road
+    min_rim_pairs: 2       # of 4 OPPOSED rim axes. Pairs, not samples: a rim
+                           # seen on one side only is a slope reading, not a
+                           # surface, and it turns every downgrade at the
+                           # window edge into a field of potholes.
+    max_depressed_rim: 0.5 # if more than half the rim is down too this is a
+                           # dip, a ditch or a downgrade -- not a pothole
+    max_rim_spread_m: 0.08 # the rim must agree with itself. Half a rim on the
+                           # road and half on a 12 cm kerb reads the whole
+                           # carriageway as a 10 cm pothole; if the surface
+                           # spans more than this there is no single surface
+                           # for a hole to be in.
+
 # --- occupancy ---------------------------------------------------------------
 occupancy:
   # Unknown is decided by observation count, NOT by log-odds near zero.
