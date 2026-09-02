@@ -347,55 +347,58 @@ Two metric defects surfaced while proving it, and both are fixed:
 ρ near 1 is the thesis stated numerically: the coarsening cost only what the
 terrain's own sub-cell variability costs.
 
-### ⚑ STILL OPEN: sequence 08 has a per-frame REGISTRATION error
+### Sequence 08 — RESOLVED: it was the pose file
 
-08 still reports RMSE 162 cm at ring 1 after the datum, the metric predicates
-and the saturation exclusion. Measured to its cause, and it is upstream of the
-map entirely.
+08's official KITTI ground-truth poses put the same patch of road **16.6 cm**
+apart from one frame to the next, consistently (16.1–17.6 cm across every pair,
+so a systematic offset rather than drift). A cell seen over N frames
+accumulated about N × 16.6 cm, which made M\* itself carry a **64.5 cm median
+standard deviation inside a 10 cm footprint** and put 08's per-ring RMSE at
+162 cm.
 
-**M\* itself is inconsistent on 08.** Per-cell standard deviation of the
-reference height inside a 10 cm footprint:
+Median absolute ground-height disagreement between consecutive frames, in
+20 cm cells both frames saw:
 
-```
-seq 07   median  0.5 cm    2.9% of cells > 5 cm    max 161 cm
-seq 08   median 64.5 cm   95.6% of cells > 5 cm, 29.8% > 1 m
-```
+| sequence | official GT poses | SemanticKITTI SLAM poses |
+|---|---|---|
+| 07 | **0.49 cm** | 0.66 cm |
+| 08 | 16.63 cm | **1.04 cm** |
 
-A 10 cm patch of road cannot vary by 65 cm. The same world location is
-receiving returns at very different heights across frames.
+The two pose files are not interchangeable. KITTI's GT is a GPS/IMU solution
+optimised for **trajectory** evaluation; SemanticKITTI computed its own SLAM
+poses so that scans **register into a consistent map**. `README.md:21` chose GT
+on Day 0 — right for most sequences, wrong for 08.
 
-**Consecutive frames disagree by a constant 16.6 cm.** Median absolute height
-difference in 20 cm cells seen by both of two consecutive frames:
+`loader.pose_source()` now decides per sequence: 08 reads SLAM, everything else
+GT, and `VRGRID_POSE_SOURCE=gt|slam` forces one globally so the table above
+stays reproducible.
 
-```
-seq 07   median  0.5 cm   (min 0.3, max 0.8, 11 pairs)
-seq 08   median 16.6 cm   (min 16.1, max 17.6, 11 pairs)
-```
+**Ruled out along the way, each by measurement:** the height datum (07 is clean
+on the same code), band saturation, the ground mask, frame alignment (08 is
+4,071/4,071/4,071), the calibration (07 and 08 have *byte-identical* `Tr`), and
+`real_scans`'s own composition (bit-identical to `frames.md`'s textbook
+`sensor_to_world` chain, 0.49 / 16.63 either way).
 
-The consistency is the tell — 16.1 to 17.6 cm across every pair is a
-systematic per-frame offset, not drift. A cell seen over N frames accumulates
-roughly N × 16.6 cm of spread, which is the 64.5 cm median above.
+### Both sequences, 40 frames, 5/10/20/40, with Patchwork++ and the right poses
 
-**What this is not.** Not the height datum (07 and 08 use the same code and 07
-is clean). Not band saturation (excluded from the metric). Not the ground mask:
-Patchwork++ is now installed and built from source, and it makes 08 *worse* on
-the frame-level span (3.63 m vs the semantic fallback's 3.01 m) because a 3 m
-span across a climbing frame is real slope, not contamination. Not a
-frame-count misalignment: 08 is 4,071 poses / 4,071 scans / 4,071 labels.
+| | ring 0 (5 cm) | ring 1 (10 cm) | ring 2 (20 cm) | ring 3 (40 cm) |
+|---|---|---|---|---|
+| **07** RMSE | 1.76 cm | 3.48 cm | 6.13 cm | 16.34 cm |
+| **07** rho | — | 1.32 | 1.18 | 1.25 |
+| **08** RMSE | 1.16 cm | 2.55 cm | 6.46 cm | 52.12 cm |
+| **08** rho | — | 1.30 | 1.22 | 1.84 |
 
-**Where to look.** This is a frames-and-calibration question (`docs/frames.md`,
-`perception/transforms.py`), not a mapping one. 07 and 08 come from different
-KITTI recording dates and therefore different calibrations. `frames.md` already
-records that the odometry benchmark publishes no Velodyne→Vehicle extrinsic and
-that the 1.73 m mounting height is an assumed convention — but a constant
-mounting-height error cancels between frames and cannot produce this, so the
-1.73 m is not the suspect. The composition to audit is
-`vehicle_to_world`'s use of `Tr` from `sequences/08/calib.txt`.
+**ρ between 1.18 and 1.84 on both sequences** is the thesis stated numerically:
+the coarsening cost only what the terrain's own sub-cell variability costs.
+Mean bias is under 2.4 mm everywhere except 08's ring 3.
 
-**Until it is resolved, 08 is not reportable** for anything built on
-world-registered accumulation: the per-ring table, curbs, potholes and
-confidence. Sequence 07 is clean and carries the accuracy claim. Paths that do
-not accumulate across frames — the timing and ablation tables — are unaffected.
+⚑ 07's figures moved from an earlier 1.69 cm at ring 1 because **Patchwork++
+  replaced the semantic-class ground fallback**, not because of the pose
+  change — 07 still reads GT poses. The geometric segmenter admits genuine
+  terrain the class mask missed, so `spread` rises (1.07 → 3.95 cm at ring 1)
+  and more cells are scored (47,059 → 51,975; ring 3 goes from 0 cells to 949).
+  RMSE rises and ρ *falls*, which is the more honest reading: the earlier
+  number was over a narrower, flatter subset.
 
 ### Patchwork++ is now installed
 

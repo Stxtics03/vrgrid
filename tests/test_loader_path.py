@@ -248,3 +248,37 @@ def test_the_moving_car_actually_moves_in_the_world(sequence):
     assert (steps > 1.0).all(), (
         f"the moving car advanced {steps} m/frame in the world -- a label "
         "that says moving on geometry that does not")
+
+
+# --- which pose file a sequence is read with ---------------------------------
+
+def test_pose_source_defaults_per_sequence():
+    """08 reads SemanticKITTI's SLAM poses; everything else the official GT.
+
+    Not a preference. Measured as the median absolute ground-height
+    disagreement between consecutive frames in 20 cm cells both frames saw:
+    seq 07 is 0.49 cm on GT and 0.66 on SLAM, so GT wins; seq 08 is 16.63 cm on
+    GT and 1.04 on SLAM. 08's GT poses put the same patch of road 16.6 cm apart
+    frame to frame, consistently, which accumulates into M* itself and put its
+    per-ring RMSE at 162 cm.
+    """
+    from vrgrid.perception import loader
+
+    assert loader.pose_source("08") == "slam"
+    for seq in ("00", "01", "07", "09", "10"):
+        assert loader.pose_source(seq) == "gt", seq
+
+
+def test_the_pose_source_can_be_forced(monkeypatch):
+    """So the comparison above stays reproducible, and so a reviewer can ask
+    'what does 08 look like on GT poses' without editing the source."""
+    from vrgrid.perception import loader
+
+    monkeypatch.setenv("VRGRID_POSE_SOURCE", "gt")
+    assert loader.pose_source("08") == "gt"
+    monkeypatch.setenv("VRGRID_POSE_SOURCE", "slam")
+    assert loader.pose_source("07") == "slam"
+
+    monkeypatch.setenv("VRGRID_POSE_SOURCE", "sideways")
+    with pytest.raises(ValueError, match="gt.*slam"):
+        loader.pose_source("07")
