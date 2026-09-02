@@ -42,6 +42,7 @@ from vrgrid.eval.synthetic import (
     POTHOLE_DEPTH_M,
     write_sequence,
 )
+from vrgrid.grid.confidence import summarise as conf_summary
 from vrgrid.grid.features import detect
 from vrgrid.grid.transient import TrackList
 
@@ -116,6 +117,26 @@ def main():
                   KERB_HEIGHT_M * 100 if synthetic and len(c) else None)
         summarise("pothole", h, h.depth_cm,
                   POTHOLE_DEPTH_M * 100 if synthetic and len(h) else None)
+
+    print()
+    print("per-cell confidence in the drivability verdict (§7.5), observed cells")
+    print(f"{'ring':>4} {'cell':>6} {'cells':>9} {'mean':>7} {'>=0.8':>7} "
+          f"{'<0.2':>7}  {'binding channel':<15}")
+    print("-" * 74)
+    for level, cell_m, n_seen, mean, hi, lo, binding in conf_summary(
+            gm.soa, gm.schedule, rings, gm.thresholds):
+        if not n_seen:
+            print(f"{level:>4} {cell_m*100:>5.0f}c {0:>9}       --      --      --")
+            continue
+        print(f"{level:>4} {cell_m*100:>5.0f}c {n_seen:>9,} {mean:>7.2f} "
+              f"{hi:>6.0%} {lo:>6.0%}  {binding:<15}")
+    print("  'binding' is what held the verdict down: 'not-drivable' means the")
+    print("  cell is confidently NOT road, which is a real answer and not a")
+    print("  low-confidence one. A distribution, not a mean: uniformly-0.5 and")
+    print("  half-0.9/half-0.1")
+    print("  have the same mean and only one is safe to plan through. Nothing")
+    print("  here is stored -- all four channels are derived, cell stays 12 B.")
+    print()
 
     tot_c = sum(len(c) for c in curbs)
     tot_h = sum(len(h) for h in holes)

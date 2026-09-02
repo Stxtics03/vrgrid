@@ -580,6 +580,38 @@ Neither writes to the cell. `CELL_FIELDS` is frozen at 12 B and adding a field m
 >
 > ⚑ *Measured on the synthetic scene, 12 frames, schedule 5/10/20/40: **538 curb cells at a median 12.0 cm** against a built kerb of 12 cm, and **10 pothole cells at a median 40.0 cm** (p10 40.0, p90 40.0) against a built hole of 40 cm. Counts are scene-specific; the medians are the check that matters, because a detector can be made to find any number of things and only one of them is the right height.*
 
+### 7.5 Confidence in the verdict
+
+§7.1 returns six bits and no idea how sure it is. A planner that cannot separate *probably drivable* from *definitely drivable* must treat them as one fact, and so either trusts a cell it should have slowed for or refuses one it could have used. The margin behind each verdict is reported as four channels, each in [0, 1], each meaning "1 is as good as it gets":
+
+```
+label      share ≥ (n + κ) / 2n,  κ = Boyer-Moore counter (§10.2)      (26)
+evidence   min(1, n / n_min)
+geometry   1 − max( ‖∇z‖/tan θ_max ,  max|Δz| / s_max )
+surface    1 − σ² / σ²_max
+
+conf(c) = 0 if class(c) ∉ drivable_set, else min of the four            (27)
+```
+
+**Nothing is stored.** Every term is derived from a field the cell already carries, so `CELL_BYTES` stays 12 and no memory figure in the report moves. §10.2 already described the Boyer-Moore counter as "a confidence readout"; (26) is the first thing to read it.
+
+**(26) is a lower bound and is meant to be.** Boyer-Moore keeps `κ = votes_for − votes_against` for the surviving candidate, so `votes_for ≥ (n + κ)/2`. κ saturates at 7, which makes the bound *loosen* as a cell is seen more often: a cell observed 200 times unanimously reports a lower share than one observed 8 times, because the 3-bit register stopped counting and the evidence is genuinely no longer held. Reporting the floor is the honest reading; `saturated()` flags the cells in that regime so a low share is not misread as disagreement.
+
+**(27) takes the minimum, not the product.** A cell is as trustworthy as the least trustworthy thing known about it. A product reads lower and looks more sophisticated, and would assert an independence between slope error and label error that nobody has measured. Nothing here is calibrated against outcomes either, so these are margins and not probabilities — calling 0.6 a 60% chance of anything would be inventing precision the map cannot support.
+
+> **Note, 2 Sep — Shrestha. A ring reading 0.00 is not necessarily broken, and that had to be printed.**
+>
+> *On the synthetic scene, 12 frames, 5/10/20/40, over observed cells only:*
+>
+> | ring | cell | cells | mean | ≥0.8 | <0.2 | binding |
+> |---|---|---|---|---|---|---|
+> | 0 | 5 cm | 80,719 | 0.49 | 13% | 3% | label |
+> | 1 | 10 cm | 68,085 | 0.31 | 0% | 20% | evidence |
+> | 2 | 20 cm | 32,124 | 0.03 | 0% | 94% | not-drivable |
+> | 3 | 40 cm | 11,283 | 0.00 | 0% | 100% | not-drivable |
+>
+> *Ring 3 is not a failure. Most of the far field on this scene is the vegetation verge, and a confident "not road" is reported by (27) as **no confidence in drivability** — the correct answer, which looks exactly like a broken one. So `summarise()` names the **binding channel**, the one that most often held the verdict down, next to the number. Ring 0 binding on `label` is the κ ceiling of (26), not disagreement; ring 1 binding on `evidence` is fill rate. A confidence figure without the reason behind it is the same kind of diagnostic as the one that reported 0.9% where the truth was 91.9%.*
+
 ## 8. Plan sensitivity — coarsening measured in units of decision ⚑
 
 The headline contribution. Every adaptive-mapping paper measures reconstruction error; reconstruction error is a *proxy* for what matters. This measures the thing itself.
