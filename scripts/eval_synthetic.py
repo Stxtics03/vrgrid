@@ -19,6 +19,7 @@ for the per-ring table, running the whole chain with no data and no network:
 """
 
 import argparse
+import dataclasses
 import shutil
 import tempfile
 from pathlib import Path
@@ -128,18 +129,86 @@ def costmaps_for(gm, reference, vehicle_xy_m):
                                  vehicle_xy_m=(vx, vy)))
 
 
-def plan_regret_for(gm, reference, vehicle_xy_m, mask=None):
-    """R(S) for one map, through query() only. Math §8.1.
+#: How many planning queries R(S) is averaged over. ONE was not an estimator.
+PLAN_QUERIES = 64
+
+
+def plan_queries(n_queries: int, seed: int = 0):
+    """Start/goal pairs spanning the planning window, deterministically.
+
+    ⚑ R(S) FROM A SINGLE QUERY IS NOT AN ESTIMATE. A plan is discrete: one
+      §7.1 bit flips and the path jumps a whole cell, so the statistic has no
+      continuity and a single sample has enormous variance. Measured on real
+      sequence 08, the same schedule by window length --
+
+          5_10_20_40    2.207 -> 0.207 -> 0.000 -> 0.414   (20/40/80/160 frames)
+          uniform_80cm  3.293 ->   inf -> 0.207 -> 0.000
+
+      -- not monotone, not stable, and the ordering BETWEEN schedules inverts
+      with the frame count. A figure whose conclusion you can choose by picking
+      a window length is not measuring what it claims.
+
+      Averaging over many queries is what turns it into an estimator with a
+      spread you can quote. It does not make the underlying quantity less
+      discrete; it makes the REPORTED number a mean of many discrete draws
+      rather than one of them.
+
+    ⚑ This does NOT touch PLAN_LANE_CELLS or the single-lane query, which are
+      Pratyushi's parked design decision (docs/decisions-2026-09-02.md,
+      Decision 4). The lane query is still query 0 of the set, so every
+      previous single-query number remains reproducible as
+      `plan_queries(1)[0]`.
+
+    Seeded, because the determinism test is CI-blocking and a regret that
+    moves between runs of the same map is worse than one that is noisy.
+    """
+    lane = PLAN_N // 2 - PLAN_LANE_CELLS
+    out = [((1, lane), (PLAN_N - 2, lane))]          # the historical query
+    rng = np.random.default_rng(seed)
+    edge = 1
+    while len(out) < n_queries:
+        a = int(rng.integers(edge, PLAN_N - edge))
+        b = int(rng.integers(edge, PLAN_N - edge))
+        # Span the window end to end, so each query is a comparable distance
+        # and the mean is not dominated by how far apart the endpoints landed.
+        out.append(((edge, a), (PLAN_N - 1 - edge, b)))
+    return out
+
+
+def plan_regret_for(gm, reference, vehicle_xy_m, mask=None,
+                    n_queries: int = PLAN_QUERIES):
+    """R(S) for one map, averaged over `n_queries` planning problems. §8.1.
 
     `mask` restricts both maps to the common support -- ground every schedule
-    in the comparison observed. Without it the number measures fill rate
-    rather than coarsening; see the confound note in eval/plan_regret.py.
+    in the comparison observed, at comparable evidence. Without it the number
+    measures fill rate rather than coarsening.
+
+    Returns the median-regret query's `Regret`, with `regret` replaced by the
+    mean over all queries that found a path and `n_queries`/`n_found`/`spread`
+    attached. Median rather than mean for the representative query, because an
+    `inf` -- a plan into a wall -- must not be averaged away, and it is counted
+    separately in `blocked_fraction`.
     """
     star, mine = costmaps_for(gm, reference, vehicle_xy_m)
     if mask is not None:
         star, mine = restrict(star, mask), restrict(mine, mask)
-    lane = PLAN_N // 2 - PLAN_LANE_CELLS
-    return regret(star, mine, (1, lane), (PLAN_N - 2, lane))
+
+    results = [regret(star, mine, s, g) for s, g in plan_queries(n_queries)]
+    found = [r for r in results if r.found]
+    finite = [r.regret for r in found if np.isfinite(r.regret)]
+    blocked = sum(1 for r in found if not np.isfinite(r.regret))
+
+    rep = found[len(found) // 2] if found else results[0]
+    rep = dataclasses.replace(
+        rep,
+        regret=float(np.mean(finite)) if finite else float("inf"),
+        frechet_m=float(np.mean([r.frechet_m for r in found])) if found else float("nan"),
+    )
+    rep.n_queries = len(results)
+    rep.n_found = len(found)
+    rep.n_blocked = blocked
+    rep.regret_sd = float(np.std(finite)) if len(finite) > 1 else 0.0
+    return rep
 
 
 def main():

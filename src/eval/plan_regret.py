@@ -658,21 +658,54 @@ def regret(reference_map: CostMap, compressed_map: CostMap, start, goal) -> Regr
     )
 
 
-def common_support(*costmaps) -> np.ndarray:
-    """Cells every map in the comparison has actually observed. Math §8.2.
+def common_support(*costmaps, require_confident: bool = True) -> np.ndarray:
+    """Cells every map in the comparison has adequate EVIDENCE for. Math §8.2.
 
     The ablation is only a comparison of SCHEDULES if every schedule is scored
     on the same ground. A 5 cm ring and a 40 cm ring see very different
     fractions of the same sequence, and the difference is fill rate rather
-    than information loss -- see the confound note at the top of this file.
+    than information loss.
+
+    ⚑ "Observed at all" was not a strong enough bar, and the figure it
+      produced was noise. Masking only on `unknown` equalises COVERAGE and
+      leaves EVIDENCE wildly unequal: a cell one schedule saw three times and
+      another saw thirty passes the mask, but their height estimates differ by
+      sampling rather than by cell size, and the planner routes on the
+      difference. Measured on real sequence 08, R(S) for the SAME schedule by
+      window length:
+
+          5_10_20_40    2.207 -> 0.207 -> 0.000 -> 0.414   (20/40/80/160 frames)
+          uniform_80cm  3.293 ->   inf -> 0.207 -> 0.000
+
+      Not monotone, not stable, and the ordering between schedules inverts.
+      R(S) was measuring how incompletely each map happened to be filled at
+      that window length, far more than how coarsely it represented what it
+      held -- the same fill-rate confound that was fixed in the w_unknown
+      ACCOUNTING, surviving in the PLAN because a sparser map plans
+      differently even when it is no longer charged for sparsity.
+
+      `require_confident` additionally drops cells where any map carries §7.1
+      bit 5 (`n < n_min`), so every schedule is scored where all of them have
+      real evidence. It is the default because a comparison without it is not
+      a comparison of schedules.
+
+    ⚑ This was tried once before and rejected: masking on bit 5 dropped the
+      hazard cells themselves -- a 40 cm hole is what a LiDAR gets fewest
+      returns from -- and disconnected the corridor. That was BEFORE the
+      sub-cell OR in `costmap_from_gridmap` was fixed, when bit 5 covered 100%
+      of the window; it now covers about 0.9%, so the objection no longer
+      holds. `plan()` returns `found=False` if it ever does again, which is
+      loud rather than silent.
 
     Returns a boolean mask to pass to `restrict()`.
     """
-    mask = ~costmaps[0].unknown
-    for c in costmaps[1:]:
+    mask = ~np.asarray(costmaps[0].unknown, dtype=bool)
+    for c in costmaps:
         if not costmaps[0].same_lattice(c):
             raise ValueError("common support needs one lattice for every map")
-        mask &= ~c.unknown
+        mask &= ~np.asarray(c.unknown, dtype=bool)
+        if require_confident and c.trav is not None:
+            mask &= (np.asarray(c.trav) & TRAV_CONFIDENCE) == 0
     return mask
 
 
