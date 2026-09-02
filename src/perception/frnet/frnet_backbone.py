@@ -1,6 +1,6 @@
 # NON-FUNCTIONAL -- see the header of frnet.py. This standalone port does not
-# reproduce the trained network: this backbone uses nn.LeakyReLU throughout,
-# but the checkpoint was trained with HSwish (act_cfg=dict(type='HSwish') in
+# FIXED 2 Sep: this backbone used nn.LeakyReLU throughout, but the checkpoint
+# was trained with HSwish (act_cfg=dict(type='HSwish') in
 # configs/_base_/models/frnet.py). Kept, not deleted, for a possible real
 # FRNet install later. semantics.py uses ground-truth .label files instead.
 
@@ -32,7 +32,7 @@ class BasicBlock(nn.Module):
             inplanes, planes, 3, stride=stride, padding=dilation,
             dilation=dilation, bias=False)
         self.conv2 = nn.Conv2d(planes, planes, 3, padding=1, bias=False)
-        self.relu = nn.LeakyReLU(inplace=True)
+        self.relu = nn.Hardswish(inplace=True)
         self.downsample = downsample
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -59,7 +59,7 @@ class ConvModule(nn.Module):
         super().__init__()
         self.conv = nn.Conv2d(in_channels, out_channels, kernel_size, padding=padding, bias=bias)
         self.bn = nn.BatchNorm2d(out_channels)
-        self.act = nn.LeakyReLU(inplace=True) if act_cfg is None else nn.Identity()
+        self.act = nn.Hardswish(inplace=True) if act_cfg is None else nn.Identity()
 
     def forward(self, x):
         x = self.conv(x)
@@ -159,13 +159,13 @@ class FRNetBackbone(nn.Module):
         return nn.Sequential(
             nn.Conv2d(in_channels, out_channels // 2, 3, padding=1, bias=False),
             nn.BatchNorm2d(out_channels // 2),
-            nn.LeakyReLU(inplace=True),
+            nn.Hardswish(inplace=True),
             nn.Conv2d(out_channels // 2, out_channels, 3, padding=1, bias=False),
             nn.BatchNorm2d(out_channels),
-            nn.LeakyReLU(inplace=True),
+            nn.Hardswish(inplace=True),
             nn.Conv2d(out_channels, out_channels, 3, padding=1, bias=False),
             nn.BatchNorm2d(out_channels),
-            nn.LeakyReLU(inplace=True))
+            nn.Hardswish(inplace=True))
 
     def _make_point_layer(self, in_channels: int, out_channels: int) -> nn.Module:
         return nn.Sequential(
@@ -177,13 +177,13 @@ class FRNetBackbone(nn.Module):
         return nn.Sequential(
             nn.Conv2d(in_channels, out_channels, 3, padding=1, bias=False),
             nn.BatchNorm2d(out_channels),
-            nn.LeakyReLU(inplace=True))
+            nn.Hardswish(inplace=True))
 
     def _make_attention_layer(self, channels: int) -> nn.Module:
         return nn.Sequential(
             nn.Conv2d(channels, channels, 3, padding=1, bias=False),
             nn.BatchNorm2d(channels),
-            nn.LeakyReLU(inplace=True),
+            nn.Hardswish(inplace=True),
             nn.Conv2d(channels, channels, 3, padding=1, bias=False),
             nn.BatchNorm2d(channels),
             nn.Sigmoid())

@@ -133,7 +133,10 @@ def costmaps_for(gm, reference, vehicle_xy_m):
 PLAN_QUERIES = 64
 
 
-def plan_queries(n_queries: int, seed: int = 0):
+PLAN_QUERY_FAMILIES = ("longitudinal", "lateral")
+
+
+def plan_queries(n_queries: int, seed: int = 0, family: str = "longitudinal"):
     """Start/goal pairs spanning the planning window, deterministically.
 
     ⚑ R(S) FROM A SINGLE QUERY IS NOT AN ESTIMATE. A plan is discrete: one
@@ -162,21 +165,49 @@ def plan_queries(n_queries: int, seed: int = 0):
     Seeded, because the determinism test is CI-blocking and a regret that
     moves between runs of the same map is worse than one that is noisy.
     """
-    lane = PLAN_N // 2 - PLAN_LANE_CELLS
-    out = [((1, lane), (PLAN_N - 2, lane))]          # the historical query
+    if family not in PLAN_QUERY_FAMILIES:
+        raise ValueError(f"family must be one of {PLAN_QUERY_FAMILIES}, "
+                         f"not {family!r}")
     rng = np.random.default_rng(seed)
     edge = 1
+    out = []
+
+    if family == "longitudinal":
+        # Along the lane. Query 0 is the historical one, unchanged, so every
+        # single-query number ever reported stays reproducible.
+        lane = PLAN_N // 2 - PLAN_LANE_CELLS
+        out.append(((1, lane), (PLAN_N - 2, lane)))
+        while len(out) < n_queries:
+            a = int(rng.integers(edge, PLAN_N - edge))
+            b = int(rng.integers(edge, PLAN_N - edge))
+            out.append(((edge, a), (PLAN_N - 1 - edge, b)))
+        return out
+
+    # ⚑ ACROSS the lane -- road to verge, the direction that crosses the kerb.
+    #   The longitudinal family cannot discriminate between resolutions and it
+    #   is structural, not bad luck: a query that runs the length of one lane
+    #   rewards a map that is uniformly adequate along a line, and a foveated
+    #   map's advantage is that it is SHARP WHERE THE VEHICLE IS LOOKING, which
+    #   a line down the middle never tests. Measured on seq 08 at matched
+    #   extent, every schedule from 10 cm to 40 cm scored between 0.231 and
+    #   0.488 on the lane query with the ordering inverted against cell size.
+    #
+    #   A lateral query crosses the kerb, which is the one feature in the scene
+    #   whose representation actually depends on cell size (§7.4: a 12 cm kerb
+    #   at 5 cm resolves, at 40 cm averages away). It is also only a FAIR test
+    #   since 2 Sep, when §7.1 bit 4 was put on both sides of eq. (23) -- before
+    #   that a lateral query was measured almost entirely through an asymmetry,
+    #   because crossing the kerb is exactly where the class penalty lives.
     while len(out) < n_queries:
         a = int(rng.integers(edge, PLAN_N - edge))
         b = int(rng.integers(edge, PLAN_N - edge))
-        # Span the window end to end, so each query is a comparable distance
-        # and the mean is not dominated by how far apart the endpoints landed.
-        out.append(((edge, a), (PLAN_N - 1 - edge, b)))
+        out.append(((a, edge), (b, PLAN_N - 1 - edge)))
     return out
 
 
 def plan_regret_for(gm, reference, vehicle_xy_m, mask=None,
-                    n_queries: int = PLAN_QUERIES):
+                    n_queries: int = PLAN_QUERIES,
+                    family: str = "longitudinal"):
     """R(S) for one map, averaged over `n_queries` planning problems. §8.1.
 
     `mask` restricts both maps to the common support -- ground every schedule
@@ -193,7 +224,8 @@ def plan_regret_for(gm, reference, vehicle_xy_m, mask=None,
     if mask is not None:
         star, mine = restrict(star, mask), restrict(mine, mask)
 
-    results = [regret(star, mine, s, g) for s, g in plan_queries(n_queries)]
+    results = [regret(star, mine, s, g)
+               for s, g in plan_queries(n_queries, family=family)]
     found = [r for r in results if r.found]
     finite = [r.regret for r in found if np.isfinite(r.regret)]
     blocked = sum(1 for r in found if not np.isfinite(r.regret))

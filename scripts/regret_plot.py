@@ -131,7 +131,7 @@ CAVEAT = ("SYNTHETIC SEQUENCE - NOT REPORTABLE: analytic terrain, "
           "no sensor noise, occlusion or registration error")
 
 
-def collect(root, frames: int, seq=None, uniform_half_m=None) -> list:
+def collect(root, frames: int, seq=None, uniform_half_m=None, family="longitudinal") -> list:
     """Run every schedule over one sequence and return the §8.2 rows.
 
     The two-pass structure is `eval_synthetic`'s and it matters: every map is
@@ -186,7 +186,7 @@ def collect(root, frames: int, seq=None, uniform_half_m=None) -> list:
                             for _, gm, _ in built])
     rows = []
     for _, gm, result in built:
-        reg = sweep.plan_regret_for(gm, reference, vehicle_x, mask)
+        reg = sweep.plan_regret_for(gm, reference, vehicle_x, mask, family=family)
         rows.append(memory_vs_regret_row(result, reg))
     return rows, float(mask.mean())
 
@@ -277,6 +277,14 @@ def main() -> None:
                     help="directory for regret.csv and regret.svg/.png")
     ap.add_argument("--keep", default=None,
                     help="keep the generated sequence here instead of a tempdir")
+    ap.add_argument("--query", default="longitudinal",
+                    choices=("longitudinal", "lateral"),
+                    help="which planning-query family R(S) averages over. "
+                         "longitudinal runs the length of the lane (the "
+                         "historical query); lateral crosses it, road to "
+                         "verge, which is the direction that crosses the kerb "
+                         "and therefore the one whose cost depends on cell "
+                         "size.")
     ap.add_argument("--uniform-half-width", type=float, default=None,
                     help="half-width in m for the uniform baselines (default: "
                          "matched to the frozen schedules' reach). 24.0 "
@@ -295,7 +303,8 @@ def main() -> None:
         if not args.seq:
             write_sequence(root, "99", n_frames=args.frames)
         rows, mask_frac = collect(root, args.frames, seq=args.seq,
-                                  uniform_half_m=args.uniform_half_width)
+                                  uniform_half_m=args.uniform_half_width,
+                                  family=args.query)
     finally:
         if args.keep is None:
             shutil.rmtree(root, ignore_errors=True)
