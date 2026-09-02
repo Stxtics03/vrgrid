@@ -54,6 +54,18 @@ CAR_START_X, CAR_END_X = 14.0, 27.0
 CAR_Y = 0.0
 CAR_HALF = 1.0
 
+# ⚑ The caveat has to follow the DATA, not the script. Printed and stamped
+#   unconditionally it put "SYNTHETIC: analytic terrain, no sensor noise" on a
+#   figure drawn from 200 real frames of sequence 08 -- a false label on a
+#   report figure, and one that understates the result rather than overstating
+#   it, which is exactly the kind that survives review.
+def caveat_for(seq):
+    if seq:
+        return (f"REAL: SemanticKITTI sequence {seq}. Ground-truth semantics "
+                "and motion from the .label files; no learned segmentation.")
+    return CAVEAT
+
+
 CAVEAT = ("SYNTHETIC: analytic terrain, no sensor noise, occlusion or "
           "registration error, ground-truth motion")
 
@@ -143,7 +155,7 @@ def trail_mask(x, y, car_x_now):
             & (x <= car_x_now - CAR_HALF - 0.3))
 
 
-def draw(panels, counts, path, frames, car_x_now):
+def draw(panels, counts, path, frames, car_x_now, caveat=CAVEAT):
     try:
         import matplotlib
         matplotlib.use("Agg")
@@ -177,7 +189,7 @@ def draw(panels, counts, path, frames, car_x_now):
     axes[0].set_ylabel("y (m, world)")
     fig.suptitle("Ghost removal in the MAP, not the point cloud (math §10.4)",
                  fontsize=12)
-    fig.text(0.5, 0.015, CAVEAT, ha="center", fontsize=7.5, color="#B4342F")
+    fig.text(0.5, 0.015, caveat, ha="center", fontsize=7.5, color="#B4342F")
     tail = (f"car {CAR_START_X:.0f} m -> {CAR_END_X:.0f} m" if car_x_now is not None
             else "ghosts identified by the GT moving-* label")
     # Inside the right-hand axes rather than in the figure footer: at this
@@ -261,13 +273,14 @@ def main() -> None:
 
     n_off, n_on = int(off_ghost.sum()), int(on_ghost.sum())
 
-    print(f"{'':<22}{'occupied':>10}{'ghost cells':>13}{'cleared':>9}{'protected':>11}")
-    print("-" * 65)
+    print(f"{'':<22}{'occupied':>12}{'ghost cells':>14}{'cleared':>13}"
+          f"{'protected':>13}")
+    print("-" * 74)
     for label, engine, n, counters in (("cleanup OFF", off_engine, n_off, off_counters),
                                        ("cleanup ON", on_engine, n_on, on_counters)):
-        print(f"{label:<22}{len(engine.occupied_slots()):>10,}{n:>13,}"
-              f"{sum(c.cleared for c in counters):>9,}"
-              f"{sum(c.protected for c in counters):>11,}")
+        print(f"{label:<22}{len(engine.occupied_slots()):>12,}{n:>14,}"
+              f"{sum(c.cleared for c in counters):>13,}"
+              f"{sum(c.protected for c in counters):>13,}")
     removed = 1.0 - (n_on / n_off) if n_off else float("nan")
     print(f"\n{removed:.1%} of the trail removed. {sum(c.protected for c in on_counters):,} cells "
           f"were spared by the current-return\nguard -- the wall and the ground, which the "
@@ -294,13 +307,14 @@ def main() -> None:
 
     panels = [(f"ghost removal OFF  --  {n_off:,} ghost cells", off_xy, off_ghost),
               (f"ghost removal ON  --  {n_on:,} ghost cells", on_xy, on_ghost)]
-    if draw(panels, (n_off, n_on), out / "ghost_removal.svg", args.frames, car_now):
+    if draw(panels, (n_off, n_on), out / "ghost_removal.svg", args.frames,
+            car_now, caveat_for(args.seq)):
         print(f"\nwrote {out / 'ghost_removal.csv'}, {out / 'ghost_removal.svg'} "
               f"and {out / 'ghost_removal.png'}")
     else:
         print(f"\nwrote {out / 'ghost_removal.csv'}. No figure: matplotlib is not "
               f"installed -- `pip install -e \".[report]\"`.")
-    print(f"\n{CAVEAT}")
+    print(f"\n{caveat_for(args.seq)}")
 
 
 if __name__ == "__main__":
