@@ -57,8 +57,13 @@ class PerceptionFrame:
 
 
 def iter_pipeline(seq: str, max_frames: int | None, use_patchworkpp: bool = True,
-                  timer=None):
+                  timer=None, start_frame: int = 0):
     """Yield a PerceptionFrame per scan of `seq`.
+
+    `start_frame` skips ahead before the first yield (default 0, so existing
+    callers are unchanged); `max_frames` then counts from there, and
+    `PerceptionFrame.index` carries the real sequence frame number so the
+    dashboard timeline lines up with the sequence.
 
     `timer` is an optional `gpu.timing.Timer`. Passing one names each stage
     with the spelling in `timing.STAGES`, which is what lets
@@ -76,7 +81,7 @@ def iter_pipeline(seq: str, max_frames: int | None, use_patchworkpp: bool = True
     def stage(name):
         return timer.stage(name) if timer is not None else nullcontext()
 
-    scans = loader.scans(seq, max_frames=max_frames)
+    scans = loader.scans(seq, max_frames=max_frames, start_frame=start_frame)
     i = 0
     while True:
         # Timed by hand rather than with `stage("load")`, because the pull that
@@ -120,7 +125,7 @@ def iter_pipeline(seq: str, max_frames: int | None, use_patchworkpp: bool = True
         # generator yields -- see the module docstring.
 
         yield PerceptionFrame(
-            index=i,
+            index=start_frame + i,
             points_sensor=points,
             points_world=points_world,
             pose=pose,
@@ -141,6 +146,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--schedule", default="5/10/20/40", help="ring schedule name")
     p.add_argument("--thresholds", default="configs/thresholds.yaml")
     p.add_argument("--frames", type=int, default=None, help="stop after N frames")
+    p.add_argument("--start-frame", type=int, default=0,
+                   help="start from this frame index (default 0); --frames counts from here")
     p.add_argument("--viz", action="store_true", help="open the Rerun dashboard")
     p.add_argument("--save", default=None, help="write a Rerun .rrd recording here")
     p.add_argument(
@@ -192,7 +199,8 @@ def main(argv=None) -> int:
                             palette=args.palette, engine=engine)
 
     n, cleared, protected = 0, 0, 0
-    for frame in iter_pipeline(args.seq, args.frames, use_patchworkpp=not args.no_patchworkpp):
+    for frame in iter_pipeline(args.seq, args.frames, use_patchworkpp=not args.no_patchworkpp,
+                               start_frame=args.start_frame):
         counters = engine.step(frame) if engine is not None else None
         if counters is not None:
             cleared += counters.cleared

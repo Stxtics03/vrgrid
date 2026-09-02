@@ -148,12 +148,15 @@ def _available_frames(sequence: str) -> list[int]:
     return sorted(frames)
 
 
-def scans(sequence: str, max_frames: int | None = None):
+def scans(sequence: str, max_frames: int | None = None, start_frame: int = 0):
     """Yield (points, labels, pose) per frame for a sequence.
 
     Args:
         sequence: "00", "07", or "08"
-        max_frames: optional limit for testing (e.g., 10 frames)
+        max_frames: optional limit -- yield at most this many frames
+        start_frame: skip to this frame index before yielding (default 0);
+            `max_frames` then counts from here. Lets a demo recording start
+            partway through a sequence without streaming the frames before it.
 
     Yields:
         points: (N, 4) float32 — x, y, z, intensity in SENSOR frame
@@ -166,6 +169,8 @@ def scans(sequence: str, max_frames: int | None = None):
     if not available:
         raise FileNotFoundError(f"No velodyne frames found for sequence {sequence}")
 
+    if start_frame:
+        available = [f for f in available if f >= start_frame]
     if max_frames is not None:
         available = available[:max_frames]
 
