@@ -62,6 +62,12 @@ features:
                            # neighbours, which is what detect_curbs tests.
   pothole:
     min_depth_m: 0.08      # under 8 cm is a patch or a seam
+    max_depth_m: 0.50      # over 50 cm it is not a pothole. Bounded above for
+                           # the same reason the curb band is: on seq 08 ring 2
+                           # this found 156 "potholes" at a median 71.5 cm and
+                           # a p90 of 200 cm -- ditches, kerb-line drop-offs
+                           # and the space under parked cars. Those are real
+                           # hazards and they are a different detector.
     rim_baseline_m: 0.75   # the surface is measured on a ring this far out --
                            # wider than the 0.60 m pothole of §1.4 so the rim
                            # samples land on intact road

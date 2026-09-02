@@ -96,6 +96,15 @@ COUNTER_BITS = 8 - CLASS_BITS
 CLASS_MAX = (1 << CLASS_BITS) - 1      # 31, and the label set stops at 19
 COUNTER_MAX = (1 << COUNTER_BITS) - 1  # 7
 
+# Learning ids run 0-19, so 20-31 are spare inside the 5-bit field. 31 is the
+# one reserved meaning: the point carried no usable label. Real SemanticKITTI
+# scans contain `unlabeled` (raw 0) and ids outside the scheme, which
+# `semantic_labels()` reports as -1 -- and -1 through `astype(uint8)` is 255,
+# which does not fit the field and cannot be packed. It is NOT in any drivable
+# set, so a cell that lands here fails safe by §7.1 bit 4, which is the same
+# answer an unknown class should get anyway.
+CLASS_UNLABELLED = CLASS_MAX  # 31
+
 OBS_COUNT_MAX = 255                    # uint8, saturating (cell.py)
 FRAMES_SEEN_MAX = 255
 

@@ -68,3 +68,52 @@ def test_real_frame_distribution_is_sane():
     # building + road + car dominate this urban frame
     for cls in (12, 8, 0):
         assert (labels == cls).mean() > 0.05
+
+
+# --- learning_ids on real scans ---------------------------------------------
+
+def test_unlabelled_points_get_a_packable_class_not_255():
+    """Real SemanticKITTI scans contain `unlabeled` (raw 0) and ids outside the
+    scheme. `semantic_labels` reports those as -1, and -1 through
+    `astype(uint8)` is 255 -- which does not fit the 5-bit class field, so
+    `scatter_sorted` rejected the very first real frame with "class ids must be
+    < 32 to pack into the class key".
+
+    The synthetic sequences write learning ids and never contain an unlabelled
+    point, which is why nothing caught this until the loader was pointed at
+    sequence 08. Mapped rather than dropped: an unlabelled return still has
+    geometry, and a wall nobody labelled is still a wall.
+    """
+    import numpy as np
+    from vrgrid.eval.harness import learning_ids
+    from vrgrid.grid.fusion import CLASS_MAX, CLASS_UNLABELLED
+
+    raw = np.array([0, 40, 48, 70, 252, 1, 99], dtype=np.uint32)   # 0 and 99 unmapped
+    out = learning_ids(raw)
+
+    assert out.dtype == np.uint8
+    assert int(out.max()) <= CLASS_MAX, "must fit the 5-bit class field"
+    assert out[0] == CLASS_UNLABELLED, "raw 0 is `unlabeled`"
+    assert out[-1] == CLASS_UNLABELLED, "raw 99 is outside the scheme"
+    assert out[1] != CLASS_UNLABELLED, "raw 40 is `road` and must survive"
+
+
+def test_the_unlabelled_class_is_not_drivable():
+    """It has to fail safe on §7.1 bit 4 -- an unknown class is not a licence
+    to drive over it."""
+    import numpy as np
+    from vrgrid.grid.fusion import CLASS_UNLABELLED
+    from vrgrid.grid.traversability import drivable_ids
+
+    assert CLASS_UNLABELLED not in np.asarray(drivable_ids())
+
+
+def test_instance_ids_in_the_upper_word_are_masked_off():
+    """A `.label` word is 16 bits of semantics and 16 of instance id. Reading
+    the whole word gives class ids in the thousands."""
+    import numpy as np
+    from vrgrid.eval.harness import learning_ids
+
+    plain = np.array([40, 48, 70], dtype=np.uint32)
+    with_instances = plain | (np.array([3, 17, 900], dtype=np.uint32) << 16)
+    assert np.array_equal(learning_ids(plain), learning_ids(with_instances))

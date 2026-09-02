@@ -48,12 +48,45 @@ from vrgrid.grid.transient import TrackList
 
 
 def real_scans(sequence, max_frames):
-    """The real path. `loader.scans` already yields (points, raw labels, pose)
-    in the loader's own frame, so this mirrors `vehicle_frame_scans` exactly --
-    same tuple, same raw ids, same `is_ground` convention."""
-    from vrgrid.perception import loader
+    """The real path, yielding exactly what `run_sequence` documents:
+    (points in VEHICLE frame, RAW label ids, is_ground, vehicle -> world T).
+
+    Three things the synthetic writer hands over for free and the loader does
+    not, each of which produced a wrong answer rather than an error when I
+    first guessed at them:
+
+    ⚑ `loader.scans` yields (N, 4) -- x, y, z, INTENSITY. `run_sequence` wants
+      (N, 3), and passing the fourth column through is a shape error only by
+      luck; the reflectivity path is what consumes intensity, separately.
+
+    ⚑ The points are in the SENSOR frame and `run_sequence` wants the VEHICLE
+      frame. They differ by the 1.73 m HDL-64E mounting height and by nothing
+      else (docs/frames.md), so this is `transforms.sensor_to_vehicle()` and
+      not a no-op -- skip it and every height in the map is 1.73 m too high,
+      which looks like a map, just a wrong one.
+
+    ⚑ `pose` out of the loader is a raw KITTI row: Camera-0 -> World_cam. It is
+      NOT a vehicle -> world transform and must not be handed over as one.
+      `transforms.vehicle_to_world` is the composition that applies `Tr` and
+      the axis permutation, and per the harness docstring it is the only thing
+      allowed to build it -- two implementations of one convention is how a
+      map ends up slowly rotating.
+
+    Ground comes from Patchwork++ where the extension is installed, and from
+    the semantic labels otherwise, which is the same fallback the real
+    pipeline in `run/__main__.py` uses.
+    """
+    from vrgrid.perception import ground, loader, semantics, transforms
+
+    t_s_v = transforms.sensor_to_vehicle()
     for pts, labels, pose in loader.scans(sequence, max_frames=max_frames):
-        yield pts, labels, np.ones(len(pts), dtype=bool), pose
+        vehicle_pts = transforms.transform_points(pts[:, :3], t_s_v)
+        if ground._HAVE_PATCHWORKPP:
+            gmask = ground.segment_ground(pts)
+        else:
+            gmask = ground.ground_from_semantics(semantics.semantic_labels(labels))
+        yield (vehicle_pts, labels, gmask,
+               transforms.vehicle_to_world(pose, sequence=sequence))
 
 
 def summarise(name, hits, value_cm, expect_cm=None):

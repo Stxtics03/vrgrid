@@ -297,7 +297,7 @@ def learning_ids(raw_labels):
       `separate()` must see the raw ids; this runs after it, on what survived.
     """
     import numpy as _np
-    from vrgrid.grid.fusion import CLASS_MAX
+    from vrgrid.grid.fusion import CLASS_MAX, CLASS_UNLABELLED
 
     ids = _np.asarray(raw_labels, dtype=_np.int64) & 0xFFFF
     if ids.size and int(ids.max()) <= CLASS_MAX:
@@ -305,7 +305,20 @@ def learning_ids(raw_labels):
 
     from vrgrid.perception.semantics import semantic_labels
 
-    return _np.asarray(semantic_labels(ids), dtype=_np.uint8)
+    mapped = _np.asarray(semantic_labels(ids), dtype=_np.int32)
+    # ⚑ `semantic_labels` reports -1 for `unlabeled` (raw 0) and for any id
+    #   outside the SemanticKITTI scheme. Straight through `astype(uint8)` that
+    #   is 255, which does not fit the 5-bit class field, and `scatter_sorted`
+    #   rejects it -- "class ids must be < 32 to pack into the class key" on
+    #   the first real frame. The synthetic sequences write learning ids and
+    #   never contain an unlabelled point, so this could not surface until the
+    #   loader was pointed at sequence 08.
+    #
+    #   Mapped, not dropped: an unlabelled return still has geometry, and a
+    #   wall nobody labelled is still a wall. CLASS_UNLABELLED is in no
+    #   drivable set, so the cell fails safe on §7.1 bit 4 -- which is the
+    #   honest verdict for a class that is not known.
+    return _np.where(mapped < 0, CLASS_UNLABELLED, mapped).astype(_np.uint8)
 
 
 def run_sequence(gm: GridMap, scans, recentre: bool = True,

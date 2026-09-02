@@ -303,6 +303,7 @@ def detect_potholes(soa, ring_slice, side: int, cell_m: float,
 
     depth_cm = rim_med - z
     min_depth_cm = p["min_depth_m"] * 100.0
+    max_depth_cm = p["max_depth_m"] * 100.0
 
     # Locality: how much of the rim is itself down in the hole.
     depressed = np.where(rim_ok, (rim_med - rim_z) > (0.5 * min_depth_cm), False)
@@ -324,6 +325,14 @@ def detect_potholes(soa, ring_slice, side: int, cell_m: float,
             & (support >= int(p["min_rim_pairs"]))
             & np.isfinite(depth_cm)
             & (depth_cm >= min_depth_cm)
+            # ⚑ Bounded ABOVE as well, the same way the curb band is. On
+            #   sequence 08 ring 2 this reported 156 "potholes" at a median
+            #   71.5 cm and a p90 of 200 cm. A two-metre depression is not a
+            #   road defect -- it is a ditch, a drop-off at the kerb line, or
+            #   the cell under a parked car -- and the problem statement asks
+            #   for potholes. Deeper negative obstacles are real and dangerous
+            #   and belong to a separate detector, not to this one silently.
+            & (depth_cm <= max_depth_cm)
             & flat_rim
             & local)
 
