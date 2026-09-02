@@ -73,10 +73,19 @@ def test_every_cap_holds_under_the_crowd(crowd_sequence):
     assert gm.pool.blocks - gm.pool.free_blocks <= gm.pool.blocks
     assert gm.pool.free_blocks >= 0
 
-    # The candidate cap is a declared scratch size, not a suggestion.
-    cap = th["visibility"]["max_candidate_cells"]
+    # The candidate cap is a declared scratch size, not a suggestion. Read it
+    # through the resolver rather than raw: since 2 Sep the shipped value is
+    # `null`, meaning the grid's own slot count -- the structural bound, which
+    # makes the cleanup's truncation impossible rather than unlikely. A raw
+    # read gets None and this asserted `None > 0`.
+    from vrgrid.gpu.allocators import resolve_candidate_cap
+
+    cap = resolve_candidate_cap(th["visibility"]["max_candidate_cells"],
+                                gm.soa["log_odds"].size)
     assert stats.frames == 8
     assert gm.allocation.max_tracks > 0 and cap > 0
+    assert cap >= gm.soa["log_odds"].size, (
+        "the cap must cover every cell that could be occupied at once")
 
 
 def _peak_mb(root):

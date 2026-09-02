@@ -28,7 +28,7 @@ from dataclasses import dataclass
 
 import numpy as np
 from vrgrid.cell import OCC_OCCUPIED
-from vrgrid.gpu.allocators import allocate
+from vrgrid.gpu.allocators import allocate, resolve_candidate_cap
 from vrgrid.gpu.kernels import (
     CEILING_NONE,
     Z_MAX_CM,
@@ -139,7 +139,13 @@ class MapEngine:
                                with_visibility=True)
 
         self.max_points = max_points
-        self.max_candidates = self.thresholds["visibility"]["max_candidate_cells"]
+        # `None` in the config means the structural bound -- the grid's own slot
+        # count -- so this must resolve against the ALLOCATION, not the config,
+        # and must use the same resolver `allocate()` used or the scratch and
+        # the loop would disagree about their sizes.
+        self.max_candidates = resolve_candidate_cap(
+            self.thresholds["visibility"].get("max_candidate_cells"),
+            self.handle.grid["log_odds"].size)
 
         # One toroidal window per ring, centred on the vehicle's start. `x0`
         # defaulting to the lattice origin would put half of every ring out of

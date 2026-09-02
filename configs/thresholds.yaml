@@ -180,13 +180,36 @@ visibility:
   # scratch at 64 B per cell against a float32 range image, exactly the way
   # `scatter.max_points_per_frame` sizes the scatter scratch.
   #
-  # ⚑ PROVISIONAL. 150,000 is an argument, not a measurement: a sweep touches
-  #   ~105,000 distinct cells a frame and the occupied set of a rolling 100 m
-  #   local map should not be several times that. The measurement needs
-  #   SemanticKITTI on disk. Raising it costs 64 B a cell and moves the
-  #   dashboard's total; lowering it silently drops candidates from the far
-  #   field, which is where over-clearing is least likely to be noticed.
-  max_candidate_cells: 150000
+  # MEASURED 2 Sep, and the answer was "do not put a number here".
+  #   scripts/measure_visibility_cap.py, real iter_pipeline -> MapEngine.step,
+  #   schedule 5/10/20/40, peak occupied cells offered to the cleanup:
+  #
+  #       seq 07, all 1,101 frames    max 314,442   (median 187,921)
+  #       seq 08, all 4,071 frames    max 455,714   (median 225,629)
+  #
+  #   The old 150,000 was an argument, not a measurement, and it was wrong by
+  #   a factor of three: it dropped 52.3% of 07's peak and 67.1% of 08's,
+  #   untested, in silence.
+  #
+  # ⚑ THE PEAK SCALES WITH SEQUENCE LENGTH -- frames x3.70 from 07 to 08, peak
+  #   x1.45 -- and sequences 00, 02 and 19 are all LONGER than 08 (19 is 4,981
+  #   frames). So any fitted number is a bet that nobody runs the longer ones,
+  #   and losing that bet is silent: dropped cells keep their occupancy, are
+  #   never tested, and cannot appear in `cleared`.
+  #
+  #   `null` means "the grid's own slot count", resolved per schedule at
+  #   allocation time by `gpu.allocators.resolve_candidate_cap`. The occupied
+  #   set is bounded by construction -- a cell must exist to be occupied -- so
+  #   this makes truncation IMPOSSIBLE rather than unlikely, and turns the
+  #   bound back into the compile-time guarantee the memory claim is supposed
+  #   to be. 910,000 slots and 58.24 MB of scratch at 5/10/20/40; 570,000 and
+  #   36.48 MB at 5/10/50. Working memory, not map memory, so the cell-count
+  #   ratios in the report are unaffected either way.
+  #
+  #   An explicit integer still works, for a deliberately tighter bound on a
+  #   constrained target. `StepCounters.truncated` now counts whatever such a
+  #   cap drops and `vrgrid.run` prints it, so that trade is visible.
+  max_candidate_cells: null
 
 # --- refinement pool (master v4 §3.4) ---------------------------------------
 refinement_pool:

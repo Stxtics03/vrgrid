@@ -357,3 +357,61 @@ def test_claimed_bound_equals_measured_bytes_in_every_configuration(kw):
     a = allocate(load("5/10/20/40"), with_pyramid=kw.get("with_pyramid", False),
                  with_visibility=kw.get("with_visibility", False))
     assert bytes_allocated(a) == measured_bytes(a)
+
+
+def test_a_null_candidate_cap_means_the_whole_grid():
+    """`visibility.max_candidate_cells: null` is the structural bound.
+
+    The occupied set cannot exceed the grid -- a cell must exist to be
+    occupied -- so sizing the cleanup's scratch to the slot count makes
+    truncation impossible rather than unlikely. That matters because
+    truncation is silent in the dangerous direction: dropped cells keep their
+    occupancy, are never tested against the range image, and cannot appear in
+    `cleared`.
+    """
+    from vrgrid.gpu.allocators import resolve_candidate_cap
+
+    assert resolve_candidate_cap(None, 910_000) == 910_000
+    assert resolve_candidate_cap(None, 570_000) == 570_000, "per schedule"
+    assert resolve_candidate_cap(250_000, 910_000) == 250_000, "explicit wins"
+
+
+def test_the_allocated_visibility_scratch_matches_the_resolved_cap():
+    """The scratch and the frame loop must agree on the size, or the declared
+    bound describes a different buffer than the one being used."""
+    from vrgrid.eval.harness import load
+    from vrgrid.gpu.allocators import allocate, resolve_candidate_cap
+    from vrgrid.grid.schedule import load_thresholds
+
+    th = load_thresholds()
+    alloc = allocate(load("5/10/20/40"), th, with_visibility=True)
+    n_slots = alloc.grid["log_odds"].size
+    cap = resolve_candidate_cap(th["visibility"]["max_candidate_cells"], n_slots)
+
+    assert cap == n_slots, "the shipped config must be the structural bound"
+    assert alloc.visibility is not None
+    for name, arr in alloc.visibility.items():
+        if hasattr(arr, "shape") and arr.ndim == 1:
+            assert arr.shape[0] >= cap, f"{name} is smaller than the cap"
+
+
+def test_the_measured_peaks_fit_under_the_structural_bound():
+    """A sanity check on the whole argument, with the numbers that produced it.
+
+    Measured 2 Sep with scripts/measure_visibility_cap.py over whole
+    sequences: 07 peaked at 314,442 occupied cells and 08 at 455,714. Both
+    must sit under the slot count, or the claim that the grid bounds the
+    occupied set is wrong and this design is unsound.
+    """
+    from vrgrid.eval.harness import load
+    from vrgrid.gpu.allocators import allocate
+
+    measured_peaks = {"07": 314_442, "08": 455_714}
+    retired_cap = 150_000
+
+    n_slots = allocate(load("5/10/20/40")).grid["log_odds"].size
+    for seq, peak in measured_peaks.items():
+        assert peak < n_slots, f"seq {seq} peak does not fit the grid"
+        assert peak > retired_cap, (
+            f"seq {seq} peak no longer exceeds the retired cap, so the reason "
+            "this config changed has gone -- recheck before trusting it")
