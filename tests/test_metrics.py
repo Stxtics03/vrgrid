@@ -18,6 +18,7 @@ from vrgrid.eval.metrics import (
     coarsening_ratio_per_ring,
     dynamic_removal,
     fill_rate_per_ring,
+    footprint_coverage_per_ring,
     height_rmse_per_ring,
     memory_bytes,
     occupancy_iou_per_ring,
@@ -324,6 +325,25 @@ def test_fill_rate_rises_with_frames_not_with_a_single_geometry(tmp_path):
     for ring in (1, 2):
         vals = [s[ring] for s in seen]
         assert vals[0] < vals[-1], f"ring {ring} fill did not grow with frames"
+
+
+def test_coverage_says_how_little_of_a_coarse_footprint_M_star_saw(scene):
+    """⚑ rho divides by a spread estimated from the reference cells M* actually
+    observed inside `F(c)`. At k = 8 that is up to 64 cells and is typically a
+    couple, so the denominator is thin exactly where the coarsening claim is
+    loudest. Coverage has to fall with ring index -- if it ever comes out flat,
+    `block_stats` is returning an observation count rather than a count of
+    observed cells and every spread in the table is being read wrong."""
+    gm, reference, _ = scene
+    cov = footprint_coverage_per_ring(gm, reference)
+
+    assert cov[0] == pytest.approx(1.0), "ring 0 is the base lattice; k = 1"
+    seen = [cov[r] for r in sorted(cov) if not np.isnan(cov[r])]
+    assert seen == sorted(seen, reverse=True), f"coverage did not fall: {cov}"
+    assert all(0.0 <= v <= 1.0 for v in seen), cov
+    assert cov[max(cov)] < 0.25, (
+        "the coarsest ring's footprint is nearly covered, so either the "
+        "sequence is far longer than this fixture or the block is wrong")
 
 
 # --- §9.4: dynamic removal ---------------------------------------------------

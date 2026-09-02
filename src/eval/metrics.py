@@ -49,12 +49,18 @@ scored cells:
      22 m         19%       21%
      46 m         20%       26%
 
-Ring 3 shows 13 cells and not a fraction, and that is the scene rather than
-the effect: the synthetic terrain has a hard forward edge near x = 54 m, so
-after the first frames nothing enters ring 3's forward band at all and its
-50-100 m annulus is populated laterally and to the rear, where a straight
-drive migrates nothing. On a real sequence, where the far band is fed
-continuously for kilometres, ring 3 is the ring that carries most of this.
+Ring 3 shows 13 cells and not a fraction, and that is this scene rather than
+the effect. The synthetic terrain is flat to x = 30 m and then ramps at 6%,
+and a rising surface closes the forward horizon: forward returns past 50 m
+appear at frame 0 and never again. Ring 3's annulus is otherwise lateral and
+rear, where a straight-line drive leaves nothing behind. On a real sequence
+the far band is fed continuously for kilometres and ring 3 is the ring that
+carries most of this.
+
+⚑ Nothing here is a cell moving between rings. The buffers are static and
+world-anchored and a cell never changes ring -- what moves is the vehicle, and
+with it which ring is RESPONSIBLE for a given place. "Migration" below always
+means that responsibility passing inward, never storage being relocated.
 
 Worse, **the confound is asymmetric across the schedules §8.2 compares.** A
 uniform baseline has one ring, `ring_of` always answers 0, and nothing can
@@ -90,6 +96,24 @@ and the memory is not worth spending on it. Stated rather than hidden, and
 the measurement is `scripts/`-free on purpose: it is a one-off, and it wants
 re-running on real data, where the rear band has a kerb in it and this
 sequence has smooth analytic terrain.
+
+⚑ **THE SIGN OF THE CORRECTION IS NOT SETTLED, and it is scene-dependent.**
+Every before/after number above is the synthetic sequence, where dropping the
+stale cells LOWERS RMSE -- the stale value was written at grazing incidence on
+the 6% ramp and is worse than the live annulus. A second measurement, reported
+3 Sep against seq 07/08, found the opposite: RMSE understated by 3-12% across
+rings 1-3, so dropping the stale cells RAISES it. Both are plausible, because
+which population is the harder ground is a property of the scene -- on real
+urban data ring 2's stale interior is road the vehicle has driven over, which
+is flatter than its live 25-50 m annulus of verges and facades.
+
+That measurement could not be reproduced here: there is no data root on this
+machine (`VRGRID_DATA_ROOT` unset, `data/` holds only its README) and no M*
+artefact for either sequence. **So the direction of this correction on real
+data is UNVERIFIED, and no report sentence may claim it improves our numbers.**
+What is settled is the mechanism, the population size, and that the confound
+was asymmetric across the schedules §8.2 compares. Re-measure on 07/08 the
+moment M* exists.
 """
 
 import numpy as np
@@ -293,6 +317,35 @@ def fill_rate_per_ring(gm, reference=None):
         n_ref, _, _ = reference.block_stats(i_lo, j_lo, k)
         scope = n_ref > 0
         out[ring] = float(np.mean(seen[scope])) if np.any(scope) else float("nan")
+    return out
+
+
+def footprint_coverage_per_ring(gm, reference):
+    """Median fraction of each scored cell's k x k footprint that M* observed.
+
+    ⚑ Read rho against this, and do not report rho without it. §9.3 defines
+      `spread` as the variability of the reference heights across `F(c)`, and
+      `block_stats` estimates it from the cells of `F(c)` M* actually observed
+      -- `n` is a count of observed 5 cm cells, capped at k^2 by construction.
+      On the 12-frame synthetic sequence the median is 0.25 at ring 1, 0.06 at
+      ring 2 and 0.02 at ring 3: ring 3's sub-cell terrain variability is being
+      estimated from roughly ONE reference cell in sixty-four.
+
+      A spread estimated from two points is biased low, and rho divides by it,
+      so rho on the coarse rings is biased HIGH -- the conservative direction
+      for a number we want near 1, which is why this is a disclosure rather
+      than a correction. `coarsening_ratio_per_ring` already drops `n_ref <= 1`
+      for the same reason; that guard is simply far too weak at k = 8, where it
+      admits a spread computed from two cells of sixty-four.
+
+      Returns {ring: median_coverage}, nan for a ring with nothing scored.
+    """
+    out = {}
+    for ring in range(len(gm.schedule.rings)):
+        _, n_ref, _, _, _ = _compared(gm, reference, ring)
+        k = gm.schedule.k(ring)
+        out[ring] = (float(np.median(n_ref / (k * k))) if n_ref.size
+                     else float("nan"))
     return out
 
 

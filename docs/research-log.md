@@ -137,6 +137,28 @@ Format:
 
 ---
 ## 2026-09-03 — Aakash
+**Module:** D1 — Information-loss metrics (§9.2, §9.3), follow-up
+
+**Finding:** A second, independent trace of the §9.2 ring-scoring bug came back the same day the fix landed. Same mechanism, confirmed from the other direction, plus one concrete cell — a ring-2 slot scored at 9.5 m from the vehicle on data written when that ground was 25–50 m out, charging 350.7 cm of error to ring 2. Stale share on longer runs: 13–38% per ring at 40 frames, near half of ring 2 by 80 frames, scaling with distance driven. All consistent with what was measured here (19%/21% at 22 m, 20%/26% at 46 m) and with the fix already in `_ring_cells`.
+
+**⚑ Two corrections to yesterday's entry, one of them mine and wrong.**
+
+**1. The "hard forward edge near x = 54 m" was not the reason ring 3 shows 13 migrated cells, and there is no such edge.** The synthetic scene follows the vehicle: world forward reach is 51.4 m at frame 0, 71.5 m by frame 24, 101.5 m by frame 36. The real cause is the terrain itself — flat to x = 30 m and then a 6% ramp — and a rising surface closes the forward horizon. Forward returns past 50 m appear at frame 0 and never again, so ring 3's forward band is written exactly once. The conclusion is unchanged (ring 3's annulus is lateral and rear, where a straight drive leaves nothing behind) but the stated cause was wrong and is corrected in §9.2, `metrics.py` and PR #31.
+
+**2. "Migration" was read as cells moving between ring buffers.** They do not: the buffers are static and world-anchored and a cell never changes ring. What moves is the vehicle, and with it which ring is *responsible* for a place. Reworded everywhere it appears, because the misreading cost a reviewer a full re-derivation.
+
+**⚑ THE SIGN OF THE CORRECTION IS UNVERIFIED AND MAY GO THE OTHER WAY ON REAL DATA.** The synthetic measurement has the fix *lowering* RMSE (ring 1 0.40 → 0.37, ring 2 0.37 → 0.32); the seq 07/08 measurement has RMSE **understated by 3–12%** across rings 1–3, so the fix *raises* it. Both are plausible — which population is the harder ground is a property of the scene, and on real urban data ring 2's stale interior is road already driven over, flatter than its live 25–50 m annulus of verges and facades. **It could not be reproduced here**: `VRGRID_DATA_ROOT` is unset, `data/` holds only its README, and no `M*` artefact exists for either sequence — which is what known-limitation 2 already says. Until it is reproduced, **no per-ring RMSE figure may be quoted as improved by this fix**. The mechanism, the population size and the schedule asymmetry are settled; the sign is not. ρ moves by at most 0.06 here (0.034 there), so the foveation claim stands on both readings.
+
+**⚑ One claim in the incoming report is checkably wrong, and it is the one its recommendation rests on.** "Every RMSE number in known-limitations.md right now is flattering us" — that file contained no RMSE numbers at all, and no §9.2 or §9.3 numbers. Its two items were the ghost-removal elevation limit and the plan-regret status. The underlying point was still right (the per-ring accuracy claim is load-bearing and was undisclosed there), so §9.2 is now limitation 3 — but written as "fixed, sign unverified" rather than as a standing bias, because that is what the evidence supports.
+
+**⚑ Separate finding, confirmed and acted on: ρ's denominator is estimated from very few cells.** `block_stats`'s `n` counts the 5 cm cells of `F(c)` that `M*` observed, capped at `k²`. Median coverage, 12-frame synthetic: **1.00 / 0.25 / 0.06 / 0.02** for rings 0–3 — ring 3's sub-cell terrain variability comes from roughly one reference cell in sixty-four. A spread estimated from two points is biased low and ρ divides by it, so ρ on the coarse rings is biased **high**, the conservative direction for a number we want near 1. `coarsening_ratio_per_ring` already drops `n_ref ≤ 1`; at `k = 8` that guard admits a spread from two cells of sixty-four. Disclosed rather than corrected, and **coverage is now a column in the per-ring table, printed next to ρ**, so the two cannot be read apart.
+
+**Source:** `src/eval/metrics.py` (`footprint_coverage_per_ring`, corrected module note), `src/eval/harness.py` (`Result.coverage`, `format_result`), `docs/sih-math.md` §9.2, `docs/known-limitations.md` item 3, `tests/test_metrics.py::test_coverage_says_how_little_of_a_coarse_footprint_M_star_saw`.
+
+**So what:** The fix stands and is already in PR #31; what changed today is what may be *said* about it. The report must not claim the correction improves per-ring RMSE until it is re-run on 07/08, and ρ must not be quoted without its coverage column. Building `M*` for 07/08 (known-limitation 2, item 1) is now blocking a second claim, not one.
+
+---
+## 2026-09-03 — Aakash
 **Module:** D1 — Information-loss metrics (§9.2, §9.3)
 
 **Finding:** §9.2 scored each ring against a reference holding observations that ring never received. `C_L` was read as "every cell in ring L's buffer", and that buffer is a square of half-width `R_L` — it physically covers the hole the finer rings serve. `ring_of` hands a place to the *finest* ring containing it, so ring L only ever receives returns from the annulus `[R_{L-1}, R_L)`. The vehicle drives, that annulus sweeps outward, and every cell it leaves behind keeps its last far-range value for as long as it stays in the window: nothing clears it (a toroidal shift clears only the edge coming into view, §2.4) and nothing reads it, because `query()` routes that place to a finer ring now. So the metric asked a height frozen at 60 m to match an M* that went on accumulating the close-range returns the cell never got.

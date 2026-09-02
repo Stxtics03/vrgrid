@@ -22,7 +22,7 @@ harness, and the moment one exists somebody will use it the night before the
 deadline.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 from vrgrid.eval import metrics
@@ -422,6 +422,7 @@ class Result:
     coarsening: dict
     iou: dict
     fill: dict
+    coverage: dict = field(default_factory=dict)
 
     def rows(self):
         for ring in sorted(self.rmse_cm):
@@ -429,7 +430,8 @@ class Result:
             yield {"ring": ring, "rmse_cm": self.rmse_cm[ring], "rho": c["rho"],
                "il_cm": c["il_cm"], "bias_cm": c["bias_cm"],
                "spread_cm": c["spread_cm"], "n": c["n"],
-               "iou": self.iou[ring], "fill": self.fill[ring]}
+               "iou": self.iou[ring], "fill": self.fill[ring],
+               "cov": self.coverage.get(ring, float("nan"))}
 
 
 def evaluate(gm: GridMap, reference: ReferenceMap, frames: int = 0) -> Result:
@@ -443,6 +445,7 @@ def evaluate(gm: GridMap, reference: ReferenceMap, frames: int = 0) -> Result:
         coarsening=metrics.coarsening_ratio_per_ring(gm, reference),
         iou=metrics.occupancy_iou_per_ring(gm, reference),
         fill=metrics.fill_rate_per_ring(gm, reference),
+        coverage=metrics.footprint_coverage_per_ring(gm, reference),
     )
 
 
@@ -453,7 +456,8 @@ def format_result(result: Result, schedule) -> str:
             f"{result.logical_cells:,} logical cells, "
             f"{result.bytes_allocated / 1e6:.2f} MB allocated")
     cols = (f"{'ring':>4} {'cell':>6} {'reach':>7} {'cells':>8} {'RMSE':>8} "
-            f"{'bias':>7} {'spread':>7} {'IL':>7} {'rho':>6} {'IoU':>6} {'fill':>6}")
+            f"{'bias':>7} {'spread':>7} {'IL':>7} {'rho':>6} {'cov':>6} "
+            f"{'IoU':>6} {'fill':>6}")
     lines = [head, "", cols, "-" * len(cols)]
 
     def fmt(v, w, p=2):
@@ -465,17 +469,21 @@ def format_result(result: Result, schedule) -> str:
             f"{r['ring']:>4} {ring.cell_m * 100:>5.0f}c {ring.half_width_m:>6.0f}m "
             f"{r['n']:>8,} {fmt(r['rmse_cm'], 8)} {fmt(r['bias_cm'], 7)} "
             f"{fmt(r['spread_cm'], 7)} {fmt(r['il_cm'], 7)} {fmt(r['rho'], 6)} "
-            f"{fmt(r['iou'], 6)} {fmt(r['fill'], 6)}"
+            f"{fmt(r['cov'], 6)} {fmt(r['iou'], 6)} {fmt(r['fill'], 6)}"
         )
     lines += [
         "",
         "RMSE, bias, spread, IL in cm against M*. rho = IL/spread (§9.3):",
         "  rho ~ 1  coarsening cost only the terrain's own sub-cell variability",
         "  rho >> 1 the estimate is biased beyond that -- schedule too aggressive",
-        "cells = cells the ring still SERVES (not every cell in its window --",
-        "        the vehicle migrates cells inward and they stop updating), with an",
-        "        observed reference footprint AND >1 reference return. Everything",
-        "        else is dropped rather than scored as agreement. See metrics.py.",
+        "cells = cells the ring still SERVES (not every cell in its window: the",
+        "        window is square, only its annulus is ever written, and the",
+        "        interior holds stale far-range values a finer ring now answers",
+        "        for), with an observed reference footprint AND >1 reference",
+        "        return. Everything else is dropped, not scored as agreement.",
+        "cov   = median fraction of each cell's k x k reference footprint that M*",
+        "        observed. Read rho against it: at cov 0.02 the spread rho divides",
+        "        by is estimated from ~1 sub-cell in 64. See metrics.py.",
     ]
     return "\n".join(lines)
 
