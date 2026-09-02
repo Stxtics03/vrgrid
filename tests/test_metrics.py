@@ -203,7 +203,7 @@ def test_cell_centres_agree_with_the_frame_path(scene):
                 gm, ring, int(local) + buf.offset)
 
 
-def test_a_single_ring_schedule_gives_up_nothing_to_the_band_filter(scene):
+def test_a_single_ring_schedule_gives_up_nothing_to_the_band_filter(scene, tmp_path):
     """⚑ Why the confound was not merely noise: it was ASYMMETRIC across the
     schedules §8.2 compares. A uniform baseline has one ring, `ring_of` always
     answers 0, and no cell can ever migrate out from under it -- so the money
@@ -211,17 +211,35 @@ def test_a_single_ring_schedule_gives_up_nothing_to_the_band_filter(scene):
     for none. The only cells a single-ring schedule loses here are the ones
     that fall outside the map altogether."""
     from vrgrid.eval.harness import uniform_schedule
-    from vrgrid.eval.metrics import _cell_centres_m, _ring_cells
-    from vrgrid.grid.query import window_cells
+    from vrgrid.eval.metrics import _ring_cells
+
+    write_sequence(tmp_path, "99", n_frames=4)
+
+    def scans():
+        for pts, labels, pose in read_sequence(tmp_path, "99"):
+            moving = (labels >= 250) & (labels <= 259)
+            yield (pts[~moving], (labels[~moving] % 16).astype("uint8"),
+                   np.ones(int((~moving).sum()), dtype=bool), pose)
 
     gm = build_gridmap(uniform_schedule(0.20, half_width_m=24.0))
     buf = gm.buffers[0]
-    ix, iy = window_cells(buf)
-    cx, cy = _cell_centres_m(gm, 0, ix, iy)
     kept = np.isin(np.arange(buf.slots) + buf.offset, _ring_cells(gm, 0)[0])
 
-    reach = gm.schedule.rings[0].half_width_m
-    assert np.all(np.maximum(np.abs(cx), np.abs(cy))[~kept] >= reach)
+    # ⚑ Asserted as a positive, not as "everything dropped was out of reach".
+    #   Nothing IS dropped here -- that is the whole point -- so the negative
+    #   form ran over an empty array and passed without testing anything. It
+    #   did exactly that until 3 Sep.
+    assert kept.all(), (
+        f"a single-ring schedule lost {(~kept).sum():,} of {buf.slots:,} cells "
+        "to the band filter; it has no finer ring to lose them to")
+
+    # And the filter is not simply inert: the four-ring schedule DOES drop
+    # cells on the same code path, which is the asymmetry this test is about.
+    multi = build_gridmap(load(SCHEDULE))
+    run_sequence(multi, scans())
+    mbuf = multi.buffers[2]
+    mkept = np.isin(np.arange(mbuf.slots) + mbuf.offset, _ring_cells(multi, 2)[0])
+    assert not mkept.all(), "ring 2 dropped nothing; the filter is inert"
 
 
 def test_a_ring_nobody_drove_through_reports_nan_not_zero(scene):
