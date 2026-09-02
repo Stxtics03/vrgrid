@@ -297,11 +297,91 @@ RMSE.
   and ring 2 spans 20–50 m where ground segmentation is hardest; that is a
   hypothesis, not a finding.
 
-⚑ **Ring 0 has no ρ on any sequence.** `coarsening_ratio_per_ring` excludes
-  footprints holding a single reference return, and at 5 cm essentially every
-  footprint holds one. So the finest ring — the one the foveation argument is
-  actually about — has RMSE (0.91–5.25 cm) and no ρ anywhere. That is a real
-  gap in the evidence, not an oversight in the run.
+⚑ **Ring 0 has no ρ on any sequence.** The finest ring — the one the foveation
+  argument is actually about — has RMSE (0.91–5.25 cm) and no ρ anywhere. It is
+  excluded by the arithmetic of the metric, **not** by any shortage of data.
+  Diagnosed 3 Sep; see immediately below.
+
+### Ring 0 has no ρ — diagnosed, deferred, and not a sensor limitation
+
+**This document previously said** that `coarsening_ratio_per_ring` "excludes
+footprints holding a single reference return, and at 5 cm essentially every
+footprint holds one." **That is wrong on both halves**, and it mattered because
+it read as a permanent physical limit when it is a fixable one.
+
+**What the guard actually tests.** `ReferenceMap._tables()` builds its
+summed-area tables over `obs = self.observed`, a *boolean*, so `block_stats`
+returns `n` = the number of **observed 5 cm cells** in a footprint, not the
+number of returns. A ring-0 footprint is `k = 1` — exactly one cell — so
+`n_ref` can be 0 or 1 and **nothing else**. `metrics.coarsening_ratio_per_ring`
+then drops everything failing `n_ref > 1`. Ring 0 is therefore excluded **100%
+of the time, on every sequence, by arithmetic** — not by evidence. Measured:
+`max n_ref` is exactly 1 for ring 0 and exactly k² for rings 1–3, on 00, 07
+and 08 alike.
+
+**The redundant data exists and is being thrown away.** M\* is not a
+one-point-per-cell map: `_Builder.finish` accumulates every static ground
+return across every frame (`np.add.at(h_sum, …)`, `np.add.at(count, …)`) and
+`count` is a true return count, persisted through `save`/`load`. What it
+discards is the **sum of squares**, so the within-cell dispersion is computed
+at build time and never stored. Of the ring-0 cells §9.2 actually scores:
+
+| seq | ring-0 cells scored | M\* holds **>1 return** | median returns | `n_ref > 1` |
+|---|---|---|---|---|
+| 00 | 83,947 | **77,943 (92.8%)** | 6 | 0 |
+| 07 | 105,366 | **102,207 (97.0%)** | 12 | 0 |
+| 08 | 139,709 | **136,035 (97.4%)** | 10 | 0 |
+
+**Nor is the sensor sparse at 5 cm.** In a *single* sweep, inside 10 m, the
+HDL-64E puts more than one return into **56.8–65.5%** of the 5 cm columns it
+touches (2.0–3.2 returns per column on average, up to 150). Multi-frame
+accumulation is not needed to create redundancy — it is already there in one
+frame, and M\* already sums it.
+
+**What closing it would be worth.** Scoring ring 0 with the within-cell
+variance as `spread²` — the law of total variance the project already mandates
+for merge (§4.2, and a CLAUDE.md invariant) — gives:
+
+| seq | usable cells | RMSE(bias) | spread | IL | **ρ ring 0** |
+|---|---|---|---|---|---|
+| 00 | 77,943 (92.8%) | 2.83 cm | 3.91 cm | 4.82 cm | **1.235** |
+| 07 | 102,207 (97.0%) | 1.79 cm | 10.74 cm | 10.89 cm | **1.014** |
+| 08 | 136,035 (97.4%) | 1.18 cm | 2.05 cm | 2.36 cm | **1.153** |
+
+**ρ 1.01–1.24 would be the best of any ring on all three sequences** — the
+finest ring paying least for its coarsening, which is precisely what §9.3
+predicts and what the foveation argument needs.
+
+**Why it is deferred rather than done.** `block_stats` is shared: adding the
+within-cell term moves rings 1–3 as well, and moves them *downward*.
+
+| seq | ring | ρ now | ρ after | move |
+|---|---|---|---|---|
+| 07 | 1 | 1.323 | 1.039 | **−21.5%** |
+| 07 | 2 | 1.181 | 1.153 | −2.3% |
+| 07 | 3 | 1.248 | 1.239 | −0.8% |
+| 08 | 1 | 1.304 | 1.207 | **−7.5%** |
+| 08 | 2 | 1.221 | 1.197 | −1.9% |
+| 08 | 3 | 1.838 | 1.810 | −1.5% |
+
+So it is roughly fifteen lines of code with a two-day tail: a new field on
+`ReferenceMap` invalidates **every cached M\* `.npz`**, the §2b eleven-sequence
+table and the headline "ρ median 1.45 [1.26–1.59], n = 11" both need
+regenerating, and `block_stats` also feeds
+`plan_regret.costmap_from_reference`, the §8.2 path stabilised only on 2 Sep.
+Every ρ moves in the direction that flatters us, which is the worst direction
+in which to ship a headline-metric change two days before submission.
+
+**Status: a diagnosed, deferred fix with a measured cost and a known likely
+benefit — recommended as a Day-7 post-submission item, not a permanent
+limitation.** Until it is done, the honest statement is that ring 0 is reported
+on RMSE alone and carries no coarsening ratio, and that this is the metric's
+construction rather than the sensor's reach.
+
+*(A narrower variant — applying the within-cell term only at k = 1 — leaves
+rings 1–3 untouched but makes ring 0's `spread` definitionally different from
+theirs, which destroys the one thing a per-ring table exists to do. Worse, not
+better.)*
 
 ## 3. Curb and pothole detection — real numbers, no ground truth to score against
 
