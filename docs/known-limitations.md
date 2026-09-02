@@ -200,29 +200,16 @@ frame count.
 uniform 10 cm at three of four windows. Before reading that as a result, see
 the extent mismatch below — it is very likely an artifact of the x-axis.
 
-### ⚑ The money plot's memory axis compares maps of different extent
+### The money plot's memory axis — FIXED, extents now match
 
-The uniform baselines are built at `half_width_m=24.0`; the frozen schedules
-reach 100 m:
+The uniform baselines were built at `half_width_m=24.0` against frozen
+schedules reaching 100 m, so the figure's memory axis compared a map of
+0.0400 km² with one of 0.0023 km² — a seventeenth of the ground — and drew them
+as comparable points. `regret_plot.py` now matches the uniforms to the frozen
+schedules' reach by default; `--uniform-half-width 24.0` reproduces the old
+figure.
 
-| schedule | half-width | cells | MB | area |
-|---|---|---|---|---|
-| 5/10/20/40 | **100 m** | 745,000 | 29.06 | 0.0400 km² |
-| uniform 10 cm | **24 m** | 230,400 | 18.19 | 0.0023 km² |
-
-**5/10/20/40 maps 17× the area for 1.6× the memory**, and the figure's x-axis
-puts those side by side as though they were comparable. Every "we cost more
-than uniform 10 cm" reading in the project, including several made while
-investigating this, ignored it.
-
-Fixed properly this is an argument *for* foveation rather than against it, but
-it changes what every point on the plot means, so it has not been changed here.
-The figure should either match the extents or state the ratio on its face.
-
-### What the plot says at MATCHED extent — measured, not applied
-
-Rebuilding the uniform baselines at 100 m half-width so every map covers the
-same ground, seq 08, 20 frames, same 64-query set, nothing else changed:
+### What the money plot now says — seq 08, 20 frames, 64-query mean
 
 | schedule | MB | cells | R(S) | Fréchet |
 |---|---|---|---|---|
@@ -233,27 +220,24 @@ same ground, seq 08, 20 frames, same 64-query set, nothing else changed:
 | uniform 40 cm | 18.50 | 250,000 | 0.402 | 0.32 m |
 | uniform 80 cm | 11.04 | 62,500 | 0.798 | 0.55 m |
 
-**The memory claim holds, and is larger than the committed figure shows.**
-Matched to the same ground, uniform 10 cm costs **78.50 MB against 29.06** — a
-2.7× saving. The current plot instead shows us *more expensive* than an
-18.19 MB baseline covering a seventeenth of the area.
+**The memory claim is now stated correctly and it is strong.** Matched to the
+same ground, uniform 10 cm costs **78.50 MB against 29.06** — a 2.7× saving
+that the old figure inverted into "we are more expensive than an 18.19 MB
+baseline".
 
-**The regret claim does not hold on this query.** `uniform_20cm` at 30.50 MB —
-essentially the same memory as 5/10/20/40's 29.06 — scores **0.251 against
-0.488**. At equal memory and equal coverage, a plain uniform grid plans about
-twice as well. §8.2 claims foveation is free in decision terms; measured
-fairly for the first time, on this query it costs roughly 2× the regret of
-spending the same bytes uniformly.
+**The regret claim does not survive this query.** `uniform_20cm` at 30.50 MB —
+essentially our memory — scores **0.251 against our 0.488**, and `uniform_40cm`
+at 18.50 MB scores **0.402**: cheaper *and* better. The script's monotonicity
+guard fires on that step. §8.2 claims foveation is free in decision terms; on
+the only planning query that exists, it is not.
 
-**How much weight this carries.** One sequence, one window, one query family.
-R(S) magnitude still moves with the window, and the query design itself is
-parked (`docs/decisions-2026-09-02.md`, Decision 4 — the single longitudinal
-lane). It is **not** proof the thesis is wrong. It is the first fair run of the
-comparison, and it does not go our way.
-
-**Not applied.** This was a read-only measurement; no committed figure or
-number was changed by it. Rebuilding the plot at matched extent moves every
-point and is a §8.2 owner's decision.
+**What that is and is not evidence of.** One sequence, one window, one query
+family — a single longitudinal lane down the middle of the window, unchanged
+since Day 0 and never designed to discriminate between resolutions
+(`docs/decisions-2026-09-02.md`, Decision 4). A lane query rewards a map that
+is uniformly adequate along one line and cannot reward one that is sharp where
+the vehicle is looking. It is not proof the thesis is wrong; it is proof this
+query cannot demonstrate it.
 
 ### Scope
 

@@ -131,7 +131,7 @@ CAVEAT = ("SYNTHETIC SEQUENCE - NOT REPORTABLE: analytic terrain, "
           "no sensor noise, occlusion or registration error")
 
 
-def collect(root, frames: int, seq=None) -> list:
+def collect(root, frames: int, seq=None, uniform_half_m=None) -> list:
     """Run every schedule over one sequence and return the §8.2 rows.
 
     The two-pass structure is `eval_synthetic`'s and it matters: every map is
@@ -154,9 +154,24 @@ def collect(root, frames: int, seq=None) -> list:
     else:
         reference = build_from_scans(read_sequence(root, "99"))
         vehicle_x = (frames - 1) * 2.0
-    schedules = ([load(n) for n in sweep.SCHEDULES]
-                 + [sweep.uniform_schedule(c, half_width_m=24.0)
-                    for c in sweep.UNIFORM_CELLS_M])
+    frozen = [load(n) for n in sweep.SCHEDULES]
+    # ⚑ MATCHED EXTENT. The uniform baselines used to be built at
+    #   half_width_m=24.0 against frozen schedules reaching 100 m, so this
+    #   figure's MEMORY AXIS compared a map of 0.0400 km2 with one of 0.0023
+    #   km2 -- a seventeenth of the ground -- and drew them as comparable
+    #   points. It made us look MORE expensive than uniform 10 cm when matched
+    #   to the same ground we are 2.7x cheaper:
+    #
+    #       uniform_10cm @ 24 m    230,400 cells   18.19 MB   <- old baseline
+    #       uniform_10cm @ 100 m 4,000,000 cells   78.50 MB   <- same ground
+    #       5/10/20/40   @ 100 m   745,000 cells   29.06 MB
+    #
+    #   A memory comparison between maps of different extent is not a memory
+    #   comparison. `--uniform-half-width` overrides it so the old figure stays
+    #   reproducible, but the default now matches.
+    half = uniform_half_m or max(s.rings[-1].half_width_m for s in frozen)
+    schedules = frozen + [sweep.uniform_schedule(c, half_width_m=half)
+                          for c in sweep.UNIFORM_CELLS_M]
 
     built = []
     for schedule in schedules:
@@ -262,6 +277,11 @@ def main() -> None:
                     help="directory for regret.csv and regret.svg/.png")
     ap.add_argument("--keep", default=None,
                     help="keep the generated sequence here instead of a tempdir")
+    ap.add_argument("--uniform-half-width", type=float, default=None,
+                    help="half-width in m for the uniform baselines (default: "
+                         "matched to the frozen schedules' reach). 24.0 "
+                         "reproduces the pre-2-Sep figure, whose memory axis "
+                         "compared maps of different extent.")
     ap.add_argument("--seq", default=None,
                     help="a REAL SemanticKITTI sequence (needs "
                          "$VRGRID_DATA_ROOT). Without it, the synthetic writer "
@@ -274,7 +294,8 @@ def main() -> None:
     try:
         if not args.seq:
             write_sequence(root, "99", n_frames=args.frames)
-        rows, mask_frac = collect(root, args.frames, seq=args.seq)
+        rows, mask_frac = collect(root, args.frames, seq=args.seq,
+                                  uniform_half_m=args.uniform_half_width)
     finally:
         if args.keep is None:
             shutil.rmtree(root, ignore_errors=True)
