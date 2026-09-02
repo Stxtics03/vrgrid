@@ -90,7 +90,7 @@ has been updated to drop the elevation-based frame restrictions.
 
 ---
 
-## 2. Plan-regret evaluation on real data — genuinely open
+## 2. Plan-regret evaluation — the two defects are closed; the scene is the limit
 
 **The offline plan-regret pipeline is implemented and unit-tested** (`src/eval/`,
 `tests/test_plan_regret.py`, `test_reference_map.py`, `test_metrics.py`) and has
@@ -116,35 +116,59 @@ is one tested command; the ~40 GB SemanticKITTI download is the only thing left
 on that path** — and it is not on the shared/CI infrastructure, only on JP's
 dev box (`data/README.md` assigns it, execution-plan decision B).
 
-### The blocker is two metric-semantics defects, not "needs a run"
+### Both metric-semantics defects are fixed — 2 September
 
-`docs/memo-shrestha-day5-plan-regret-query.md` (`bf03b8c`, 2026-09-02) is a
-read-only diagnostic — it computes no R(S) — and its conclusion is **"do not
-reposition the query yet, it is not what is wrong."** Two defects underneath the
-regret figure that no start/goal placement fixes:
+`docs/memo-shrestha-day5-plan-regret-query.md` (`bf03b8c`) named two defects
+underneath the regret figure that no start/goal placement fixes. Both are now
+closed, and a third was found while closing them.
 
-1. **The fill-rate confound is not actually closed** (it was documented as
-   closed on 1 Sep). `common_support()` restricts on `CostMap.unknown`
-   (never-observed, ~0.9 % of the window), but `w_unknown` is charged on bit 5
-   (`n < n_min`, ~91.9 %). After restriction the frozen schedules still pay
-   `w_unknown` on **91.9 %** of the surviving window against uniform 20 cm's
-   **4.1 %** — every R(S) in the current table is dominated by that ratio. The
-   diagnostic meant to catch this (`PlanResult.unknown_fraction`,
-   `eval_synthetic`'s "low-confidence" column) reads `np.mean(costmap.unknown)`
-   — the 0.9 % number, not the 91.9 % one.
-2. **The two sides of eq. (23) apply §7.1 at different lattices**, and §7.1's
-   step/slope thresholds are not scale-invariant. The frozen schedules **invent
-   154 walls M\* does not have and miss 10 of the 12 real ones** (the kerb, read
-   as impassable at 5–10 cm but not at M\*'s 25 cm planning lattice). At
-   `regret_plot.py`'s default `--frames 16`, **M\* contains zero impassable
-   cells** while the schedules wall 160.
+1. **The fill-rate confound.** `common_support()` restricted on
+   `CostMap.unknown` (never-observed, ~0.9% of the window) while `w_unknown`
+   was charged on bit 5 (`n < n_min`, ~91.9%), and the diagnostic built to
+   expose that read the array that hid it. Aakash root-caused it in `baa44b4`:
+   `costmap_from_gridmap` was OR-ing the confidence bit over the sub-cells of a
+   planning cell, so **the handicap grew with resolution**. Counts are now
+   summed over the footprint's distinct cells and compared against `n_min`
+   once. Inside the common support the frozen schedules went from **100.0% to
+   0.9%**; uniform 20 cm from 4.2% to 0.0%.
 
-Shrestha's honest reading is that even with both defects fixed, the synthetic
-scene — one 60 cm pothole in an otherwise empty field — cannot draw a knee, and
-the real §8.2 plot needs sequence 08. The fixes are metric semantics, in
-`src/eval/eval_synthetic.py` / `plan_regret.py`, and are **Aakash's and
-Pratyushi's** — Shrestha has produced the measurement and deliberately not
-touched those files.
+2. **The two lattices.** M\_S set §7.1 bits at ring resolution while M\* set
+   them at 25 cm. Both sides are now evaluated at `plan.cell_m` from the same
+   summed statistics, and clearance is dropped from both — M\* is 2.5D ground
+   and cannot set it. **0 invented walls, 0 missed**, both frozen schedules.
+   Separately, §7.1 eq. (22a) now differences bits 1 and 2 over a fixed
+   physical baseline rather than one cell, so a 12 cm kerb reads the same at
+   5 cm and at 25 cm instead of being a wall on the fine rings only.
+
+3. **Bit 4 was on one side only** — found while tracing the residue.
+   `ReferenceMap` carries `class_id`, but `costmap_from_reference` built from
+   `block_stats`, heights alone, so M\* charged 0 class penalties against the
+   schedules' 18. Both paths are scored on M\*, so a schedule paid pure regret
+   for routing around ground it had correctly labelled non-drivable. Symmetric
+   now, via `ReferenceMap.block_class()`.
+
+### What remains is the scene, not the metric
+
+After all three, the frozen schedules report **R(S) = 0.207** and every uniform
+baseline **0.000** on the synthetic sequence. That 0.207 is not a knee and must
+not be drawn as one: it is
+
+```
+2 · (√2 − 1) · plan.cell_m  =  0.2071
+```
+
+— two diagonal steps, i.e. a path that jogs one 25 cm cell sideways and back.
+**It is the smallest non-zero value the planning lattice can express.** Traced
+to its cause it is a single cell: column 16 of the window holds one cell with
+bit 5 set and column 17 holds none, so the fine schedules sidestep for the
+length of the corridor. The uniform maps pool more observations per cell,
+nothing falls under `n_min`, and they go straight.
+
+So Shrestha's original reading survives the fixes: **the synthetic scene cannot
+draw a knee.** M\* over the planning window has one passable cost value — 1,924
+cells at 1.00× — and a graded curve needs a graded cost field. The real §8.2
+plot needs sequence 08, which is now on disk. See
+`docs/decisions-2026-09-02.md` for the query-design question this leaves open.
 
 ### Scope
 
@@ -154,9 +178,72 @@ regret result — "the compression does not change the plan a robot would make" 
 is the project's strongest single claim, and its status is stated plainly here
 so a reviewer knows exactly what has and has not run.
 
-*(Current as of `origin/main` `aacd8a4`. `src/eval/` has had four commits since
-the class-byte re-split — `d93a2b9`, `74f555d`, `52983e3`, `bf03b8c`. No M\* /
-regret artifacts are committed; `.gitignore` excludes them by design.)*
+*(Current as of `origin/main` `38edfb5`, 2 Sep. No M\* / regret artifacts are
+committed; `.gitignore` excludes them by design.)*
+
+---
+
+## 3. Curb and pothole detection — real numbers, no ground truth to score against
+
+`src/grid/features.py` answers the problem statement's own sentence about
+curbs and potholes directly (§7.4). Measured on **sequence 08**, 40 frames,
+schedule 5/10/20/40, through the real loader → transforms → Patchwork++ →
+`run_sequence` → `features.detect` path:
+
+| ring | cell | curbs | median | potholes | median |
+|---|---|---|---|---|---|
+| 0 | 5 cm | 11,869 | 9.1 cm | 143 | 9.0 cm |
+| 1 | 10 cm | 18,321 | 11.3 cm | 363 | 11.5 cm |
+| 2 | 20 cm | 1,724 | 14.2 cm | 70 | 15.0 cm |
+
+Real urban kerbs are 10–15 cm, and on the synthetic scene — where the answer is
+known — it returns **12.0 cm against a built 12 cm kerb** and **40.0 cm against
+a built 40 cm hole**.
+
+**The limitation: SemanticKITTI has no ground truth for curb or pothole
+geometry.** There is no detection rate to quote, only counts and a plausibility
+check on the height distribution. The `road`/`sidewalk` label boundary is the
+only cross-check available, and it locates curbs without measuring them. Quote
+these as counts with that caveat attached, never as accuracy.
+
+Two further honest notes. The median rises with cell size (9.1 → 11.3 →
+14.2 cm) because a coarser cell averages across the kerb face and admits more
+sloped ground — so it is reported per ring rather than pooled. And potholes are
+bounded above at 50 cm (`pothole.max_depth_m`): ring 2 first reported 156
+detections at a median 71.5 cm and a p90 of 200 cm, which are ditches, kerb-line
+drop-offs and the space under parked cars. Those are real hazards and they need
+a separate detector; this one does not claim them.
+
+## 4. Per-cell confidence is a margin, not a probability
+
+`src/grid/confidence.py` (§7.5) reports how far to trust each drivability
+verdict, on four derived channels — nothing is stored, `CELL_BYTES` stays 12.
+
+**It is not calibrated.** Nothing has been fitted against outcomes, so 0.6 is
+not a 60% chance of anything; each channel is a margin with a stated meaning
+and they are combined by taking the weakest. The `label` channel is
+additionally a **floor, not an estimate**: the Boyer-Moore counter saturates at
+7, so a cell observed 200 times unanimously reports a *lower* share than one
+observed 8 times. `saturated()` flags that regime.
+
+On sequence 08 the binding channel is **geometry** for rings 0–2, where the
+synthetic scene binds on `label` and `evidence` — real terrain sits near the
+slope and step thresholds and the analytic scene does not. That is the clearest
+single argument in the project for not reporting synthetic numbers.
+
+## 5. The visibility candidate cap moves a memory figure
+
+`visibility.max_candidate_cells` is now `null`, meaning the grid's own slot
+count — 910,000 at 5/10/20/40, **58.24 MB** of scratch, up from 9.60 MB at the
+retired placeholder of 150,000. That placeholder dropped 52.3% of sequence 07's
+peak occupied set and 67.1% of 08's, untested and in silence.
+
+This is **working memory, not map memory**, so the report's cell-count ratios
+are unaffected, and `with_visibility` is off by default so the 29.06 MB headline
+does not move unless the cleanup's scratch is switched on. If a smaller declared
+total is wanted, an explicit `600000` (38.40 MB) covers both measured sequences
+and nothing longer — sequences 00, 02 and 19 are all longer than 08 and the peak
+scales with length. See `docs/decisions-2026-09-02.md`, Decision 2.
 
 ---
 
