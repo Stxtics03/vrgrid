@@ -57,6 +57,7 @@ without data. Measured now, whole sequences, real `iter_pipeline → MapEngine.s
 |---|---|---|---|---|
 | 07 | 1,101 | 187,921 | 305,350 | **314,442** |
 | 08 | 4,071 | 225,629 | 435,308 | **455,714** |
+| 00 | 4,541 | 186,183 | 267,735 | **278,226** |
 
 The retired 150,000 dropped **52.3% of 07's peak and 67.1% of 08's**.
 
@@ -68,14 +69,29 @@ offered. A truncating run prints a healthy ghost count while the map keeps its
 ghosts. This is now counted (`StepCounters.truncated`) and printed by
 `vrgrid.run`, which is worth having whatever number is chosen.
 
-**Why not simply fit a number.** The peak scales with sequence length: frames
-×3.70 from 07 to 08, peak ×1.45. Sequences 00 (4,541 frames), 02 (4,661) and
-19 (4,981) are all longer than 08. Any number fitted to the two sequences that
-happened to download first is a bet that nobody runs the others.
+**Why not simply fit a number.** ⚠️ *Corrected after sequence 00 finished
+measuring.* The first version of this argument said the peak scales with
+sequence length — frames ×3.70 from 07 to 08, peak ×1.45 — and inferred that
+the longer unmeasured sequences would peak higher. **That was an inference from
+two points and 00 refutes it: 00 is the longest of the three and has the lowest
+peak.**
+
+The argument that survives is different and better supported. The peak is
+driven by scene density, not length — 08 is a dense urban loop, 00 is more
+open — and it varies **1.64×** across three sequences with no predictor
+available from the data on disk. Nineteen sequences are still unmeasured. A
+fitted 600,000 would cover all three measured sequences at 1.32× the observed
+max and nothing beyond them; the structural bound is 2.00× the observed max and
+cannot be exceeded at all.
+
+So the case for `null` is now *unpredictability*, not growth. It is a weaker
+argument than the one originally written here, and if the room prefers the
+cheaper option the counter-argument is legitimate: three sequences spanning
+1.64× is decent evidence that 600,000 is comfortable.
 
 | option | value | scratch @ 5/10/20/40 | truncation |
 |---|---|---|---|
-| measured | 600,000 | 38.40 MB | possible on a longer sequence |
+| measured | 600,000 | 38.40 MB | possible on an unmeasured sequence |
 | **structural** | `null` → 910,000 slots | **58.24 MB** | **impossible by construction** |
 
 **Taken:** `null`. The occupied set cannot exceed the grid — a cell must exist
@@ -83,10 +99,10 @@ to be occupied — so this turns the bound back into the compile-time guarantee
 the memory claim is supposed to be. An explicit integer is still honoured for a
 constrained target, and truncation is now visible if one is used.
 
-**Reverse it** by writing `600000` in place of `null`. Sequence 00's
-measurement is running and will either support or undermine the scaling
-argument; if 00's peak lands near 08's rather than above it, the case for the
-cheaper option strengthens.
+**Reverse it** by writing `600000` in place of `null`. Sequence 00 has now
+been measured and it *did* undermine the original argument, as anticipated —
+see the correction above. The decision stands on the weaker ground of
+unpredictability, and is a defensible one to overturn.
 
 ---
 

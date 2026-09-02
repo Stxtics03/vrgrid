@@ -241,9 +241,16 @@ peak occupied set and 67.1% of 08's, untested and in silence.
 This is **working memory, not map memory**, so the report's cell-count ratios
 are unaffected, and `with_visibility` is off by default so the 29.06 MB headline
 does not move unless the cleanup's scratch is switched on. If a smaller declared
-total is wanted, an explicit `600000` (38.40 MB) covers both measured sequences
-and nothing longer — sequences 00, 02 and 19 are all longer than 08 and the peak
-scales with length. See `docs/decisions-2026-09-02.md`, Decision 2.
+total is wanted, an explicit `600000` (38.40 MB) covers every measured sequence
+at 1.32× the observed max.
+
+Measured peaks: **314,442** (07, 1,101 frames), **455,714** (08, 4,071),
+**278,226** (00, 4,541). The peak does **not** scale with sequence length — 00
+is the longest and the lowest, which refuted the first version of this argument.
+It tracks scene density instead, varies 1.64× across three sequences with no
+available predictor, and 19 sequences remain unmeasured. That unpredictability,
+not growth, is the case for the structural bound. See
+`docs/decisions-2026-09-02.md`, Decision 2.
 
 ---
 
