@@ -527,6 +527,8 @@ class Result:
             c = self.coarsening[ring]
             yield {"ring": ring, "rmse_cm": self.rmse_cm[ring], "rho": c["rho"],
                "il_cm": c["il_cm"], "bias_cm": c["bias_cm"],
+               "mean_bias_cm": c.get("mean_bias_cm"),
+               "above_frac": c.get("above_frac"),
                "spread_cm": c["spread_cm"], "n": c["n"],
                "iou": self.iou[ring], "fill": self.fill[ring]}
 
@@ -552,23 +554,34 @@ def format_result(result: Result, schedule) -> str:
             f"{result.logical_cells:,} logical cells, "
             f"{result.bytes_allocated / 1e6:.2f} MB allocated")
     cols = (f"{'ring':>4} {'cell':>6} {'reach':>7} {'cells':>8} {'RMSE':>8} "
-            f"{'bias':>7} {'spread':>7} {'IL':>7} {'rho':>6} {'IoU':>6} {'fill':>6}")
+            f"{'|bias|':>7} {'mean_b':>7} {'spread':>7} {'IL':>7} {'rho':>6} "
+            f"{'IoU':>6} {'fill':>6}")
     lines = [head, "", cols, "-" * len(cols)]
 
     def fmt(v, w, p=2):
-        return f"{'--':>{w}}" if np.isnan(v) else f"{v:>{w}.{p}f}"   # v != v is nan
+        # None as well as nan: a ring with no comparable cell returns a dict
+        # without the newer keys, and "--" is the honest rendering of both.
+        if v is None or np.isnan(v):
+            return f"{'--':>{w}}"
+        return f"{v:>{w}.{p}f}"
 
     for r in result.rows():
         ring = schedule.rings[r["ring"]]
         lines.append(
             f"{r['ring']:>4} {ring.cell_m * 100:>5.0f}c {ring.half_width_m:>6.0f}m "
             f"{r['n']:>8,} {fmt(r['rmse_cm'], 8)} {fmt(r['bias_cm'], 7)} "
+            f"{fmt(r.get('mean_bias_cm'), 7)} "
             f"{fmt(r['spread_cm'], 7)} {fmt(r['il_cm'], 7)} {fmt(r['rho'], 6)} "
             f"{fmt(r['iou'], 6)} {fmt(r['fill'], 6)}"
         )
     lines += [
         "",
-        "RMSE, bias, spread, IL in cm against M*. rho = IL/spread (§9.3):",
+        "RMSE, |bias|, mean_b, spread, IL in cm against M*. rho = IL/spread (§9.3):",
+        "  |bias| is RMS and mean_b is the SIGNED mean. RMS alone cannot tell",
+        "  'systematically high' from 'randomly scattered', and on real data",
+        "  those are different defects: seq 07 ring 1 reads |bias| 20.7 with a",
+        "  mean of +4.0 (dispersion), ring 2 reads 36.0 with a mean of +23.5",
+        "  (a real offset that grows with range).",
         "  rho ~ 1  coarsening cost only the terrain's own sub-cell variability",
         "  rho >> 1 the estimate is biased beyond that -- schedule too aggressive",
         "cells = ring cells with an observed reference footprint AND >1 reference",

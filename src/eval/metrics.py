@@ -129,9 +129,20 @@ def coarsening_ratio_per_ring(gm, reference):
 
         il_cm = float(np.sqrt(np.mean(il2[usable])))
         spread_cm = float(np.sqrt(np.mean(ref_var[usable])))
+        # ⚑ `bias_cm` is RMS(bias), not mean(bias), and the two answer different
+        #   questions. RMS cannot tell "systematically 20 cm high" from
+        #   "randomly +/-20 cm", and on real data those are different defects
+        #   with different causes. Measured on seq 07, 40 frames: ring 1 reads
+        #   bias_cm 20.72 but its MEAN bias is +3.98 cm -- almost all
+        #   dispersion. Ring 2 reads 36.02 with a mean of +23.46 and 75.9% of
+        #   cells above the reference, which is a real systematic offset that
+        #   grows with range. Both numbers are reported so neither can be
+        #   mistaken for the other.
         out[ring] = {
             "il_cm": il_cm,
             "bias_cm": float(np.sqrt(np.mean(bias2[usable]))),
+            "mean_bias_cm": float(np.mean((mine - ref_mean)[usable])),
+            "above_frac": float(np.mean((mine - ref_mean)[usable] > 0)),
             "spread_cm": spread_cm,
             "rho": il_cm / spread_cm if spread_cm > 1e-9 else float("nan"),
             "n": int(usable.sum()),
