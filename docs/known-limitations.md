@@ -286,6 +286,51 @@ mean is 3.47. The table prints both since 2 Sep precisely so these cannot be
 confused — RMS alone cannot tell "systematically high" from "randomly
 scattered", and they are different defects.
 
+### CAUSE FOUND — ring migration, and it is structural, not a fusion bug
+
+A controlled experiment settles it. Build the same map with a **single** 20 cm
+ring, so no cell can ever change resolution, and compare against the four-ring
+schedule's 20 cm ring on the same data and the same reference:
+
+```
+uniform 20 cm   (one ring, no migration)   33,529 cells   mean bias   7.83 cm
+5/10/20/40 ring 2 (same 20 cm cells)       11,231 cells   mean bias  23.46 cm
+```
+
+Same cell size, same returns, same M\*. The difference is foveation itself: an
+outer-ring cell **stops receiving updates once the vehicle approaches it**,
+because it migrates into ring 1 and then ring 0 — which are different lattices
+holding different cells. Ring 2 therefore retains only the observations made
+while that ground was 25–50 m away. M\* has no rings and accumulates every
+return, including the accurate close-range ones collected as the vehicle drove
+past.
+
+So roughly two thirds of ring 2's 23.46 cm is the metric charging the map for a
+property of the design, and the remaining ~7.8 cm is genuine far-field
+measurement error. **The map as a whole is not wrong about that ground — the
+accurate value is in the inner ring**, which is where the vehicle will read it
+from when it gets there.
+
+The same experiment gives the number that should lead the accuracy claim:
+
+```
+5/10/20/40 ring 0 (5 cm)   102,988 cells   mean bias +1.24 cm   sd 16.41
+                ring 1 (10 cm)  54,320 cells   mean bias +3.98 cm   sd 21.65
+```
+
+**Ring 0 is systematically accurate to 1.24 cm against a 5 cm reference on real
+SemanticKITTI**, over 102,988 cells. That is the fine-resolution claim and it
+survives contact with real data.
+
+### What this does NOT mean
+
+It is not a licence to drop the outer-ring numbers. It means the per-ring RMSE
+is not a pure coarsening measure for rings the vehicle drives into, and any
+figure quoting ring 2 or 3 needs this sentence beside it. A metric that
+compared each ring against a reference restricted to the observations that ring
+actually received would isolate coarsening properly; that is a change to §9.2
+and it has not been made.
+
 ### What has been ruled out
 
 - **Grazing incidence in the measurement weighting.** `measurement_variance_cm2`
@@ -303,10 +348,11 @@ scattered", and they are different defects.
 
 ### What this means for the report
 
-**The per-ring RMSE beyond ~25 m is not currently reportable as coarsening
-error,** because most of it is not coarsening. Ring 1 — which is the claim that
-matters, since it is where the fine resolution lives — is 22.02 cm RMSE of
-which only 3.47 cm is systematic. Ring 3's 174 cm is 32 cells and is noise.
+**The per-ring RMSE beyond ~25 m is not a pure coarsening measure,** because
+about two thirds of ring 2's offset is ring migration (above) and the rest is
+far-field measurement error. Quote ring 0 and ring 1 — **+1.24 cm and +3.98 cm
+mean bias on real data** — and quote ring 2 with the migration caveat attached.
+Ring 3's 174 cm is 32 cells and is noise.
 
 Two further caveats belong with any ρ that gets quoted. **ρ's denominator is
 thin**: `spread` is estimated from a median of 3–4 reference returns per
