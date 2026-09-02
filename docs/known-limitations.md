@@ -219,6 +219,42 @@ Fixed properly this is an argument *for* foveation rather than against it, but
 it changes what every point on the plot means, so it has not been changed here.
 The figure should either match the extents or state the ratio on its face.
 
+### What the plot says at MATCHED extent — measured, not applied
+
+Rebuilding the uniform baselines at 100 m half-width so every map covers the
+same ground, seq 08, 20 frames, same 64-query set, nothing else changed:
+
+| schedule | MB | cells | R(S) | Fréchet |
+|---|---|---|---|---|
+| uniform 10 cm | **78.50** | 4,000,000 | 0.231 | 0.18 m |
+| uniform 20 cm | **30.50** | 1,000,000 | 0.251 | 0.23 m |
+| **5/10/20/40** | **29.06** | 745,000 | 0.488 | 0.33 m |
+| 5/10/50 | 23.62 | 520,000 | 0.488 | 0.33 m |
+| uniform 40 cm | 18.50 | 250,000 | 0.402 | 0.32 m |
+| uniform 80 cm | 11.04 | 62,500 | 0.798 | 0.55 m |
+
+**The memory claim holds, and is larger than the committed figure shows.**
+Matched to the same ground, uniform 10 cm costs **78.50 MB against 29.06** — a
+2.7× saving. The current plot instead shows us *more expensive* than an
+18.19 MB baseline covering a seventeenth of the area.
+
+**The regret claim does not hold on this query.** `uniform_20cm` at 30.50 MB —
+essentially the same memory as 5/10/20/40's 29.06 — scores **0.251 against
+0.488**. At equal memory and equal coverage, a plain uniform grid plans about
+twice as well. §8.2 claims foveation is free in decision terms; measured
+fairly for the first time, on this query it costs roughly 2× the regret of
+spending the same bytes uniformly.
+
+**How much weight this carries.** One sequence, one window, one query family.
+R(S) magnitude still moves with the window, and the query design itself is
+parked (`docs/decisions-2026-09-02.md`, Decision 4 — the single longitudinal
+lane). It is **not** proof the thesis is wrong. It is the first fair run of the
+comparison, and it does not go our way.
+
+**Not applied.** This was a read-only measurement; no committed figure or
+number was changed by it. Rebuilding the plot at matched extent moves every
+point and is a §8.2 owner's decision.
+
 ### Scope
 
 The memory reduction and the per-ring geometric accuracy against M\* are the
