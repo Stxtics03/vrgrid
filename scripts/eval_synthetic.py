@@ -193,8 +193,14 @@ def main():
             if args.confound:
                 _, mine = costmaps_for(gm, reference, vehicle_x)
                 raw_u = plan_regret_for(gm, reference, vehicle_x)
+                # `low_confidence()`, NOT `.unknown`. The cost function
+                # charges w_unknown for `unknown | TRAV_CONFIDENCE`, and the
+                # second term is almost all of it -- this printed 0.0% where
+                # the real figure was 100.0%, which is worse than no
+                # diagnostic: it was added to catch this and said it was
+                # absent.
                 unrestricted.append((schedule.name, raw_u,
-                                     float(np.mean(mine.unknown))))
+                                     float(np.mean(mine.low_confidence()))))
             if schedule.name.startswith("uniform"):
                 rows.append((result, plan_regret_for(gm, reference, vehicle_x, mask)))
                 continue

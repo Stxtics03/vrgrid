@@ -51,27 +51,40 @@ far field fills only by ego-motion (§1.3) -- so most of its cells are below
 `n_min`, pay `w_unknown` plus the class penalty for an unset class byte, and
 the planner routes around a map that is merely SPARSE rather than wrong.
 
-⚑ **Those magnitudes no longer reproduce, and the reason is not that the
-  confound went away.** Re-measured 2026-09-01 with
-  `python scripts/eval_synthetic.py --frames 14 --confound`:
+⚑⚑ **The confound was real, it was 100% against 4.2%, and the diagnostic
+  built to catch it reported 0.0%.** Both are fixed as of 2026-09-02, and the
+  history matters because the reassuring number is the dangerous one.
 
-    schedule        R(S)     cells low-confidence in the window
-    5/10/20/40      2.389     1%
-    uniform 20 cm   3.354     0%
+  `_cost_from_bits` charges `w_unknown` for `unknown | TRAV_CONFIDENCE`. The
+  `--confound` diagnostic read `CostMap.unknown` alone -- the smaller term by
+  two orders of magnitude, because a cell can be observed and still sit below
+  `n_min`. So the tool added specifically to make this visible said the
+  problem was absent. `CostMap.low_confidence()` is now the one place that
+  answers "who pays", and it is what `--confound` prints.
 
-  The window is now 99.1% common support, so restricting it changes almost
-  nothing -- unrestricted and restricted R(S) agree to three decimals. Two
-  things moved underneath the old numbers: the planning window was repositioned
-  behind the final pose rather than ahead of it (see `PLAN_BEHIND_M` in
-  `scripts/eval_synthetic.py`, which records why), and the synthetic sampler's
-  beam-surface intersection was wrong and is fixed, which raised coverage in
-  every ring.
+  The confound itself was in `costmap_from_gridmap`, which OR-ed the
+  confidence bit over the sub-cells of each planning cell. A 25 cm planning
+  cell covers 25 map cells of a 5 cm ring; at ring 0's fill rate most are
+  thin, so the OR fired essentially always and **the handicap grew with the
+  resolution**. Measured at 14 frames, cells paying `w_unknown` inside the
+  common support:
 
-  The restriction stays, and the numbers are printed side by side, because how
-  large this effect is depends on the scene, the window placement and the frame
-  count -- none of which are frozen. It was 65% against 4% on one arrangement
-  of them. An ablation that quotes R(S) across cell sizes without the
-  restriction is not interpretable whatever the current gap happens to be.
+    schedule        before    after
+    5/10/20/40      100.0%     0.9%
+    uniform 20 cm     4.2%     0.0%
+    M* reference        --      0.0%
+
+  Confidence is evidence and evidence adds up, so the observation counts over
+  the footprint's distinct cells are summed and compared against `n_min` once
+  -- which is what this file's own reference side had always done with
+  `block_stats`. The two sides now use one rule.
+
+  **The restriction to common support stays** even though it currently changes
+  almost nothing (the window is 99.1% common). How large this effect is
+  depends on the scene, the window placement and the frame count, none of
+  which are frozen; it was 65% against 4% on one earlier arrangement. An
+  ablation quoting R(S) across cell sizes without the restriction is not
+  interpretable whatever the current gap happens to be.
 
 **So R(S) compared across schedules with different cell sizes measures fill
 rate, not coarsening, unless the comparison is restricted to ground all of
@@ -102,6 +115,7 @@ condition under which the headline number means anything.
 
 import heapq
 import itertools
+import warnings
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -114,8 +128,10 @@ from vrgrid.cell import (
     TRAV_SLOPE,
     TRAV_STEP,
 )
-from vrgrid.grid.query import query
+from vrgrid.grid.lattice import OUTSIDE
+from vrgrid.grid.query import query, slot_of
 from vrgrid.grid.schedule import load_thresholds
+from vrgrid.grid.traversability import drivable_ids
 
 # Geometry decides, semantics filters (§7.1). These three say the vehicle
 # physically cannot: no weight makes them passable.
@@ -148,7 +164,16 @@ class CostMap:
     x0_m: float
     y0_m: float
     cost: np.ndarray            # (nx, ny)
-    unknown: np.ndarray         # (nx, ny) bool, for the fraction report
+    unknown: np.ndarray         # (nx, ny) bool, nothing observed at all
+    trav: np.ndarray = None     # (nx, ny) uint8, the §7.1 bitfield
+
+    # ⚑ `unknown` alone is not who pays `w_unknown`. The cost function charges
+    #   it for `unknown | TRAV_CONFIDENCE`, and the second term is almost all
+    #   of it: a cell CAN have been observed and still be below `n_min`. The
+    #   confound diagnostic read `.unknown` and reported 0.0% where the real
+    #   figure was 100.0%, which is worse than having no diagnostic -- it was
+    #   built to catch exactly this and said the problem was absent. `trav` is
+    #   here so `low_confidence()` can answer the question that was asked.
 
     @property
     def shape(self):
@@ -161,6 +186,19 @@ class CostMap:
     def centre_of(self, i, j):
         return (self.x0_m + (i + 0.5) * self.cell_m,
                 self.y0_m + (j + 0.5) * self.cell_m)
+
+    def low_confidence(self) -> np.ndarray:
+        """(nx, ny) bool -- cells actually paying `w_unknown`. Not `.unknown`.
+
+        This is the fill-rate confound made visible. Read it next to R(S) for
+        any cross-schedule comparison: a schedule whose fine rings hold few
+        returns per cell pays this on most of its window and is penalised for
+        resolving finely, which is precisely backwards.
+        """
+        if self.trav is None:
+            return np.asarray(self.unknown, dtype=bool)
+        return np.asarray(self.unknown, dtype=bool) | (
+            np.asarray(self.trav) & TRAV_CONFIDENCE).astype(bool)
 
     def same_lattice(self, other) -> bool:
         return (self.cell_m == other.cell_m and self.x0_m == other.x0_m
@@ -189,24 +227,50 @@ def costmap_from_gridmap(gm, x0_m, y0_m, nx, ny, cell_m=None,
                          samples: int = 5) -> CostMap:
     """M_S -> a planning costmap, entirely through `query()`.
 
-    Every planning cell is `samples x samples` `query()` calls over its
-    footprint, combined conservatively: the bitfield is OR-ed, so a hazard
-    anywhere in the cell blocks it, and the cell counts as observed if ANY
-    sample was observed.
+    Every planning cell gathers `samples x samples` `query()` calls over its
+    footprint and then **the §7.1 predicate is evaluated once, on the planning
+    lattice** -- the same lattice, from the same statistics, as
+    `costmap_from_reference`. Eq. (23) subtracts the two, so they have to be
+    the same measurement of the same thing at the same scale.
 
-    ⚑ A single query at the cell centre is wrong, and wrong in a way that
-      looks fine. A 25 cm planning cell over a 5 cm ring covers 25 map cells;
-      at ring 0's fill rate most of them are the gaps between beam tracks, so
-      centre-sampling picks an unobserved cell about four times in five and
-      the planner sees a map that is mostly holes. The finer the schedule,
-      the worse it looks -- exactly backwards. It also makes the common
-      support of several schedules disconnected, so no path exists at all,
-      which is how this was found.
+    ⚑ **This used to OR the stored bitfields, and eq. (23) was not comparing
+      like with like.** The bits in a cell were computed on its RING lattice --
+      a step over a 5 cm neighbourhood in ring 0, over 40 cm in ring 3 -- while
+      the reference side computed them at the 25 cm planning cell from block
+      means. The 12 cm kerb is a step at 5 cm and is smoothed at 25 cm, so the
+      fine schedule reported walls the reference structurally could not have.
+      Measured on 14 frames: 5/10/20/40 invented 148 impassable cells the
+      reference did not have and missed 8 that it did, against 12 real ones.
+      A path planned round 148 phantom walls and scored against a map without
+      them is not a regret, it is two different problems.
 
-      OR-ing the bits is the same rule as §7.2's conservative pyramid: a block
-      is safe only if every cell in it is. Doing it by sampling rather than by
-      a pyramid is slower and needs no new structure; when
-      `query_conservative()` lands this should call it instead.
+    ⚑ **And OR-ing `TRAV_CONFIDENCE` penalised a schedule for being fine.**
+      A 25 cm planning cell covers 25 map cells of a 5 cm ring; at ring 0's
+      fill rate most are thin, so the OR set the confidence bit essentially
+      always. 5/10/20/40 paid `w_unknown` on 100% of the surviving window
+      against uniform 20 cm's 4.2% -- a 4-unit handicap on every cell, for
+      resolving finely. Confidence is EVIDENCE and evidence adds up: the
+      footprint's observation counts are summed over the distinct cells it
+      covers and compared against `n_min` once, which is exactly what the
+      reference side does with `block_stats`.
+
+      Note "distinct". Twenty-five samples over a 40 cm ring cell all land in
+      the same cell, and summing per sample would multiply its evidence by 25.
+      `slot_of` is used for identity only -- never to read a cell -- so the
+      claim that a planner needs no knowledge of the ring layout still holds.
+
+    ⚑ **Clearance is not evaluated here**, because `costmap_from_reference`
+      cannot evaluate it: M* is 2.5D ground with no ceiling. Keeping it on
+      this side alone would mean M_S blocking cells M* is structurally unable
+      to block, which is a difference between the two maps' CONTENTS being
+      scored as a difference in coarsening. Stated rather than hidden, as the
+      reference side already stated it. The clearance bit is still in the map
+      and still in `query()`; it is this metric that must not use it.
+
+    Heights are combined by observation count and variances by the law of
+    total variance (§4.2) -- the children measure different *places*, so
+    dropping the between-cell term would make a planning cell most confident
+    exactly where it straddles a kerb.
 
     Slow, and deliberately so: the claim being demonstrated is that a planner
     can treat this map as uniform, and reaching into the rings to go faster
@@ -214,28 +278,68 @@ def costmap_from_gridmap(gm, x0_m, y0_m, nx, ny, cell_m=None,
     """
     th = thresholds if thresholds is not None else gm.thresholds
     w = weights(th)
+    t = th["traversability"]
     cell_m = float(w.get("cell_m", 0.25)) if cell_m is None else cell_m
     samples = max(1, int(samples))
     offsets = (np.arange(samples) + 0.5) / samples
 
-    trav = np.zeros((nx, ny), dtype=np.uint8)
-    unknown = np.ones((nx, ny), dtype=bool)
+    n_tot = np.zeros((nx, ny), dtype=np.int64)
+    z = np.full((nx, ny), np.nan)
+    var = np.zeros((nx, ny))
+    cls = np.zeros((nx, ny), dtype=np.int64)
+    soft = np.zeros((nx, ny), dtype=np.uint8)   # bits that stay per-cell
+
     for i in range(nx):
         for j in range(ny):
-            bits = 0
-            seen = False
+            seen = {}
             for du in offsets:
                 wx = x0_m + (i + du) * cell_m - vehicle_xy_m[0]
                 for dv in offsets:
                     wy = y0_m + (j + dv) * cell_m - vehicle_xy_m[1]
+                    ring, slot = slot_of(gm, wx, wy)
+                    if ring == OUTSIDE or (ring, slot) in seen:
+                        continue
                     q = query(gm, wx, wy)
                     if q.occupancy == OCC_UNKNOWN:
                         continue
-                    seen = True
-                    bits |= q.traversability
-            trav[i, j] = bits
-            unknown[i, j] = not seen
-    return CostMap(cell_m, x0_m, y0_m, _cost_from_bits(trav, unknown, w), unknown)
+                    seen[(ring, slot)] = q
+
+            if not seen:
+                continue
+            qs = list(seen.values())
+            counts = np.array([max(q.confidence, 1) for q in qs], dtype=np.float64)
+            mus = np.array([q.ground_height for q in qs], dtype=np.float64)
+            wts = counts / counts.sum()
+
+            n_tot[i, j] = int(sum(q.confidence for q in qs))
+            mu = float((wts * mus).sum())
+            z[i, j] = mu
+            # §4.2: between-cell spread is part of the block's variance. The
+            # within-cell term is not available through `query()`, so this is
+            # the between term alone and therefore a LOWER bound -- which is
+            # the conservative direction for a roughness threshold.
+            var[i, j] = float((wts * (mus - mu) ** 2).sum())
+            cls[i, j] = int(qs[int(np.argmax(counts))].semantic_class)
+            # Roughness and class are per-cell properties, not neighbourhood
+            # ones, so OR is the right combiner for them: a rough patch
+            # anywhere in the footprint makes the footprint rough.
+            for q in qs:
+                soft[i, j] |= q.traversability & (TRAV_ROUGHNESS | TRAV_CLASS)
+
+    unknown = n_tot == 0
+
+    trav = np.zeros((nx, ny), dtype=np.uint8)
+    trav |= np.where(_slope(z, cell_m) > np.tan(np.radians(t["theta_max_deg"])),
+                     TRAV_SLOPE, 0).astype(np.uint8)
+    trav |= np.where(_max_step(z) > t["s_max_m"], TRAV_STEP, 0).astype(np.uint8)
+    trav |= np.where(var > t["sigma2_max_m2"], TRAV_ROUGHNESS, 0).astype(np.uint8)
+    trav |= soft & TRAV_ROUGHNESS
+    trav |= np.where(np.isin(cls, drivable_ids(th)) & ~unknown, 0,
+                     TRAV_CLASS).astype(np.uint8)
+    trav |= np.where(n_tot < t["n_min"], TRAV_CONFIDENCE, 0).astype(np.uint8)
+
+    return CostMap(cell_m, x0_m, y0_m, _cost_from_bits(trav, unknown, w),
+                   unknown, trav)
 
 
 def costmap_from_reference(reference, x0_m, y0_m, nx, ny, cell_m=None,
@@ -281,7 +385,8 @@ def costmap_from_reference(reference, x0_m, y0_m, nx, ny, cell_m=None,
     trav |= np.where(var * 1e-4 > t["sigma2_max_m2"], TRAV_ROUGHNESS, 0).astype(np.uint8)
     trav |= np.where(n < t["n_min"], TRAV_CONFIDENCE, 0).astype(np.uint8)
 
-    return CostMap(cell_m, x0_m, y0_m, _cost_from_bits(trav, unknown, w), unknown)
+    return CostMap(cell_m, x0_m, y0_m, _cost_from_bits(trav, unknown, w),
+                   unknown, trav)
 
 
 def _neighbour_diffs(z):
@@ -302,7 +407,17 @@ def _neighbour_diffs(z):
 
 
 def _max_step(z):
-    with np.errstate(invalid="ignore"):
+    """max|z - z_nbr| over the 4-neighbourhood, 0 where nothing is comparable.
+
+    A cell whose four neighbours are all unknown gives an all-NaN slice, and
+    `np.nanmax` warns on those. The warning is not informative here -- an
+    unobserved neighbourhood is the ordinary case at the window edge and the
+    answer is "no step evidence", which is what 0.0 says -- and one test runs
+    the pipeline with warnings as errors, so it is suppressed at the source
+    rather than left to rattle through every eval run.
+    """
+    with np.errstate(invalid="ignore"), warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
         stacked = np.stack(_neighbour_diffs(z))
         return np.nan_to_num(np.nanmax(stacked, axis=0), nan=0.0)
 
