@@ -57,8 +57,13 @@ def _compared(gm, reference, ring: int, require_observed=True):
     keep = n_ref > 0
     if require_observed:
         keep &= gm.soa["obs_count"][slots] > 0
+    # ⚑ `+ z_datum_m`. Stored heights are relative to the run's datum; M* is
+    #   world-absolute. Compare them without this and the whole difference is
+    #   the vehicle's starting elevation -- 162 cm on seq 07 -- dressed up as
+    #   map error.
     return (slots[keep], n_ref[keep], ref_mean[keep], ref_var[keep],
-            gm.soa["ground_height"][slots[keep]].astype(np.float64))
+            gm.soa["ground_height"][slots[keep]].astype(np.float64)
+            + getattr(gm, "z_datum_m", 0.0) * 100.0)
 
 
 def height_rmse_per_ring(gm, reference):

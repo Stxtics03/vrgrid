@@ -186,19 +186,23 @@ committed; `.gitignore` excludes them by design.)*
 ## 3. Curb and pothole detection — real numbers, no ground truth to score against
 
 `src/grid/features.py` answers the problem statement's own sentence about
-curbs and potholes directly (§7.4). Measured on **sequence 08**, 40 frames,
-schedule 5/10/20/40, through the real loader → transforms → Patchwork++ →
-`run_sequence` → `features.detect` path:
+curbs and potholes directly (§7.4). ⚑ **Quoted from sequence 07, not 08.** 08 goes through `run_sequence`, which
+clips 16.91% of its ground returns against the 8 m height band — see §6. Those
+numbers are withdrawn.
+
+Measured on **sequence 07**, 40 frames, schedule 5/10/20/40, through the real
+loader → transforms → Patchwork++ → `run_sequence` → `features.detect` path,
+with the height datum in place:
 
 | ring | cell | curbs | median | potholes | median |
 |---|---|---|---|---|---|
-| 0 | 5 cm | 11,869 | 9.1 cm | 143 | 9.0 cm |
-| 1 | 10 cm | 18,321 | 11.3 cm | 363 | 11.5 cm |
-| 2 | 20 cm | 1,724 | 14.2 cm | 70 | 15.0 cm |
+| 0 | 5 cm | 2,939 | 9.0 cm | 80 | 11.0 cm |
+| 1 | 10 cm | 965 | 13.0 cm | 87 | 30.0 cm |
+| 2 | 20 cm | 98 | 8.2 cm | 3 | 8.0 cm |
 
 Real urban kerbs are 10–15 cm, and on the synthetic scene — where the answer is
-known — it returns **12.0 cm against a built 12 cm kerb** and **40.0 cm against
-a built 40 cm hole**.
+known — the detector returns **12.0 cm against a built 12 cm kerb** and
+**40.0 cm against a built 40 cm hole**.
 
 **The limitation: SemanticKITTI has no ground truth for curb or pothole
 geometry.** There is no detection rate to quote, only counts and a plausibility
@@ -254,113 +258,79 @@ not growth, is the case for the structural bound. See
 
 ---
 
-## 6. A range-dependent height bias on real data — OPEN, cause unknown
+## 6. The eval harness had no height datum — FOUND, FIXED for 07, OPEN for 08
 
-The per-ring accuracy table now runs on real sequences (`eval_synthetic.py
---seq 07`). After fixing two bugs that only real data could expose — M\* built
-from every static return rather than the ground, and the map storing
-vehicle-frame height against world-anchored cells — a **systematic positive
-bias remains, and it grows with range**.
+### What the bug was
 
-Sequence 07, 40 frames, schedule 5/10/20/40:
+`kernels.quantise_height` clips to an **8 m band, world-absolute at datum 0**:
+[−2.00, +6.00] m. `MapEngine` tracks a moving datum and adds it back on
+readout. **`harness.run_sequence` had none**, so every height it stored was
+world-absolute.
 
-| ring | cell | cells | RMSE | \|bias\| | mean bias | spread | rho |
-|---|---|---|---|---|---|---|---|
-| 1 | 10 cm | 47,802 | 22.02 | 20.72 | **3.47** | 1.08 | 19.21 |
-| 2 | 20 cm | 8,486 | 37.95 | 36.02 | **21.63** | 2.41 | 14.98 |
-| 3 | 40 cm | 32 | 174.64 | 180.02 | 154.86 | 2.50 | 72.14 |
+Sequence 07's ground sits at world z ≈ −1.61 m. Anything more than 39 cm below
+it — ditches, kerbside drops, the low side of the road camber — clipped
+*upward* to −2.00 m. Measured: **69,470 of 2,158,949 ground returns, 3.2%**,
+all clamped in the same direction.
 
-Mean bias against distance from the final pose:
+That produced a positive height bias, concentrated in cells whose returns
+spread lowest, which is disproportionately the far field. It looked exactly
+like a range-dependent measurement error.
 
-```
-ring 2   20-30 m   2,749 cells   +15.32 cm      ring 1   10-20 m   +2.50 cm
-         30-50 m   8,288 cells   +25.49 cm               20-30 m   +4.26 cm
-         50-80 m     138 cells   +67.12 cm
-```
+### The fix, and what it is worth
 
-It also falls with revisits: ring 2 reads +29.85 cm at `obs_count` 1 and
-+16.01 cm at `obs_count` ≥ 17.
+`run_sequence` now sets `gm.z_datum_m` from the first pose's elevation and
+stores heights relative to it; `metrics._compared` adds it back before
+comparing against the world-absolute M\*. **One** datum for the run, not a
+moving one, deliberately: a constant offset cancels in every DIFFERENCE the map
+computes — slope, step, curb height, pothole depth — so §7.1 and §7.4 are
+untouched. A moving datum would not cancel and would put a spurious step
+between any two cells last seen at different times.
 
-**Ring 1 is dispersion, not offset.** Its `|bias|` of 20.72 is RMS; the signed
-mean is 3.47. The table prints both since 2 Sep precisely so these cannot be
-confused — RMS alone cannot tell "systematically high" from "randomly
-scattered", and they are different defects.
+Sequence 07, 40 frames, clipping falls from 3.2% to **1 return in 2.16 million**:
 
-### CAUSE FOUND — ring migration, and it is structural, not a fusion bug
+| ring | cell | cells | mean bias | sd | before |
+|---|---|---|---|---|---|
+| 0 | 5 cm | 102,988 | **−0.33 cm** | 2.17 | +1.24 |
+| 1 | 10 cm | 54,320 | **−0.17 cm** | 3.23 | +3.98 |
+| 2 | 20 cm | 11,231 | **−0.41 cm** | 5.67 | +23.46 |
+| 3 | 40 cm | 47 | −18.52 cm | 94.08 | noise, 47 cells |
 
-A controlled experiment settles it. Build the same map with a **single** 20 cm
-ring, so no cell can ever change resolution, and compare against the four-ring
-schedule's 20 cm ring on the same data and the same reference:
+RMSE 22.02 → **3.23 cm** at ring 1; ρ 19.21 → **2.95**. Sub-centimetre
+systematic bias at every ring that carries cells, with dispersion growing
+sensibly with cell size. **This is the accuracy claim, and it is a good one.**
 
-```
-uniform 20 cm   (one ring, no migration)   33,529 cells   mean bias   7.83 cm
-5/10/20/40 ring 2 (same 20 cm cells)       11,231 cells   mean bias  23.46 cm
-```
+### ⚑ Corrections to what this document previously said
 
-Same cell size, same returns, same M\*. The difference is foveation itself: an
-outer-ring cell **stops receiving updates once the vehicle approaches it**,
-because it migrates into ring 1 and then ring 0 — which are different lattices
-holding different cells. Ring 2 therefore retains only the observations made
-while that ground was 25–50 m away. M\* has no rings and accumulates every
-return, including the accurate close-range ones collected as the vehicle drove
-past.
+Two earlier conclusions here were wrong and are withdrawn.
 
-So roughly two thirds of ring 2's 23.46 cm is the metric charging the map for a
-property of the design, and the remaining ~7.8 cm is genuine far-field
-measurement error. **The map as a whole is not wrong about that ground — the
-accurate value is in the inner ring**, which is where the vehicle will read it
-from when it gets there.
+- **"The bias is ring migration, structural, not a fusion bug."** It is not.
+  That rested on a controlled experiment — one-ring uniform 20 cm reading
+  +7.83 cm against the four-ring schedule's ring 2 at +23.46 cm — and that
+  experiment was itself confounded by the clipping, which hit the two
+  schedules differently. Re-run with the datum they agree: **−0.26 cm and
+  −0.41 cm**. Migration costs nothing measurable.
+- **"Grazing incidence and inverse-variance weighting are ruled out."** Those
+  remain correctly ruled out, but for a better reason than given: neither could
+  have mattered, because the clipping happens in `quantise_height` *before* any
+  weight is applied.
 
-The same experiment gives the number that should lead the accuracy claim:
+### ⚑ STILL OPEN: sequence 08 cannot be evaluated through this harness
 
-```
-5/10/20/40 ring 0 (5 cm)   102,988 cells   mean bias +1.24 cm   sd 16.41
-                ring 1 (10 cm)  54,320 cells   mean bias +3.98 cm   sd 21.65
-```
+A **fixed** datum is not enough for a sequence with real relief. Sequence 08
+climbs from world z −1.65 m to +5.63 m in 40 frames and +45.7 m over the
+sequence, against an 8 m band. Measured with a fixed datum: **552,369 of
+3,266,241 ground returns still clip — 16.91%.**
 
-**Ring 0 is systematically accurate to 1.24 cm against a 5 cm reference on real
-SemanticKITTI**, over 102,988 cells. That is the fine-resolution claim and it
-survives contact with real data.
+08 is the *reporting* sequence. Until `run_sequence` grows the moving datum
+`MapEngine` already has — which also means re-basing stored heights when the
+datum moves, or every difference the feature detectors compute acquires a
+spurious step — **no number produced from `run_sequence` on 08 is
+trustworthy.** That includes the curb, pothole and confidence figures
+previously quoted here from 08; §3 now quotes 07.
 
-### What this does NOT mean
-
-It is not a licence to drop the outer-ring numbers. It means the per-ring RMSE
-is not a pure coarsening measure for rings the vehicle drives into, and any
-figure quoting ring 2 or 3 needs this sentence beside it. A metric that
-compared each ring against a reference restricted to the observations that ring
-actually received would isolate coarsening properly; that is a change to §9.2
-and it has not been made.
-
-### What has been ruled out
-
-- **Grazing incidence in the measurement weighting.** `measurement_variance_cm2`
-  accepts a `cos_incidence` and `scatter` calls it head-on, which is wrong on
-  its face for a ground return — at 40 m the true value is 0.043 and eq. (13)
-  divides by cos². Passing the real incidence changes the weights enormously
-  (at 20 m, 83 → 1) and changes the measured bias by **0.01 cm**: 21.63 →
-  21.62. So the weighting is not what holds the far-field estimate high. The
-  change was reverted rather than shipped, since altering frozen fusion
-  semantics for no measured gain is a bad trade; the experiment is recorded in
-  `fusion.scatter` so nobody repeats it.
-- **The 8 m height band saturating.** `kernels.py` warns that seq 07 sits at
-  world-z −5.8 m and saturates the floor. Measured over these frames the ground
-  is at −1.61 m, 0.39 m inside the −2.00 m floor. Not clamped here.
-
-### What this means for the report
-
-**The per-ring RMSE beyond ~25 m is not a pure coarsening measure,** because
-about two thirds of ring 2's offset is ring migration (above) and the rest is
-far-field measurement error. Quote ring 0 and ring 1 — **+1.24 cm and +3.98 cm
-mean bias on real data** — and quote ring 2 with the migration caveat attached.
-Ring 3's 174 cm is 32 cells and is noise.
-
-Two further caveats belong with any ρ that gets quoted. **ρ's denominator is
-thin**: `spread` is estimated from a median of 3–4 reference returns per
-footprint at these rings, which understates true sub-cell variability and
-inflates ρ. And real ρ = 19.21 must not be set beside the synthetic scene's
-1.50 as though they measured the same thing.
-
----
+Paths that go through `MapEngine` instead — the timing table, the ablation
+table and the ghost-removal figure — are unaffected, because the engine has
+always tracked its datum.
 
 ## What is not on this list
 

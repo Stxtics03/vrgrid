@@ -57,7 +57,9 @@
 > 
 > Rather than hallucinating a free surface, `vrgrid` explicitly marks unsampled cells beyond $8.3\text{ m}$ as `UNKNOWN`, never `FREE`.
 >
-> What we **do** detect, measured on sequence 08: **576 pothole cells** at ring medians of 9.0, 11.5 and 15.0 cm, and **31,914 curb cells** at ring medians of 9.1, 11.3 and 14.2 cm. On the synthetic scene, where the answer is known, the detector returns **12.0 cm against a built 12 cm kerb** and **40.0 cm against a built 40 cm hole**."*
+> What we **do** detect, measured on sequence 07: **170 pothole cells** at ring medians of 11.0, 30.0 and 8.0 cm, and **4,002 curb cells** at ring medians of 9.0, 13.0 and 8.2 cm. On the synthetic scene, where the answer is known, the detector returns **12.0 cm against a built 12 cm kerb** and **40.0 cm against a built 40 cm hole**."*
+
+**⚠️ Quote 07, not 08.** Sequence 08 climbs 45.7 m and the eval harness clips 16.91% of its ground returns against the 8 m height band — see known-limitations §6. An earlier version of this answer quoted 08 numbers; they are withdrawn.
 
 **⚠️ If pressed on accuracy — do not claim a detection rate.** SemanticKITTI has no ground truth for curb or pothole geometry. These are counts plus a plausibility check on the height distribution against the 10–15 cm a real urban kerb actually is. Say that before you are asked.
 

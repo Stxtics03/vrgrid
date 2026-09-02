@@ -427,11 +427,17 @@ def run_sequence(gm: GridMap, scans, recentre: bool = True,
     two implementations of one convention is how a map ends up slowly rotating.
     """
     stats = RunStats()
+    datum_set = False
     speed = 0.0
     last_xy = None
     guard = FrameGuard()
 
     for pts, labels, ground, pose in scans:
+        if not datum_set:
+            # The first pose's elevation. One value for the run -- see the note
+            # at the `scatter` call for why it must not move.
+            gm.z_datum_m = float(np.asarray(pose)[2, 3])
+            datum_set = True
         pose = np.asarray(pose, dtype=np.float64)
         pts = np.asarray(pts, dtype=np.float64)
         world = pts @ pose[:3, :3].T + pose[:3, 3]
@@ -479,6 +485,22 @@ def run_sequence(gm: GridMap, scans, recentre: bool = True,
         #   coordinates per frame, so one more per-frame array is in keeping.
         #   The deeper question -- whether `scatter` should ever take height
         #   from a different frame than cell identity -- is worth asking once.
+        #   Heights go in RELATIVE TO A FIXED DATUM for the run. The band is
+        #   8 m wide and world-absolute at datum 0 (kernels.quantise_height),
+        #   which holds for seq 07 -- ground at -1.67..-1.59 m -- and fails for
+        #   seq 08, whose ground climbs -1.65 -> +5.63 m in 40 frames and
+        #   +45.7 m over the sequence. `MapEngine` tracks a moving datum and
+        #   adds it back on readout; this harness had none, so world-absolute
+        #   heights press against the ceiling on any sequence with relief.
+        #
+        #   ONE datum for the whole run, not a moving one, and deliberately:
+        #   a constant offset cancels in every DIFFERENCE the map computes --
+        #   slope, step, curb height, pothole depth -- so §7.1 and §7.4 are
+        #   untouched by it. Only the comparison against M*, which is
+        #   world-absolute, needs it added back, and `metrics` does that from
+        #   `gm.z_datum_m`. A moving datum would not cancel and would put a
+        #   spurious step between any two cells last seen at different times.
+        #
         #   `height_m` rather than a doctored `pts`: an earlier version of this
         #   fix overwrote `pts[:, 2]` with the world z, which also corrupted the
         #   RANGE that `scatter` computes from the same array for the
@@ -487,7 +509,7 @@ def run_sequence(gm: GridMap, scans, recentre: bool = True,
         agg = scatter(gm, pts[static], learning_ids(np.asarray(labels)[static]),
                       np.asarray(ground, dtype=bool)[static],
                       points_world_m=world[static],
-                      height_m=world[static][:, 2])
+                      height_m=world[static][:, 2] - gm.z_datum_m)
         fuse(gm.soa, agg, gm.thresholds)
 
         # Traversability before the gate: the gate consults the hazard bits,
