@@ -347,33 +347,71 @@ Two metric defects surfaced while proving it, and both are fixed:
 ρ near 1 is the thesis stated numerically: the coarsening cost only what the
 terrain's own sub-cell variability costs.
 
-### ⚑ STILL OPEN: sequence 08, and it is the GROUND MASK, not the datum
+### ⚑ STILL OPEN: sequence 08 has a per-frame REGISTRATION error
 
-08 still reports RMSE 162 cm at ring 1 after every fix above, and the tell is
-its `spread`: **116 cm**. M\* claims 1.16 m of variation *inside a 10 cm cell*.
-That is not terrain, and it is not the map — the reference itself is
-contaminated, and both sides are built from the same mask.
+08 still reports RMSE 162 cm at ring 1 after the datum, the metric predicates
+and the saturation exclusion. Measured to its cause, and it is upstream of the
+map entirely.
 
-Measured cause:
+**M\* itself is inconsistent on 08.** Per-cell standard deviation of the
+reference height inside a 10 cm footprint:
 
 ```
-                 ground fraction   per-frame ground z span (p1-p99)
-    seq 07             44.0%              0.97 m
-    seq 08             66.1%              3.01 m
+seq 07   median  0.5 cm    2.9% of cells > 5 cm    max 161 cm
+seq 08   median 64.5 cm   95.6% of cells > 5 cm, 29.8% > 1 m
 ```
 
-Two thirds of 08's returns are being called ground, spanning three metres of
-elevation in a single frame. **Patchwork++ is not installed on this machine**
-(`ground._HAVE_PATCHWORKPP` is False), so `real_scans` falls back to
-`ground_from_semantics` — the SemanticKITTI classes `road`, `parking`,
-`sidewalk`, `other-ground` and **`terrain`**. On 08's climb, `terrain` is the
-grassy embankment beside the road, and it legitimately spans metres.
+A 10 cm patch of road cannot vary by 65 cm. The same world location is
+receiving returns at very different heights across frames.
 
-So the fallback is wrong for a sequence with relief, and the fix is to install
-Patchwork++ (`pip install -e ".[perception]"`, already declared) and re-run —
-a geometric ground-plane segmenter will not call an embankment road. Until
-then **08's per-ring numbers, and anything else built on its ground mask, are
-not reportable.** 07 is unaffected: flat, and 44% ground is a sane figure.
+**Consecutive frames disagree by a constant 16.6 cm.** Median absolute height
+difference in 20 cm cells seen by both of two consecutive frames:
+
+```
+seq 07   median  0.5 cm   (min 0.3, max 0.8, 11 pairs)
+seq 08   median 16.6 cm   (min 16.1, max 17.6, 11 pairs)
+```
+
+The consistency is the tell — 16.1 to 17.6 cm across every pair is a
+systematic per-frame offset, not drift. A cell seen over N frames accumulates
+roughly N × 16.6 cm of spread, which is the 64.5 cm median above.
+
+**What this is not.** Not the height datum (07 and 08 use the same code and 07
+is clean). Not band saturation (excluded from the metric). Not the ground mask:
+Patchwork++ is now installed and built from source, and it makes 08 *worse* on
+the frame-level span (3.63 m vs the semantic fallback's 3.01 m) because a 3 m
+span across a climbing frame is real slope, not contamination. Not a
+frame-count misalignment: 08 is 4,071 poses / 4,071 scans / 4,071 labels.
+
+**Where to look.** This is a frames-and-calibration question (`docs/frames.md`,
+`perception/transforms.py`), not a mapping one. 07 and 08 come from different
+KITTI recording dates and therefore different calibrations. `frames.md` already
+records that the odometry benchmark publishes no Velodyne→Vehicle extrinsic and
+that the 1.73 m mounting height is an assumed convention — but a constant
+mounting-height error cancels between frames and cannot produce this, so the
+1.73 m is not the suspect. The composition to audit is
+`vehicle_to_world`'s use of `Tr` from `sequences/08/calib.txt`.
+
+**Until it is resolved, 08 is not reportable** for anything built on
+world-registered accumulation: the per-ring table, curbs, potholes and
+confidence. Sequence 07 is clean and carries the accuracy claim. Paths that do
+not accumulate across frames — the timing and ablation tables — are unaffected.
+
+### Patchwork++ is now installed
+
+`pip install pypatchworkpp` fails at every published version: the sdist's
+`python/CMakeLists.txt` falls into an out-of-tree branch that fetches
+`.../refs/tags/v${CMAKE_PROJECT_VERSION}.tar.gz`, the variable is empty under
+scikit-build-core, and GitHub returns 404 for `tags/v.tar.gz`. Building from a
+git clone takes the `if(EXISTS ../cpp/)` branch instead and works:
+
+```
+git clone --depth 1 https://github.com/url-kaist/patchwork-plusplus.git
+.venv/bin/pip install ./patchwork-plusplus/python
+```
+
+`ground.segment_ground` is now the geometric segmenter rather than the
+`ground_from_semantics` fallback, on this machine.
 
 ## What is not on this list
 
