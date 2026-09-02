@@ -103,6 +103,7 @@ from vrgrid.eval.synthetic import (
 )
 from vrgrid.grid.schedule import load, load_thresholds
 from vrgrid.grid.transient import TrackList
+from vrgrid.grid.traversability import baseline_k
 
 
 # The scene's three features, with the quantity §7.1 actually tests against
@@ -390,10 +391,14 @@ def main() -> int:
     print(f"   §7.1 bit 1 fires when |grad z| > tan({t['theta_max_deg']:.0f} deg) "
           f"= {np.tan(np.radians(t['theta_max_deg'])):.3f}; bit 2 when a "
           f"4-neighbour step > {t['s_max_m']:.2f} m.")
-    print(f"   The kerb is {KERB_HEIGHT_M:.2f} m, so its gradient is "
-          f"{KERB_HEIGHT_M:.2f}/2c and its step is {KERB_HEIGHT_M:.2f} at every c.")
-    print(f"   {'cell size':>12}  {'|grad| at kerb':>15}  {'wall?':>6}   which map "
-          f"evaluates §7.1 there")
+    baseline_m = t.get("baseline_m")
+    print(f"   The kerb is {KERB_HEIGHT_M:.2f} m and its step is "
+          f"{KERB_HEIGHT_M:.2f} at every c. Its gradient is "
+          f"{KERB_HEIGHT_M:.2f}/(2kc), where k comes from "
+          f"traversability.baseline_k -- NOT from this script, so what is "
+          f"printed is what §7.1 will do.")
+    print(f"   {'cell size':>12}  {'k':>3} {'span':>7}  {'|grad| at kerb':>15}  "
+          f"{'wall?':>6}   which map evaluates §7.1 there")
     tan_max = np.tan(np.radians(t["theta_max_deg"]))
     lattices = [(0.05, "M_S rings 0 of 5/10/20/40 and 5/10/50"),
                 (0.10, "M_S uniform_10cm, ring 1"),
@@ -401,18 +406,29 @@ def main() -> int:
                 (cell_m, "⚑ M* -- costmap_from_reference blocks to plan.cell_m"),
                 (0.40, "M_S uniform_40cm, ring 3"),
                 (0.80, "M_S uniform_80cm")]
+    walls = set()
     for c, who in sorted(lattices):
-        g = KERB_HEIGHT_M / (2.0 * c)
-        print(f"   {c:>11.2f}m  {g:>15.3f}  {('WALL' if g > tan_max else '-'):>6}   {who}")
-    print("   The kerb's STEP never fires: 0.12 m < 0.15 m at every cell size.")
-    print("   ⚑ The crossing sits between 0.10 m and 0.20 m, and M* is on the "
-          "far side of it")
-    print("     from the two frozen schedules' finest rings. A schedule is "
-          "charged regret for")
-    print("     RESOLVING the kerb, against a reference that cannot see it. "
-          "That is not the")
-    print("     fill-rate confound in eval/plan_regret.py -- `common_support()` "
-          "does not touch it.")
+        k = baseline_k(c, baseline_m)
+        span = 2.0 * k * c
+        g = KERB_HEIGHT_M / span
+        is_wall = g > tan_max
+        walls.add(is_wall)
+        print(f"   {c:>11.2f}m  {k:>3} {span:>6.2f}m  {g:>15.3f}  "
+              f"{('WALL' if is_wall else '-'):>6}   {who}")
+    print(f"   The kerb's STEP never fires: {KERB_HEIGHT_M:.2f} m < "
+          f"{t['s_max_m']:.2f} m at every cell size.")
+    if len(walls) == 1:
+        verdict = "WALL on every lattice" if walls.pop() else "passable on every lattice"
+        print(f"   ✔ The kerb now reads {verdict}, so eq. (23) is not charging a")
+        print("     schedule for RESOLVING it against a reference that cannot see it.")
+        print(f"     baseline_m = {baseline_m:.2f} m is what removes the scale: every "
+              f"lattice at or")
+        print("     below half of it differences over the same physical distance.")
+    else:
+        print("   ⚑ The kerb is still a wall on some lattices and not on others, so a")
+        print("     schedule is charged regret for RESOLVING it against a reference")
+        print("     that cannot see it. That is not the fill-rate confound in")
+        print("     eval/plan_regret.py -- `common_support()` does not touch it.")
     print()
 
     if args.map:

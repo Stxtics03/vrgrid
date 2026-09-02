@@ -131,7 +131,7 @@ from vrgrid.cell import (
 from vrgrid.grid.lattice import OUTSIDE
 from vrgrid.grid.query import query, slot_of
 from vrgrid.grid.schedule import load_thresholds
-from vrgrid.grid.traversability import drivable_ids
+from vrgrid.grid.traversability import baseline_k, drivable_ids
 
 # Geometry decides, semantics filters (§7.1). These three say the vehicle
 # physically cannot: no weight makes them passable.
@@ -329,9 +329,13 @@ def costmap_from_gridmap(gm, x0_m, y0_m, nx, ny, cell_m=None,
     unknown = n_tot == 0
 
     trav = np.zeros((nx, ny), dtype=np.uint8)
-    trav |= np.where(_slope(z, cell_m) > np.tan(np.radians(t["theta_max_deg"])),
+    # §7.1 (22a): bits 1 and 2 differenced over `baseline_m`, not over one
+    # cell, so the same physical kerb gets one verdict on both sides here.
+    trav |= np.where(_slope(z, cell_m, t.get("baseline_m"))
+                     > np.tan(np.radians(t["theta_max_deg"])),
                      TRAV_SLOPE, 0).astype(np.uint8)
-    trav |= np.where(_max_step(z) > t["s_max_m"], TRAV_STEP, 0).astype(np.uint8)
+    trav |= np.where(_max_step(z, cell_m, t.get("baseline_m")) > t["s_max_m"],
+                     TRAV_STEP, 0).astype(np.uint8)
     trav |= np.where(var > t["sigma2_max_m2"], TRAV_ROUGHNESS, 0).astype(np.uint8)
     trav |= soft & TRAV_ROUGHNESS
     trav |= np.where(np.isin(cls, drivable_ids(th)) & ~unknown, 0,
@@ -379,9 +383,11 @@ def costmap_from_reference(reference, x0_m, y0_m, nx, ny, cell_m=None,
     z = np.where(unknown, np.nan, mean / 100.0)      # cm -> m
 
     trav = np.zeros(z.shape, dtype=np.uint8)
-    trav |= np.where(_slope(z, cell_m) > np.tan(np.radians(t["theta_max_deg"])),
+    trav |= np.where(_slope(z, cell_m, t.get("baseline_m"))
+                     > np.tan(np.radians(t["theta_max_deg"])),
                      TRAV_SLOPE, 0).astype(np.uint8)
-    trav |= np.where(_max_step(z) > t["s_max_m"], TRAV_STEP, 0).astype(np.uint8)
+    trav |= np.where(_max_step(z, cell_m, t.get("baseline_m")) > t["s_max_m"],
+                     TRAV_STEP, 0).astype(np.uint8)
     trav |= np.where(var * 1e-4 > t["sigma2_max_m2"], TRAV_ROUGHNESS, 0).astype(np.uint8)
     trav |= np.where(n < t["n_min"], TRAV_CONFIDENCE, 0).astype(np.uint8)
 
@@ -389,25 +395,37 @@ def costmap_from_reference(reference, x0_m, y0_m, nx, ny, cell_m=None,
                    unknown, trav)
 
 
-def _neighbour_diffs(z):
-    """|z - z_nbr| over the 4-neighbourhood, nan where either side is unknown.
+def _stencil_1d(n: int, k: int):
+    """Clipped +/-k indices along one axis, and the cells each pair spans."""
+    idx = np.arange(n)
+    ip = np.minimum(idx + k, n - 1)
+    im = np.maximum(idx - k, 0)
+    span = (ip - im).astype(np.float64)
+    return ip, im, np.where(span > 0, span, np.inf)
 
-    Edges are excluded rather than wrapped: rolling would compare the north
+
+def _neighbour_diffs(z, k: int = 1):
+    """|z - z_nbr| at +/-k, nan where either side is unknown.
+
+    Edges are clipped rather than wrapped: rolling would compare the north
     edge against the south one, which is the same mistake the ring windows
-    have to avoid in `traversability.gradient`."""
-    out = []
-    for axis in (0, 1):
-        for shift in (-1, 1):
-            rolled = np.roll(z, shift, axis=axis)
-            sl = [slice(None), slice(None)]
-            sl[axis] = 0 if shift == -1 else -1
-            rolled[tuple(sl)] = np.nan          # the wrapped row/column
-            out.append(np.abs(rolled - z))
-    return out
+    have to avoid in `traversability.gradient`. A clipped edge cell differences
+    against itself and reads 0 -- no evidence of a step, which is the honest
+    value and never crosses `s_max`.
+    """
+    ip0, im0, _ = _stencil_1d(z.shape[0], k)
+    ip1, im1, _ = _stencil_1d(z.shape[1], k)
+    return [np.abs(z[ip0, :] - z), np.abs(z[im0, :] - z),
+            np.abs(z[:, ip1] - z), np.abs(z[:, im1] - z)]
 
 
-def _max_step(z):
+def _max_step(z, cell_m=None, baseline_m=None):
     """max|z - z_nbr| over the 4-neighbourhood, 0 where nothing is comparable.
+
+    The neighbour sits at the same +/-k as `_slope`, so §7.1's bits 1 and 2 are
+    both read over `baseline_m` -- one fixed physical distance -- rather than
+    over one cell, which is what put the same 12 cm kerb on two verdicts. With
+    no `cell_m` this is k=1, the one-cell form.
 
     A cell whose four neighbours are all unknown gives an all-NaN slice, and
     `np.nanmax` warns on those. The warning is not informative here -- an
@@ -418,15 +436,27 @@ def _max_step(z):
     """
     with np.errstate(invalid="ignore"), warnings.catch_warnings():
         warnings.simplefilter("ignore", RuntimeWarning)
-        stacked = np.stack(_neighbour_diffs(z))
+        k = 1 if cell_m is None else baseline_k(cell_m, baseline_m)
+        stacked = np.stack(_neighbour_diffs(z, k))
         return np.nan_to_num(np.nanmax(stacked, axis=0), nan=0.0)
 
 
-def _slope(z, cell_m):
-    """Central differences, eq. (22), on the planning lattice."""
+def _slope(z, cell_m, baseline_m=None):
+    """Central differences, eq. (22), on the planning lattice.
+
+    Over the same fixed physical baseline as `grid.traversability.gradient` --
+    see `baseline_k` there for why the stencil is a distance and not a cell.
+    At the frozen `plan.cell_m` of 0.25 m and a 0.50 m baseline this is k=1
+    and identical to the one-cell form; it is threaded through so that M*
+    follows `plan.cell_m` if that ever moves, rather than silently drifting
+    off the lattice the schedules are scored against.
+    """
+    k = baseline_k(cell_m, baseline_m)
     with np.errstate(invalid="ignore"):
-        dzdx = (np.roll(z, -1, axis=0) - np.roll(z, 1, axis=0)) / (2 * cell_m)
-        dzdy = (np.roll(z, -1, axis=1) - np.roll(z, 1, axis=1)) / (2 * cell_m)
+        ip0, im0, sp0 = _stencil_1d(z.shape[0], k)
+        ip1, im1, sp1 = _stencil_1d(z.shape[1], k)
+        dzdx = (z[ip0, :] - z[im0, :]) / (sp0 * cell_m)[:, None]
+        dzdy = (z[:, ip1] - z[:, im1]) / (sp1 * cell_m)[None, :]
         dzdx[[0, -1], :] = 0.0
         dzdy[:, [0, -1]] = 0.0
         return np.nan_to_num(np.hypot(dzdx, dzdy), nan=0.0)

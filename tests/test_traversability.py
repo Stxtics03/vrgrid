@@ -20,6 +20,7 @@ from vrgrid.grid.fusion import CLASS_MAX, initialise, pack_class
 from vrgrid.grid.quantise import quantise_variance_cm2
 from vrgrid.grid.schedule import load_thresholds
 from vrgrid.grid.traversability import (
+    baseline_k,
     bitfield,
     border_mask,
     class_ids,
@@ -278,3 +279,162 @@ def test_geometry_is_not_fabricated_against_unobserved_neighbours():
     # and a real step, between two observed cells, still fires
     soa["obs_count"][hole] = 9
     assert _bits(soa)[neighbour] & TRAV_STEP
+
+
+# --- the fixed physical baseline, §7.1 eq. (22) ------------------------------
+#
+# Eq. (22) differenced over ONE cell measures height change per metre at the
+# cell scale, so a step discontinuity reads steeper the finer the lattice.
+# Against one frozen tan(theta_max) that makes the same physical feature a wall
+# on the fine rings and flat ground on the coarse ones -- which is how the two
+# sides of eq. (23) ended up on different geometry. These tests pin the
+# invariant that fixes it: one physical feature, one verdict, every lattice.
+
+KERB_M = 0.12          # §4.1's worked example, and the synthetic scene's kerb
+POTHOLE_M = 0.40       # the synthetic scene's pothole, the real hazard
+LATTICES = [0.05, 0.10, 0.20, 0.25, 0.40, 0.80]
+
+
+def _step_grid(side, cell_m, height_m, ground_cm=0):
+    """A grid split by one straight step of `height_m` down its middle."""
+    soa = alloc_soa(side * side)
+    initialise(soa)
+    z = np.full((side, side), float(ground_cm))
+    z[:, side // 2:] += height_m * 100.0
+    soa["ground_height"][:] = z.reshape(-1).astype(np.int16)
+    soa["obs_count"][:] = 9
+    soa["semantic_class"][:] = pack_class(class_ids()["road"], 5)
+    soa["height_variance"][:] = quantise_variance_cm2(1.0)
+    return soa
+
+
+def _peak_slope(soa, side, cell_m, baseline_m):
+    dzdx, dzdy = gradient(soa["ground_height"], side, cell_m, baseline_m)
+    interior = np.hypot(dzdx, dzdy).reshape(side, side)[1:-1, 1:-1]
+    return float(interior.max())
+
+
+def _side_for(cell_m, extent_m=8.0):
+    """A window of fixed PHYSICAL extent, so the stencil always fits."""
+    return max(8, round(extent_m / cell_m))
+
+
+def test_baseline_k_falls_back_to_one_cell_when_the_ring_is_coarser():
+    """A ring whose cells already exceed the baseline cannot resolve it, and
+    says so by differencing over one cell rather than inventing a sub-cell
+    sample. That is also what makes this change a no-op at 40 cm and 80 cm."""
+    assert baseline_k(0.05, None) == 1, "no baseline configured is the old form"
+    assert baseline_k(0.05, 0.50) == 5
+    assert baseline_k(0.25, 0.50) == 1
+    assert baseline_k(0.40, 0.50) == 1
+    assert baseline_k(0.80, 0.50) == 1
+
+
+@pytest.mark.parametrize("cell_m", LATTICES)
+def test_the_stencil_spans_the_baseline_to_within_one_cell(cell_m):
+    """k is an integer, so the span it buys is the baseline rounded to the
+    lattice -- not the baseline exactly. The bound is what the invariant below
+    actually rests on, so it is asserted rather than assumed."""
+    th = load_thresholds()["traversability"]
+    baseline_m = th["baseline_m"]
+    span_m = 2.0 * baseline_k(cell_m, baseline_m) * cell_m
+    if 2.0 * cell_m <= baseline_m:
+        assert abs(span_m - baseline_m) <= cell_m
+    else:
+        assert span_m == 2.0 * cell_m, "coarser than the baseline: one cell"
+
+
+def test_the_kerb_gets_one_slope_verdict_across_every_lattice():
+    """THE invariant. A 12 cm kerb is 13.5 deg over the 0.50 m baseline, under
+    theta_max, so it is passable -- and it must be passable at 5 cm too, or a
+    fine schedule is charged regret for RESOLVING a feature the 25 cm reference
+    cannot see."""
+    th = load_thresholds()
+    baseline_m = th["traversability"]["baseline_m"]
+    tan_max = np.tan(np.radians(th["traversability"]["theta_max_deg"]))
+
+    verdicts = {}
+    for cell_m in LATTICES:
+        side = _side_for(cell_m)
+        soa = _step_grid(side, cell_m, KERB_M)
+        verdicts[cell_m] = _peak_slope(soa, side, cell_m, baseline_m) > tan_max
+
+    assert set(verdicts.values()) == {False}, (
+        f"the kerb is a wall on some lattices and not others: {verdicts}")
+
+
+def test_without_the_baseline_the_kerb_verdict_flips_with_cell_size():
+    """The regression this guards. Documented as a test so that removing
+    `baseline_m` from the config fails here loudly rather than quietly putting
+    eq. (23) back onto two lattices."""
+    tan_max = np.tan(np.radians(
+        load_thresholds()["traversability"]["theta_max_deg"]))
+
+    one_cell = {}
+    for cell_m in LATTICES:
+        side = _side_for(cell_m)
+        soa = _step_grid(side, cell_m, KERB_M)
+        one_cell[cell_m] = _peak_slope(soa, side, cell_m, None) > tan_max
+
+    assert one_cell[0.05] and one_cell[0.10], "the fine rings called it a wall"
+    assert not one_cell[0.25] and not one_cell[0.80], "the coarse ones did not"
+
+
+def test_the_pothole_rim_still_fails_wherever_the_lattice_can_resolve_it():
+    """The baseline must not buy scale-invariance by blinding the predicate to
+    a real hazard. 40 cm over the 0.50 m baseline is 38.7 deg, still over
+    theta_max -- which is why `baseline_m` is bounded above by
+    0.40/tan(theta_max) = 1.10 m and not chosen freely.
+
+    The bound is on the SPAN, not on the baseline, and a ring coarser than the
+    baseline falls back to one cell and spans 2c. At 80 cm that is 1.6 m, past
+    the bound, and the hazard stops firing -- a real limit of the coarse rings
+    and not a regression here. `uniform_80cm` already carried 0 impassable
+    cells in the survey for the same reason: a 60 cm hole does not survive an
+    80 cm cell. Asserted rather than skipped so the boundary is on the record.
+    """
+    th = load_thresholds()
+    baseline_m = th["traversability"]["baseline_m"]
+    tan_max = np.tan(np.radians(th["traversability"]["theta_max_deg"]))
+
+    fires = {}
+    for cell_m in LATTICES:
+        side = _side_for(cell_m)
+        soa = _step_grid(side, cell_m, POTHOLE_M)
+        fires[cell_m] = _peak_slope(soa, side, cell_m, baseline_m) > tan_max
+
+    for cell_m in (0.05, 0.10, 0.20, 0.25, 0.40):
+        assert fires[cell_m], (
+            f"the {POTHOLE_M} m hazard stopped firing at {cell_m} m cells")
+    assert not fires[0.80], (
+        "80 cm cells span 1.6 m, past the 1.10 m bound -- if this starts "
+        "passing, the span bound moved and the kerb invariant needs rechecking")
+
+
+def test_the_step_bit_reads_over_the_baseline_not_the_cell():
+    """Bit 2 scales the OTHER way from bit 1: on a constant grade the step per
+    neighbour grows with the cell, so a coarse map calls a ramp a kerb. Read
+    over a fixed baseline, one grade gives one step."""
+    th = load_thresholds()
+    baseline_m = th["traversability"]["baseline_m"]
+    grade = 0.25                                     # 25%, well under theta_max
+
+    steps_m, one_cell_m = {}, {}
+    for cell_m in (0.05, 0.10, 0.25):
+        side = _side_for(cell_m)
+        soa = alloc_soa(side * side)
+        initialise(soa)
+        ramp = (np.arange(side) * cell_m * grade * 100.0)[None, :]
+        soa["ground_height"][:] = (ramp * np.ones((side, 1))).reshape(-1).astype(np.int16)
+        soa["obs_count"][:] = 9
+        interior = slice(1, -1)
+        steps_m[cell_m] = float(np.median(
+            max_step_cm(soa["ground_height"], side, cell_m, baseline_m)
+            .reshape(side, side)[interior, interior])) / 100.0
+        one_cell_m[cell_m] = float(np.median(
+            max_step_cm(soa["ground_height"], side)
+            .reshape(side, side)[interior, interior])) / 100.0
+
+    assert max(steps_m.values()) - min(steps_m.values()) <= 0.03, steps_m
+    assert one_cell_m[0.25] > 4 * one_cell_m[0.05], (
+        f"one-cell steps must scale with the cell: {one_cell_m}")

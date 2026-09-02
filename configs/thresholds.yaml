@@ -16,6 +16,20 @@ traversability:
   h_vehicle_m: 1.8         # bit 0  clearance
   theta_max_deg: 20.0      # bit 1  slope, compared as tan(theta_max)
   s_max_m: 0.15            # bit 2  step, max |z_c - z_nbr| over 4-neighbours
+  baseline_m: 0.50         # bits 1 and 2 are differenced over THIS distance,
+                           # not over one cell. Without it the same 12 cm kerb
+                           # is a gradient of 1.200 at 5 cm and 0.240 at 25 cm
+                           # against one frozen theta_max, so a feature is a
+                           # wall on the fine rings and flat ground on the
+                           # coarse ones and on M* -- the eq. (23) asymmetry.
+                           # Bounded by the scene, not by taste: it must be
+                           # > 0.12/tan(20 deg) = 0.33 m for the 12 cm kerb to
+                           # read passable at EVERY cell size, and
+                           # < 0.40/tan(20 deg) = 1.10 m for the 40 cm pothole
+                           # rim to still fail. 0.50 m is the middle of that
+                           # window. A ring coarser than baseline_m/2 falls
+                           # back to one cell, so this is a no-op at 40 cm and
+                           # 80 cm and at the 25 cm planning lattice.
   sigma2_max_m2: 0.0025    # bit 3  roughness, (5 cm)^2
   n_min: 3                 # bit 5  confidence -- below this, fail safe
   drivable_classes: [road, parking, sidewalk, other-ground, terrain]  # bit 4

@@ -477,11 +477,24 @@ bit 4  class       class ∉ drivable_set
 bit 5  confidence  n                 <  n_min          (fail safe)
 ```
 
-Gradient by central differences over the four neighbours, scaled by the cell size of the ring:
+Gradient by central differences over the four neighbours, differenced over a **fixed physical baseline** `b` rather than over one cell:
 
 ```
-∂z/∂x ≈ (z_{i+1,j} − z_{i−1,j}) / (2 c_L)                           (22)
+k_L  = max(1, round(b / (2 c_L)))                                   (22a)
+∂z/∂x ≈ (z_{i+k,j} − z_{i−k,j}) / (2 k_L c_L)                       (22)
 ```
+
+`b` is `traversability.baseline_m`. With `b ≤ 2 c_L` this is `k_L = 1` and (22) is the one-cell form the section was originally written with.
+
+> **Note, 2 Sep — Shrestha. Why (22) is differenced over a distance and not over a cell.**
+>
+> *One cell is not a fixed baseline, so eq. (22) as first written measured height change per metre **at the cell scale**. A step discontinuity therefore reads steeper the finer the lattice: §4.1's 12 cm kerb is a gradient of 1.200 at 5 cm, 0.600 at 10 cm, 0.300 at 20 cm and 0.240 at 25 cm — against one frozen `tan(θ_max) = 0.364`. The same physical kerb was a **wall on the fine rings and flat ground on the coarse ones and on M\***, which is one of the two ways the sides of eq. (23) came to be evaluated on different geometry. Bit 2 scaled the other way for the same reason: on a constant grade the per-neighbour step grows with the cell, so a coarse map calls a ramp a kerb. Both bits now read over `b`.*
+>
+> ***`b` is bounded by the scene, not chosen by taste.*** *It must be large enough that the 12 cm kerb reads passable everywhere — `b > 0.12/tan(θ_max) = 0.33 m` — and small enough that the 40 cm pothole rim still fails — `b < 0.40/tan(θ_max) = 1.10 m`. `b = 0.50 m` is the middle of that window. The bound is on the **span** `2 k_L c_L`, not on `b`: a ring coarser than `b/2` falls back to `k_L = 1` and spans `2 c_L`, so at 80 cm the span is 1.60 m, past the bound, and a 40 cm hazard stops firing. That is a real limit of the coarse rings — `uniform_80cm` already carried zero impassable cells because a 60 cm hole does not survive an 80 cm cell — and it is asserted in `test_the_pothole_rim_still_fails_wherever_the_lattice_can_resolve_it` rather than left to be discovered.*
+>
+> ***The stencil is clipped, not wrapped, and the border rule is unchanged.*** *Near the window edge the stencil shortens and the divisor shortens with it, so the quotient stays a gradient in m/m rather than one scaled by a distance that was never spanned. Only the outermost cell of each edge is one-sided, and it still carries bit 5 by the rule below. Widening the border mask to `k_L` cells was rejected: at 5 cm that is a 5-cell border, ~5% of a ring, and inflating the confidence bit is the very confound §8.2's `w_unknown` accounting had just been fixed for.*
+>
+> ⚑ ***On the synthetic scene this changes no R(S).*** *There, M_S is already blocked down to `plan.cell_m` before §7.1 is applied, so both sides were at 25 cm and `k_L = 1` either way. What it fixes is the **map's own** traversability layer, where a fine ring called a kerb a wall and a coarse ring did not — the layer the dashboard, ghost removal and the per-ring table all read, and the one that reaches the planner on 07/08. Expect the effect on real data, not on the synthetic sweep.*
 
 ⚑ **Geometry decides, semantics filters.** A road with a 40 cm pothole has class `road` and is not drivable; a packed grass verge has class `vegetation` and often is. Class is one bit among six, not the decision.
 
