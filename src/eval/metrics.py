@@ -97,23 +97,33 @@ the measurement is `scripts/`-free on purpose: it is a one-off, and it wants
 re-running on real data, where the rear band has a kerb in it and this
 sequence has smooth analytic terrain.
 
-⚑ **THE SIGN OF THE CORRECTION IS NOT SETTLED, and it is scene-dependent.**
-Every before/after number above is the synthetic sequence, where dropping the
-stale cells LOWERS RMSE -- the stale value was written at grazing incidence on
-the 6% ramp and is worse than the live annulus. A second measurement, reported
-3 Sep against seq 07/08, found the opposite: RMSE understated by 3-12% across
-rings 1-3, so dropping the stale cells RAISES it. Both are plausible, because
-which population is the harder ground is a property of the scene -- on real
-urban data ring 2's stale interior is road the vehicle has driven over, which
-is flatter than its live 25-50 m annulus of verges and facades.
+⚑ **THE SIGN OF THE CORRECTION IS NOT SETTLED, and no figure for it is
+recorded here on purpose.** Every before/after number above is the synthetic
+sequence, where dropping the stale cells LOWERS RMSE -- the stale value was
+written at grazing incidence on the 6% ramp and is worse than the live
+annulus.
 
-That measurement could not be reproduced here: there is no data root on this
-machine (`VRGRID_DATA_ROOT` unset, `data/` holds only its README) and no M*
-artefact for either sequence. **So the direction of this correction on real
-data is UNVERIFIED, and no report sentence may claim it improves our numbers.**
-What is settled is the mechanism, the population size, and that the confound
-was asymmetric across the schedules §8.2 compares. Re-measure on 07/08 the
-moment M* exists.
+An external measurement against seq 07/08 was reported on 3 Sep and revised
+the same day: first as a consistent 3-12% UNDERSTATEMENT, then withdrawn in
+favour of "no consistent bias, -40% to +21% depending on ring, sequence and
+frame count". Its traced example was revised too -- 350.7 cm retracted as a
+separate M* defect, restated as 169.5 cm. Neither figure is reproducible here:
+there is no data root on this machine (`VRGRID_DATA_ROOT` unset, `data/` holds
+only its README) and no M* artefact for either sequence.
+
+So the honest state is that the direction on real data is **unknown**, not
+that it is any particular percentage. A withdrawn number quoted as if it stood
+is worse than no number, which is why the 3-12% that was briefly written into
+this file, §9.2 and `known-limitations.md` has been taken out rather than
+swapped for its replacement.
+
+⚑ And an inconsistent sign is an argument FOR this fix, not a reason to weigh
+it against the calendar. A bias with a known direction can be corrected for in
+the write-up without touching the metric; one that swings with where a
+sequence's rough terrain happens to fall relative to the stale region cannot
+be. What is settled is the mechanism, the population size, and that the
+confound was asymmetric across the schedules §8.2 compares. Re-measure on
+07/08 the moment M* exists.
 """
 
 import numpy as np

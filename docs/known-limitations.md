@@ -116,18 +116,30 @@ on the cell centre — the same function `query()` routes with, pinned against
 `slot_of` rather than asserted. It lives in `metrics._ring_cells`, so all four
 §9.2/§9.3 metrics inherit it.
 
-**⚑ What is NOT settled: the direction.** On the synthetic sequence the fix
-*lowers* RMSE (ring 1 0.40 → 0.37 cm, ring 2 0.37 → 0.32 cm) — there the stale
-value was written at grazing incidence on the terrain's 6% ramp and is worse
-than the live annulus. A measurement against seq 07/08 reports the opposite:
-RMSE **understated by 3–12%** across rings 1–3, so the fix *raises* it. Both
-are plausible; which population is the harder ground is a property of the
-scene, and on real urban data ring 2's stale interior is road already driven
-over, flatter than its live 25–50 m annulus. **That measurement has not been
-reproduced in this repo** — there is no data root on the machine and no `M*`
-artefact for either sequence (see limitation 2). **Until it is, no per-ring
-RMSE figure should be quoted as improved by this fix, in either direction.**
-The mechanism, the population size, and the fix are settled; the sign is not.
+**⚑ What is NOT settled: the direction, and no figure for it is quoted here.**
+On the synthetic sequence the fix *lowers* RMSE (ring 1 0.40 → 0.37 cm, ring 2
+0.37 → 0.32 cm) — there the stale value was written at grazing incidence on the
+terrain's 6% ramp and is worse than the live annulus.
+
+An external measurement against seq 07/08 was reported on 3 Sep and revised the
+same day: first as a consistent **3–12% understatement**, then withdrawn for
+**"no consistent bias, −40% to +21%"** depending on ring, sequence and frame
+count. Neither is reproducible in this repo — there is no data root on the
+machine and no `M*` artefact for either sequence (see limitation 2). The
+earlier figure was briefly written into this file and has been removed rather
+than replaced, because a withdrawn number quoted as if it stood is worse than
+no number.
+
+**So the direction on real data is unknown, and no per-ring RMSE figure should
+be quoted as improved or worsened by this fix until it is re-measured on
+07/08.** The mechanism, the population size, the schedule asymmetry and the fix
+are settled; the sign is not.
+
+**An inconsistent sign argues *for* the fix.** A bias with a known direction
+could be corrected for in the write-up without touching the metric; one that
+swings with where a sequence's rough terrain falls relative to the stale region
+cannot be. The fix is already in and tested, so there is no timeline trade to
+make here.
 
 **Why it mattered more than its size.** The confound was asymmetric across the
 schedules §8.2 compares. A uniform baseline has one ring, `ring_of` always
@@ -137,10 +149,20 @@ none. Worst-ring RMSE before → after: 5/10/20/40 0.40 → 0.37, 5/10/50
 0.46 → 0.37, uniform 10 cm 0.35 → 0.35, uniform 20 cm 0.41 → 0.41. Only our own
 schedules move.
 
-**ρ is not affected, and it is the headline.** The coarsening ratio shifts by
-at most 0.06 on the synthetic sequence (independent measurement: 0.034), so the
-foveation claim stands on both readings regardless of how the RMSE sign
-resolves.
+**ρ moves, but not enough to change what it says.** The coarsening ratio shifts
+by up to 0.06 per ring on the synthetic sequence (ring 1 1.50 → 1.42, ring 2
+1.37 → 1.29, ring 3 unchanged). The external measurement reports up to −12.5%,
+unreproducible here for the reason above. On either reading ρ stays in the
+"coarsening cost about what the terrain itself costs" band, so the foveation
+finding survives in shape — but **it is not "unaffected", and no ρ figure
+should be quoted to two decimals until it is re-measured on 07/08.**
+
+⚑ **Attribution, so it is not repeated: there is no median ρ of 1.45 in this
+project.** The only 1.450 on record is a **plan-regret** `R(S)` at 24 frames
+(`scripts/regret_plot.py`; research log, 2 Sep) — and it sits in the paragraph
+concluding that the money plot does not yet show what it was built to show,
+because `PLAN_LANE_CELLS` runs the path off the hazards. ρ and `R(S)` are
+different metrics and must not be reconciled against one another.
 
 **⚑ A separate caveat on ρ's denominator.** `spread` is estimated from the 5 cm
 reference cells of `F(c)` that `M*` observed. Median coverage on the 12-frame
