@@ -170,40 +170,54 @@ cells at 1.00× — and a graded curve needs a graded cost field. The real §8.2
 plot needs sequence 08, which is now on disk. See
 `docs/decisions-2026-09-02.md` for the query-design question this leaves open.
 
-### The money plot on real data — first run, and it is not monotone
+### The money plot on real data — a curve now, and what it does and does not show
 
-`regret_plot.py --seq 08` now exists (it had no `--seq` either) and has run on
-real sequence 08, 40 frames:
+`regret_plot.py --seq` exists (it had no `--seq`), R(S) is averaged over 64
+seeded planning queries instead of one, and `common_support` equalises evidence
+rather than only coverage. Sequence 08, four window lengths:
 
-| schedule | MB | cells | R(S) | Fréchet |
+| schedule | MB | @20 | @40 | @80 | @160 |
+|---|---|---|---|---|---|
+| 5_10_20_40 | 29.06 | 0.488 | 0.171 | 0.714 | 0.758 |
+| 5_10_50 | 23.62 | 0.488 | 0.171 | 0.714 | 0.758 |
+| uniform 10 cm | 18.19 | 0.231 | 0.084 | 0.759 | 0.597 |
+| uniform 20 cm | 10.71 | 0.251 | 0.104 | 0.827 | 0.791 |
+| uniform 40 cm | 7.82 | 0.402 | 0.182 | 0.918 | 0.838 |
+| uniform 80 cm | 7.09 | 0.798 | 0.130 | 1.165 | 0.819 |
+
+**What holds.** The uniform series rises with cell size at every window —
+strictly at 20 and 80 frames, and at 40 and 160 except for the 80 cm point
+dipping below 40 cm. Fréchet distance tracks it. Before averaging, the same
+runs gave multiples of the 0.207 lattice quantum and an ordering that inverted
+with the frame count; that is gone.
+
+**What does not.** The magnitude still moves with the window (5_10_20_40 reads
+0.171 at 40 frames and 0.758 at 160), so **R(S) is comparable across schedules
+at a fixed window and not across windows.** Any quoted number must state its
+frame count.
+
+**And the frozen schedules are not winning.** 5_10_20_40 scores worse than
+uniform 10 cm at three of four windows. Before reading that as a result, see
+the extent mismatch below — it is very likely an artifact of the x-axis.
+
+### ⚑ The money plot's memory axis compares maps of different extent
+
+The uniform baselines are built at `half_width_m=24.0`; the frozen schedules
+reach 100 m:
+
+| schedule | half-width | cells | MB | area |
 |---|---|---|---|---|
-| 5_10_20_40 | 29.06 | 745,000 | 0.207 | 0.75 m |
-| 5_10_50 | 23.62 | 520,000 | 0.207 | 0.75 m |
-| uniform 10 cm | 18.19 | 230,400 | **0.000** | 0.25 m |
-| uniform 20 cm | 10.71 | 57,600 | **0.000** | 0.25 m |
-| uniform 40 cm | 7.82 | 14,400 | 0.207 | 0.25 m |
-| uniform 80 cm | 7.09 | 3,600 | **inf** | 1.25 m |
+| 5/10/20/40 | **100 m** | 745,000 | 29.06 | 0.0400 km² |
+| uniform 10 cm | **24 m** | 230,400 | 18.19 | 0.0023 km² |
 
-**The script's own guard fires: `NOT MONOTONE, 5_10_50 → uniform_10cm`.** A
-coarser map scoring lower regret than a finer one is the opposite of what §8.2
-claims, and it is not a rendering problem — the two frozen schedules take a
-one-cell lateral jog that uniform 10 cm and 20 cm do not.
+**5/10/20/40 maps 17× the area for 1.6× the memory**, and the figure's x-axis
+puts those side by side as though they were comparable. Every "we cost more
+than uniform 10 cm" reading in the project, including several made while
+investigating this, ignored it.
 
-0.207 is again exactly `2·(√2−1)·plan.cell_m`, the **smallest non-zero regret
-the 25 cm planning lattice can express**. So the honest reading is that on this
-window every schedule down to 40 cm makes either the same decision or a
-one-cell-different one, and the differences sit at the lattice floor rather
-than anywhere a curve could be drawn through.
-
-The one real result is **uniform 80 cm at `inf`** — it plans through something
-M\* calls impassable. That is a safety failure rather than a worse route, and
-it is the honest shape of the claim: coarsening is free until it is not, and
-between 40 cm and 80 cm it stops being free.
-
-**What this figure cannot yet do is show a knee.** Four of six schedules are at
-0.000 or the lattice quantum. Whether that is the planning query (it runs one
-lane, longitudinally — see `docs/decisions-2026-09-02.md`, Decision 4) or the
-40-frame window is untested; both are cheap to vary and neither has been.
+Fixed properly this is an argument *for* foveation rather than against it, but
+it changes what every point on the plot means, so it has not been changed here.
+The figure should either match the extents or state the ratio on its face.
 
 ### Scope
 
