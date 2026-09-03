@@ -6,7 +6,11 @@ files and 16 of them are over GitHub's 100 MB per-file limit, so the artifacts
 themselves cannot live in the repo. This script is what makes that acceptable
 -- it is the durable half, and it regenerates the whole set from the sequences.
 
-    python scripts/gen_demo_rrds.py <output-dir>
+    python scripts/gen_demo_rrds.py [output-dir] [shot-name-filter]
+
+Both arguments are optional: the output directory defaults to the repo's own
+`demo/` -- the same baked-scene directory `scripts/demo.sh` writes -- and with
+no filter every shot in the list below is regenerated.
 
 ⚑ RECORDINGS GO STALE AGAINST THE ENGINE, and silently. Twelve of the fourteen
   shots were generated on 1 Sep at 06:03-06:10; the elevation fix (`51bff0f`)
@@ -27,14 +31,21 @@ from pathlib import Path
 
 import numpy as np
 import rerun as rr
-
 from vrgrid.dash.pipeline_view import PipelineView
 from vrgrid.grid.schedule import load as load_sched
 from vrgrid.perception import ground, loader, range_image, reflectivity, semantics, transforms
 from vrgrid.run.__main__ import PerceptionFrame
 from vrgrid.run.engine import MapEngine
 
-OUT = Path(r"C:/Users/JAIPRE~1/AppData/Local/Temp/claude/c--Users-JAIPREET-SINGH-OneDrive-Documents-Sih/57bcc393-2146-4b8e-b77e-1313d80fb54a/scratchpad/demo_final")
+# ⚑ The output directory is an ARGUMENT, never a constant. This line shipped as
+#   one author's machine-local Windows temp path, so the script whose entire
+#   purpose is reproducibility regenerated nothing on any other machine -- and
+#   argv[1] was bound to the shot filter, so the invocation in the docstring
+#   above silently wrote to that path too. Default is the repo's own `demo/`:
+#   the bake directory `scripts/demo.sh` already uses and `.gitignore` excludes.
+REPO = Path(__file__).resolve().parent.parent
+OUT = Path(sys.argv[1]) if len(sys.argv) > 1 else REPO / "demo"
+ONLY = sys.argv[2] if len(sys.argv) > 2 else None
 SCHED = load_sched("5/10/20/40")
 
 
@@ -85,31 +96,24 @@ def shot(name, seq, lo, hi, *, warmup=0, color_by="class", palette="semantickitt
     occ_now = len(engine.occupied_slots()) if engine is not None else 0
     print(f"  {name:42} frames {start}-{hi-1} ({n})  {sz:6.1f} MB  {dt:5.1f}s  "
           f"occupied@end={occ_now:,}")
-    return dict(name=name, frames=n, range=(start, hi - 1), mb=round(sz, 1),
-                occupied_end=occ_now)
+    return {"name": name, "frames": n, "range": (start, hi - 1), "mb": round(sz, 1),
+            "occupied_end": occ_now}
 
 
-ONLY = sys.argv[1] if len(sys.argv) > 1 else None
 RESULTS = []
 
-
-def run(r):
-    if ONLY is None or ONLY in r["name"]:
-        pass
-
-
 shots = [
-    ("shot1_seq00_0-160_class_groups",  dict(seq="00", lo=0, hi=160, color_by="class", palette="groups")),
-    ("shot1lean_seq00_0-160_class_groups_nomap", dict(seq="00", lo=0, hi=160, color_by="class", palette="groups", no_map=True)),
-    ("shot2_seq00_0-160_occupied_rings", dict(seq="00", lo=0, hi=160, color_by="class")),
-    ("shot3a_seq00_5-20_ghost_ON",      dict(seq="00", lo=0, hi=22, color_by="motion")),
-    ("shot3b_seq00_5-20_ghost_OFF",     dict(seq="00", lo=0, hi=22, color_by="motion", show_ghosts=True)),
+    ("shot1_seq00_0-160_class_groups",  {"seq": "00", "lo": 0, "hi": 160, "color_by": "class", "palette": "groups"}),
+    ("shot1lean_seq00_0-160_class_groups_nomap", {"seq": "00", "lo": 0, "hi": 160, "color_by": "class", "palette": "groups", "no_map": True}),
+    ("shot2_seq00_0-160_occupied_rings", {"seq": "00", "lo": 0, "hi": 160, "color_by": "class"}),
+    ("shot3a_seq00_5-20_ghost_ON",      {"seq": "00", "lo": 0, "hi": 22, "color_by": "motion"}),
+    ("shot3b_seq00_5-20_ghost_OFF",     {"seq": "00", "lo": 0, "hi": 22, "color_by": "motion", "show_ghosts": True}),
     # the map-level ghost demo needs trail accumulation -- 0-60 shows the real delta
-    ("shot3c_seq00_0-60_ghost_ON",      dict(seq="00", lo=0, hi=60, color_by="motion")),
-    ("shot3d_seq00_0-60_ghost_OFF",     dict(seq="00", lo=0, hi=60, color_by="motion", show_ghosts=True)),
-    ("shot4a_seq07_660-690_ghost_ON",   dict(seq="07", lo=660, hi=691, warmup=45, color_by="motion")),
-    ("shot4b_seq07_660-690_ghost_OFF",  dict(seq="07", lo=660, hi=691, warmup=45, color_by="motion", show_ghosts=True)),
-    ("shot5_seq00_4420-4470_reflectivity", dict(seq="00", lo=4420, hi=4471, warmup=12, color_by="reflectivity")),
+    ("shot3c_seq00_0-60_ghost_ON",      {"seq": "00", "lo": 0, "hi": 60, "color_by": "motion"}),
+    ("shot3d_seq00_0-60_ghost_OFF",     {"seq": "00", "lo": 0, "hi": 60, "color_by": "motion", "show_ghosts": True}),
+    ("shot4a_seq07_660-690_ghost_ON",   {"seq": "07", "lo": 660, "hi": 691, "warmup": 45, "color_by": "motion"}),
+    ("shot4b_seq07_660-690_ghost_OFF",  {"seq": "07", "lo": 660, "hi": 691, "warmup": 45, "color_by": "motion", "show_ghosts": True}),
+    ("shot5_seq00_4420-4470_reflectivity", {"seq": "00", "lo": 4420, "hi": 4471, "warmup": 12, "color_by": "reflectivity"}),
     # ⚑ The shot `docs/demo-safe-ranges.md` has always listed -- "Ghost toggle at
     #   elevation | 08 | any climbed stretch" -- and that never existed as a
     #   recording until 3 Sep. It is the one that proves the elevation fix:
@@ -117,12 +121,25 @@ shots = [
     #   cleared ZERO cells per frame anywhere above +20.7 m
     #   (`known-limitations.md` §1). Post-fix it clears a median 30,851.
     ("shot8a_seq08_3000-3060_climb_ghost_ON",
-     dict(seq="08", lo=3000, hi=3061, warmup=40, color_by="motion")),
+     {"seq": "08", "lo": 3000, "hi": 3061, "warmup": 40, "color_by": "motion"}),
     ("shot8b_seq08_3000-3060_climb_ghost_OFF",
-     dict(seq="08", lo=3000, hi=3061, warmup=40, color_by="motion", show_ghosts=True)),
+     {"seq": "08", "lo": 3000, "hi": 3061, "warmup": 40, "color_by": "motion", "show_ghosts": True}),
 ]
 
 if __name__ == "__main__":
+    # ⚑ Same data-root trap `scripts/demo.sh` resolves: the loader wants the
+    #   directory holding poses/ and sequences/, which in this clone is
+    #   data/dataset and NOT data. Unset, the first shot dies 60 frames deep in
+    #   a FileNotFoundError naming a relative path, which reads as missing data
+    #   rather than a mispointed root. Say it once, up front, before the work.
+    if not (loader.GT_POSES_DIR.is_dir() and loader.VELODYNE_DIR.is_dir()):
+        sys.exit(
+            f"data root {loader.DATA_ROOT} does not hold poses/ and sequences/.\n"
+            f"Set VRGRID_DATA_ROOT to the directory that does "
+            f"(in this clone: {REPO / 'data' / 'dataset'}), or use ./scripts/demo.sh, "
+            f"which resolves it for you."
+        )
+    OUT.mkdir(parents=True, exist_ok=True)
     print(f"generating into {OUT}")
     for name, kw in shots:
         if ONLY and ONLY not in name:
