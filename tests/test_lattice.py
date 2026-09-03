@@ -12,6 +12,7 @@ from fractions import Fraction
 import numpy as np
 import pytest
 from vrgrid.cell import CELL_FIELDS
+from vrgrid.gpu.allocators import EMPTY_CELL
 from vrgrid.grid.lattice import (
     OUTSIDE,
     alloc_ring_buffers,
@@ -21,6 +22,7 @@ from vrgrid.grid.lattice import (
     migrate_ring,
     ring_extent,
     ring_of,
+    ring_slice,
     toroidal_shift,
 )
 from vrgrid.grid.schedule import load
@@ -392,6 +394,11 @@ def test_toroidal_shift_round_trip_is_bit_exact():
     everywhere provided that strip started out empty -- which is the only
     reading under which (c) is literally true. The general case is the test
     below.
+
+    "Empty" is `EMPTY_CELL`, not zero. Nine fields are zero when empty and
+    `ceiling_height` is the sentinel `CEILING_NONE`, so the strip is seeded to
+    the per-field empty value rather than to 0 -- otherwise this test asserts
+    the strip clear that made the whole map untraversable behind the vehicle.
     """
     s = load("5/10/20/40")
     zeros = np.zeros((len(s.rings), 2), dtype=np.int64)
@@ -405,7 +412,8 @@ def test_toroidal_shift_round_trip_is_bit_exact():
         _fill(probe, SEED)
         toroidal_shift(probe, s, delta)
         for name, _ in CELL_FIELDS:
-            soa[name][probe[name] == 0] = 0
+            empty = EMPTY_CELL.get(name, 0)
+            soa[name][probe[name] == empty] = empty
         before = {name: soa[name].copy() for name, _ in CELL_FIELDS}
 
         toroidal_shift(soa, s, delta)
@@ -433,6 +441,68 @@ def test_toroidal_shift_only_ever_loses_the_exposed_strip():
     assert changed.any()
     assert (soa["ground_height"][changed] == 0).all()
     assert int(changed.sum()) <= 6_700  # the strip, and nothing beyond it
+
+
+def test_a_shift_in_x_clears_a_column_and_a_shift_in_y_clears_a_row():
+    """The axis the strip is taken along, which no other test here pins.
+
+    A slot is `iy * side + ix`, so `reshape(n, n)` is indexed `[iy, ix]`:
+    moving in **x** uncovers a strip of constant `ix`, a numpy COLUMN, and
+    moving in y uncovers a row. `_clear_strip` had the two the other way
+    round, so a pure +x shift kept the stale cells in the strip the window had
+    just uncovered and wiped live ones on an edge that had not moved.
+
+    It survived because every other shift test here shifts by +d and then -d.
+    That is symmetric in this bug -- the same wrong strip is cleared twice --
+    so the round trip still comes back clean and the O(perimeter) count is
+    still right. Only an asymmetric shift, read per axis, can see it.
+    """
+    s = load("5/10/20/40")
+    ring = len(s.rings) - 1
+    n = ring_extent(s, ring)
+
+    for delta, want_axis in (((1, 0), 1), ((0, 1), 0), ((-2, 0), 1), ((0, -2), 0)):
+        soa = alloc_ring_buffers(s)
+        sl = ring_slice(s, ring)
+        soa["obs_count"][sl] = 1                      # every cell observed
+        toroidal_shift(soa, s, delta)
+        view = soa["obs_count"][sl].reshape(n, n)
+
+        rows = np.flatnonzero((view == 0).all(axis=1))
+        cols = np.flatnonzero((view == 0).all(axis=0))
+        cleared, untouched = (cols, rows) if want_axis == 1 else (rows, cols)
+        moved = delta[0] or delta[1]
+
+        assert len(untouched) == 0, (
+            f"d={delta} cleared a strip along the wrong axis: {untouched}")
+        # +d exposes the leading edge at index 0..|d|-1; -d the trailing edge.
+        expected = (list(range(moved)) if moved > 0
+                    else list(range(n + moved, n)))
+        assert list(cleared) == expected, f"d={delta}"
+
+
+def test_a_shifted_strip_comes_back_empty_not_zeroed():
+    """`ceiling_height` 0 is "something solid at the ground datum", not "empty".
+
+    `gpu.shift.shift()` has always filled the strip with `EMPTY_CELL` and says
+    why: left at 0, `ceiling - ground < h_vehicle` holds across the strip and
+    §7.1 bit 0 marks it untraversable forever, because nothing ever raises a
+    ceiling back up. `toroidal_shift` zeroed instead, so the two spellings of
+    one operation disagreed about what an empty cell is and a map that booted
+    correct degraded as soon as the vehicle moved.
+    """
+    s = load("5/10/20/40")
+    ring = len(s.rings) - 1
+    soa = alloc_ring_buffers(s)
+    sl = ring_slice(s, ring)
+    soa["ceiling_height"][sl] = 42                    # anything but the sentinel
+
+    toroidal_shift(soa, s, (1, 0))
+    n = ring_extent(s, ring)
+    exposed = soa["ceiling_height"][sl].reshape(n, n)[:, 0]
+
+    assert (exposed == EMPTY_CELL["ceiling_height"]).all()
+    assert EMPTY_CELL["ceiling_height"] != 0
 
 
 def test_toroidal_shift_is_o_perimeter_not_o_area():

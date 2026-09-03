@@ -21,6 +21,7 @@ near a boundary a point falls in both cells or neither.
 
 import numpy as np
 from vrgrid.cell import CELL_FIELDS, alloc_soa
+from vrgrid.gpu.allocators import EMPTY_CELL
 
 # A point beyond the last ring is not in the map. It is not ring 0 either.
 OUTSIDE = -1
@@ -615,9 +616,16 @@ def toroidal_shift(soa, schedule, delta_cells) -> int:
     rings therefore shift by a whole multiple, k_coarsest / k_L, which is an
     integer because the schedule validator demands integer ratios.
 
-    Newly exposed cells are zeroed, which is the correct UNKNOWN state rather
-    than a convenient one: obs_count = 0, and §10.1 decides unknown by
-    observation count, never by log-odds near zero.
+    Newly exposed cells get `allocators.EMPTY_CELL`, the same state
+    `allocate()` starts the map in -- NOT raw zeros. Nine of the ten fields
+    really are zero when empty (obs_count = 0, and §10.1 decides unknown by
+    observation count, never by log-odds near zero); `ceiling_height` is the
+    one whose empty value is a sentinel. Zeroing it says "something solid at
+    the ground datum", so `ceiling - ground < h_vehicle` holds across the
+    whole strip and §7.1 bit 0 marks it untraversable forever -- nothing ever
+    raises a ceiling back up. `gpu.shift.shift()` has always filled this way;
+    this function zeroed instead, so the two spellings of one operation
+    disagreed about what an empty cell is.
 
     Returns the number of cells cleared, so the O(perimeter) claim is
     measurable rather than asserted.
@@ -632,6 +640,9 @@ def toroidal_shift(soa, schedule, delta_cells) -> int:
         scale = k_coarsest // schedule.k(level)  # integer by validate()
         step = (dx * scale, dy * scale)
 
+        # `axis` here is a WORLD axis: 0 is x, 1 is y, matching the (dx, dy) of
+        # `delta_cells` and the (x0, y0) columns of `ring_origin`. It is not a
+        # numpy axis -- see `_clear_strip`, which is where the two meet.
         for axis in (0, 1):
             s = step[axis]
             if s == 0:
@@ -647,21 +658,34 @@ def toroidal_shift(soa, schedule, delta_cells) -> int:
 
 
 def _clear_strip(soa, schedule, level, n, start, width, axis) -> int:
-    """Zero `width` wrapped rows (axis 0) or columns (axis 1) of one ring."""
+    """Empty `width` wrapped lattice lines of one ring, world `axis` 0 = x.
+
+    ⚑ The world axis and the numpy axis are TRANSPOSED, and getting it wrong
+      is silent. A slot is `iy * W + ix` (`bin_points`, `RingBuffer.slot`), so
+      `reshape(n, n)[a, b]` is `[iy, ix]`: moving in **x** exposes a strip of
+      constant `ix`, which is a numpy **column**, `view[:, idx]`. This
+      function ran the two the other way round, so a pure +x shift cleared a
+      row of constant y -- it kept stale cells in the strip the window had
+      actually just uncovered and wiped live ones on an edge that had not
+      moved. Every test shifted and then un-shifted by the same vector, which
+      is symmetric in the bug, so nothing caught it.
+
+    Filled with `EMPTY_CELL`, not zeros: see `toroidal_shift`.
+    """
     if width <= 0:
         return 0
+    sl = ring_slice(schedule, level)
     if width >= n:
         for name, _ in CELL_FIELDS:
-            soa[name][ring_slice(schedule, level)] = 0
+            soa[name][sl] = EMPTY_CELL.get(name, 0)
         return n * n
 
     idx = np.arange(start, start + width) % n
-    sl = ring_slice(schedule, level)
     for name, _ in CELL_FIELDS:
         view = soa[name][sl].reshape(n, n)
         if axis == 0:
-            view[idx, :] = 0
+            view[:, idx] = EMPTY_CELL.get(name, 0)   # x moved -> a column strip
         else:
-            view[:, idx] = 0
+            view[idx, :] = EMPTY_CELL.get(name, 0)   # y moved -> a row strip
         soa[name][sl] = view.reshape(-1)
     return width * n
