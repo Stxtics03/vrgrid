@@ -110,15 +110,153 @@ def test_map_hash_distinguishes_fields_with_equal_contents():
     assert map_hash(a) != map_hash(b)
 
 
-@pytest.mark.skip(reason="needs src/perception/loader.py — JP")
+# --- the whole-pipeline gate -------------------------------------------------
+#
+# These two ran as `@pytest.mark.skip` + `raise NotImplementedError` until
+# 4 Sep, on reasons that had both expired: "needs src/perception/loader.py --
+# JP" (`loader.py` is 314 lines and every other test in the suite gates on its
+# data) and "needs the full frame loop -- Day 2" (`run/engine.py` is 435 lines
+# and `tests/test_engine.py` drives it).
+#
+# A skip is invisible in a green run, so `make test-determinism` reported a
+# passing CI-blocking gate while testing only `scatter` -- the stage where the
+# integers already made the answer obvious -- and never the fuse, shift,
+# datum-rebase and cleanup stages composed, which is where an ordering bug
+# would actually come from.
+
+
+def _engine_sequence(n_frames, speed_ms, seed=0):
+    """A synthetic drive: static scene, vehicle moving, so the toroidal shift
+    and the datum tracker are both on the path being hashed.
+
+    Deliberately not a still vehicle. A stationary engine never shifts a ring
+    window, and the shift is the one stage that mutates cells it was not handed
+    -- exactly the kind of thing that has an ordering to get wrong.
+    """
+    from types import SimpleNamespace
+
+    ri = pytest.importorskip("vrgrid.perception.range_image")
+    rng = np.random.default_rng(seed)
+    n_g, n_w = 6000, 9000
+    r = rng.uniform(4.0, 12.0, n_g)
+    a = rng.uniform(-np.pi, np.pi, n_g)
+    ground = np.column_stack([r * np.cos(a), r * np.sin(a), np.full(n_g, -1.73)])
+    wall = np.column_stack([np.full(n_w, 30.0), rng.uniform(-8.0, 8.0, n_w),
+                            rng.uniform(-4.0, 2.0, n_w)])
+    pts = np.vstack([ground, wall])
+    is_ground = np.zeros(len(pts), bool)
+    is_ground[:n_g] = True
+
+    p4 = np.column_stack([pts, np.full(len(pts), 0.5)])
+    image, inverse = ri.project(p4)
+    for i in range(n_frames):
+        ego = np.array([i * speed_ms, 0.0, i * 0.25])
+        yield SimpleNamespace(
+            index=i, points_sensor=p4,
+            points_world=pts + np.array([ego[0], ego[1], 1.73 + ego[2]]),
+            pose=np.eye(4)[:3], vehicle_xyz_world=ego,
+            semantic=np.zeros(len(pts), np.int8),
+            moving=np.zeros(len(pts), bool), ground=is_ground,
+            reflectivity8=np.full(len(pts), 100, np.uint8),
+            range_image=image, inverse_index=inverse)
+
+
+def _run_engine(n_frames=12, speed_ms=2.0, seed=0):
+    from vrgrid.grid.schedule import load
+    from vrgrid.run.engine import MapEngine
+
+    engine = MapEngine(load("5/10/20/40"), max_points=40_000,
+                       max_candidates=80_000, ghost_removal=True)
+    for frame in _engine_sequence(n_frames, speed_ms, seed):
+        engine.step(frame)
+    return engine
+
+
+@pytest.mark.determinism
+def test_the_whole_frame_loop_replays_identically():
+    """Every stage composed -- shift, datum re-base, bin, scatter, fuse,
+    cleanup -- twice, byte-identical.
+
+    This is the gate `make test-determinism` is supposed to be enforcing. The
+    scatter-level tests above cannot see a stage that is not scatter.
+    """
+    a, b = _run_engine(), _run_engine()
+    assert map_hash(a.handle.grid) == map_hash(b.handle.grid)
+    assert a.z_datum == b.z_datum
+
+
+@pytest.mark.determinism
+def test_the_frame_loop_is_not_hashing_an_empty_map():
+    """The negative control the gate needs and did not have.
+
+    Two identical runs of a loop that silently did nothing also hash equal.
+    Every earlier version of this gate would have passed on a map where
+    binning sent every point to -1 -- which is a real failure mode, and one
+    that makes the latency table read BETTER (see `lattice.bin_points`).
+    """
+    engine = _run_engine()
+    assert int((engine.handle.grid["obs_count"] > 0).sum()) > 10_000
+    assert map_hash(engine.handle.grid) != map_hash(_run_engine(n_frames=6).handle.grid)
+
+
 @pytest.mark.determinism
 def test_real_sequence_replay_is_identical():
-    """The gate as stated: 50 frames of sequence 08, twice, byte-identical."""
-    raise NotImplementedError
+    """The gate as stated: 50 frames of sequence 08, twice, byte-identical.
+
+    Skipped where the sequence is absent, the same way every other data-backed
+    test in this suite is -- NOT skipped unconditionally, which is how this one
+    spent its life reporting nothing.
+    """
+    loader = pytest.importorskip("vrgrid.perception.loader")
+    if not (loader.verify_sequence_exists("08")
+            and loader._velodyne_path("08", 0).exists()):
+        pytest.skip("KITTI seq 08 not present -- set VRGRID_DATA_ROOT")
+
+    from vrgrid.grid.schedule import load
+    from vrgrid.run.__main__ import iter_pipeline
+    from vrgrid.run.engine import MapEngine
+
+    def replay():
+        engine = MapEngine(load("5/10/20/40"), ghost_removal=True)
+        for frame in iter_pipeline("08", max_frames=50):
+            engine.step(frame)
+        return map_hash(engine.handle.grid)
+
+    assert replay() == replay()
 
 
-@pytest.mark.skip(reason="needs the full frame loop — Day 2")
 def test_no_allocation_inside_the_frame_loop():
-    """Day-2 gate: verify with a profiler, not by reading the code. The
-    array-level version of this check is in tests/test_allocators.py."""
-    raise NotImplementedError
+    """The Day-2 gate, measured rather than read.
+
+    `tests/test_allocators.py` asserts this for a hand-rolled frame; this is
+    the real `MapEngine.step`, which is the thing the memory bound is a claim
+    about. The first frames are excluded on purpose: `GridMap.bin_scratch`
+    and the visibility scratch size themselves on first use, which is what
+    "sized at startup" means for a buffer whose extent depends on the first
+    sweep.
+
+    ⚑ This measures RETAINED growth, not per-frame churn. A temporary that is
+      allocated and freed inside one frame does not move
+      `get_traced_memory()[0]` and will not fail here -- churn is what
+      `scripts/timing_table.py --alloc` reports, and what
+      `lattice.new_bin_scratch` exists to remove. What this catches is the
+      other failure: a buffer that grows with frame count, which is the one
+      that makes the compile-time bound false.
+    """
+    import tracemalloc
+
+    engine = MapEngine_for_alloc = _run_engine(n_frames=2)      # warm every scratch
+    frames = list(_engine_sequence(6, 2.0))
+
+    tracemalloc.start()
+    before = tracemalloc.get_traced_memory()[0]
+    for frame in frames:
+        engine.step(frame)
+    after = tracemalloc.get_traced_memory()[0]
+    tracemalloc.stop()
+
+    grew = after - before
+    assert grew < 64 * 1024, (
+        f"the frame loop grew the heap by {grew:,} B over {len(frames)} frames; "
+        "every buffer it touches is supposed to be sized at startup")
+    assert engine is MapEngine_for_alloc
