@@ -73,18 +73,18 @@ def real_scans(sequence, max_frames):
       map ends up slowly rotating.
 
     Ground comes from Patchwork++ where the extension is installed, and from
-    the semantic labels otherwise, which is the same fallback the real
-    pipeline in `run/__main__.py` uses.
+    the semantic labels otherwise -- `ground.segment_ground_or_fallback`, the
+    same path `run/__main__.py` uses, which warns once when the fallback stands
+    in (the fallback admits embankments the geometric segmenter rejects, so a
+    curb/pothole table on it is not comparable).
     """
     from vrgrid.perception import ground, loader, semantics, transforms
 
     t_s_v = transforms.sensor_to_vehicle()
     for pts, labels, pose in loader.scans(sequence, max_frames=max_frames):
         vehicle_pts = transforms.transform_points(pts[:, :3], t_s_v)
-        if ground._HAVE_PATCHWORKPP:
-            gmask = ground.segment_ground(pts)
-        else:
-            gmask = ground.ground_from_semantics(semantics.semantic_labels(labels))
+        gmask, _ = ground.segment_ground_or_fallback(
+            pts, semantics.semantic_labels(labels))
         yield (vehicle_pts, labels, gmask,
                transforms.vehicle_to_world(pose, sequence=sequence))
 

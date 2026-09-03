@@ -15,6 +15,10 @@ That last clause is the contribution. Everything before it is engineering.
 python3 -m venv .venv && source .venv/bin/activate   # Debian/Kali: required, PEP 668
 pip install -e ".[dev]"            # or: make setup
 pip install -e ".[perception]"     # Patchwork++ ground segmentation (C++ ext)
+#   ^ no wheel for Linux aarch64 / Intel macOS -- those build from source:
+#     git clone --depth 1 https://github.com/url-kaist/patchwork-plusplus.git
+#     pip install ./patchwork-plusplus/python
+#   without it the pipeline runs on a semantic-class ground fallback and says so, loudly.
 make test                          # all unit tests
 python -m vrgrid.run --seq 08 --schedule 5/10/20/40
 python -m vrgrid.dash              # Rerun dashboard, separate process

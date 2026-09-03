@@ -29,6 +29,14 @@ def test_iter_pipeline_yields_aligned_perception_frames():
         assert f.ground.shape == (n,) and f.ground.dtype == bool
         assert f.reflectivity8.shape == (n,) and f.reflectivity8.dtype == np.uint8
         assert f.range_image.shape == (64, 512, 5)
+        # which ground segmenter actually ran is recorded per frame
+        assert f.ground_method in ("patchworkpp", "semantic_fallback")
+
+
+@needs_data
+def test_ground_method_field_reflects_the_no_patchworkpp_flag():
+    forced = list(iter_pipeline("00", max_frames=2, use_patchworkpp=False))
+    assert [f.ground_method for f in forced] == ["semantic_fallback"] * 2
 
 
 @needs_data

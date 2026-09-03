@@ -25,7 +25,7 @@ One `PerceptionFrame` per LiDAR scan, produced by `vrgrid.run.iter_pipeline`
 | **range image** | `range_image.py` | a 64 × 512 × 5 spherical image `[range, x, y, z, intensity]` + an inverse index (pixel → source point), byte-exact reversible |
 | **semantics** | `semantics.py` | 19-class SemanticKITTI label per point (**ground truth**, from the `.label` file — see §3) |
 | **motion** | `semantics.py` | `is_moving()` per point — the `moving-*` raw ids 250–259 (**ground truth**) |
-| **ground** | `ground.py` | ground / non-ground mask from **Patchwork++** (`pypatchworkpp`), with a semantic-class proxy fallback when the C++ extension is absent |
+| **ground** | `ground.py` | ground / non-ground mask from **Patchwork++** (`pypatchworkpp`), or a semantic-class proxy fallback when the C++ extension is absent — `PerceptionFrame.ground_method` records which ran, and the fallback warns once per run (§6) |
 | **reflectivity** | `reflectivity.py` | one normalised reflectivity byte per point (see §4) |
 
 Downstream, `run.engine.MapEngine.step(frame)` folds each frame into the grid
@@ -228,7 +228,51 @@ touch `quantise_height`.
 
 ---
 
-## 6. File map
+## 6. Ground segmentation — Patchwork++ vs the semantic fallback
+
+The ground stage is **Patchwork++** (`pypatchworkpp`, wired in via
+`ground.segment_ground`, not reimplemented). If the C++ extension is not
+importable, `ground.segment_ground_or_fallback` uses `ground_from_semantics`
+instead — a pure class-membership test (`road / parking / sidewalk /
+other-ground / terrain` → ground).
+
+**The two are not equivalent.** The fallback marks *every* point of a ground
+*class* as ground regardless of geometry. On a sloped verge it therefore admits
+the raised part of an embankment — measured at ~4–12 % of the `terrain` points
+on sequences 07/08 — that Patchwork++'s local plane fit rejects. On flat
+road/sidewalk the two agree to ~1–2 %. So a per-ring accuracy, curb/pothole, or
+plan-regret number computed on the fallback is **not comparable** to one on
+Patchwork++ (e.g. seq 07 ring-1 RMSE moved 1.69 → 3.48 cm when the real
+segmenter replaced the fallback — `known-limitations.md` §2b).
+
+**How you know which one ran:**
+
+- `PerceptionFrame.ground_method` is `"patchworkpp"` or `"semantic_fallback"`,
+  set per frame at the branch point.
+- The first time the fallback stands in within a process, `ground.py` emits a
+  `RuntimeWarning` (once, not per frame) naming the reason — missing extension
+  vs. deliberate `--no-patchworkpp`.
+- `python -m vrgrid.run` / `python -m vrgrid.dash` print a `[!] ground:
+  SEMANTIC-CLASS FALLBACK …` line in their end-of-run summary.
+
+**Installing the real segmenter.** `pip install -e ".[perception]"`. PyPI ships
+prebuilt wheels for CPython 3.8–3.13 on `win_amd64` / `win32`,
+`manylinux`/`musllinux` `x86_64` + `i686`, and macOS `arm64`. There is **no
+wheel for Linux `aarch64` or Intel macOS**; on those, pip falls back to the
+sdist, whose CMake fetches an empty version tag (`.../tags/v.tar.gz`) and 404s.
+Build from a git checkout instead:
+
+```
+git clone --depth 1 https://github.com/url-kaist/patchwork-plusplus.git
+pip install ./patchwork-plusplus/python
+```
+
+CI does not install it, so `tests/test_ground.py`'s Patchwork++ cases skip
+there and the semantic-proxy cases always run.
+
+---
+
+## 7. File map
 
 ```
 src/perception/
@@ -236,7 +280,7 @@ src/perception/
   transforms.py    sensor -> vehicle -> z-up world           [JP]
   range_image.py   64x512 spherical projection + inverse     [JP]
   semantics.py     19-class + is_moving, both GT              [JP]
-  ground.py        Patchwork++ wire-in + fallback            [JP]
+  ground.py        Patchwork++ wire-in + loud fallback (§6)  [JP]
   reflectivity.py  eq (31) + the KITTI firmware-compensated path  [JP]
   instances.py     range-image connected-components clustering    [JP]
   frnet/           non-functional port, kept + flagged       [JP]
