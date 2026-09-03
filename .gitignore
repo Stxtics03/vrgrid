@@ -40,3 +40,7 @@ dist/
 # we can currently draw is synthetic and stamped NOT REPORTABLE, and a checked-in
 # PNG is exactly how a non-reportable number ends up on a slide.
 docs/figures/
+
+# Baked demo recordings from `scripts/demo.sh bake` -- ~1.2 GB of .rrd, and
+# regenerable in about three minutes on any machine holding the dataset.
+demo/
