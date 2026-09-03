@@ -22,9 +22,19 @@ SemanticKITTI `.label` ground truth.
   class whenever `union > 0`, which is true if the model hallucinates a single
   point of a class that never occurs. Over 200 frames of seq 08, truck,
   motorcycle, motorcyclist and other-vehicle have ZERO ground-truth points;
-  averaging four guaranteed zeros dragged the reported mIoU from 69.8% to
-  51.5%. Ground-truth support is printed beside every class so the reader can
-  see what each number rests on.
+  averaging four guaranteed zeros dragged the number down to 51.5%.
+  Ground-truth support is printed beside every class so the reader can see what
+  each number rests on.
+
+⚑ THE FIXED METRIC IS 65.2%, NOT THE 69.8% THAT WAS REPORTED. Same 200 frames,
+  same 15 per-class IoUs, which sum to 977.7: divided by 19 that is the 51.5%
+  the union>0 bug produced, by the 15 classes actually present it is the 65.2%
+  this script prints, and by 14 it is 69.84 -- which is the figure that reached
+  the handover and the slides. The missing fifteenth class is `other-ground`:
+  150 ground-truth points over 200 frames, IoU 0.0%, present and therefore
+  counted. Verified 4 Sep on BOTH reduction paths -- the port's own loops and
+  --fast-scatter agree at 90.3% / 65.2% / 61.1% -- so this is an arithmetic
+  error in the recorded figure, not a model or a code difference.
 """
 import argparse
 import sys

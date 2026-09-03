@@ -400,3 +400,63 @@ Bit-identical, including the empty-slot convention both directions: `amax` with 
 **Source:** `scripts/frnet_finetune.py`; measurements against `src/perception/frnet/{frustum_encoder,frnet_backbone}.py`, unchanged.
 
 **So what:** The file is JP's and is deliberately frozen as a reference port (`extend-exclude` in `pyproject.toml`, "not ours to modernise"), so this is **left for him to decide on, not done.** What it costs meanwhile: a 600-step fine-tune runs 3.3 hours instead of an estimated three minutes, and `scripts/frnet_eval.py --frames 200` — which is the script behind the reported 90.3% / 69.8% and which anyone re-checking those numbers has to run — takes about 35 minutes. Nothing is wrong with the port's *answers*; the 98.3% point accuracy and the three divergence fixes stand untouched. This is purely the cost of re-deriving them. If the freeze is meant to protect the numbers rather than the source text, a bit-identical reduction is the one change that cannot move them.
+
+---
+
+## 2026-09-04 — Shrestha
+**Module:** D2 — the DL half, and one measurement that belongs to nobody yet
+
+**Finding:** Five, in descending order of how much they change what we can say.
+
+**1. The fine-tune is runnable now: 3.3 hours → 2.2 minutes, and every recipe still says don't.** `scripts/frnet_fast_scatter.py` replaces `frustum_encoder.scatter_max`/`scatter_mean` with `torch.Tensor.scatter_reduce` **at runtime, opt-in behind `--fast-scatter`**, on both `frnet_finetune.py` and `frnet_eval.py`. `src/perception/frnet/` is not edited: it is JP's, deliberately frozen, and the 3 Sep write-up is still his to act on. Deleting the shim restores the slow path everywhere. A 600-step fine-tune ran in **2.2 min** against the estimated 3.3 h, and `frnet_eval.py --frames 200` in about a minute against 35.
+
+Held-out sequence 08, 200 frames, scored by `frnet_eval.py`:
+
+| run | recipe | point acc | mIoU |
+|---|---|---|---|
+| — | pretrained checkpoint | 90.3% | **65.2%** |
+| A | the 2 Sep recipe: head, 3× terrain/vegetation, 600 steps | 89.8% | 64.6% |
+| B1 | head, no class weights, lr 1e-4, 2,000 steps | 90.2% | 65.3% |
+| B2 | head+backbone, lr 1e-4, 4,000 steps, batch 1 | 89.5% | 64.5% |
+
+A reproduces the rejected 2 Sep run at **−0.6 mIoU** against its reported −0.5, so that negative result finally has a script behind it as Gate 6 requires. B1 and B2 were designed to win and did not: +0.1 is inside the noise and B2 is worse. **This is the expected answer rather than a failure to tune.** The checkpoint was already trained on 00–10 minus 08, so every recipe here is retraining on its own training set with no domain gap to close. The pretrained checkpoint stays the reported model, and the honest claim is that fine-tuning was tried three ways and rejected on measurement.
+
+**⚑ 2. "Bit-identical" was a CPU result, and my own 3 Sep entry above overstates it.** That entry recorded max abs diff `0.000e+00` for both reductions; it was measured on CPU, where it holds exactly. On CUDA, `scatter_max` is still bit-identical — max is order-independent — but `scatter_mean` differs by up to **2 float32 ulp (2.384e-07)** on ~40% of slots, because the native kernel sums a slot's rows in a different order and float addition is not associative. `verify()` therefore gates max at exactly zero and mean at a stated ulp bound instead of asserting a bit-identity that is not there. The 3 Sep speedup ratios were CPU-vs-CPU; on CUDA at the real shapes it is 1408× (max) and 541× (mean).
+
+Gradients were the other thing 3 Sep did not cover, and a fine-tune needs them. The risk was ties: `amax` splits gradient evenly among tied maxima where `Tensor.max(dim=0)` gives it all to the first, and ReLU emits exact zeros. Measured: **max backward is exact, mean backward carries the same 2 ulp as its forward.**
+
+**⚑ And patch every module that holds the name, or patch none.** `frnet_backbone` does `from .frustum_encoder import scatter_max` at import, which *binds the function object*. Rebinding only `frustum_encoder.scatter_max` leaves five of the seven per-forward calls on the loop, and the run merely looks disappointing rather than broken.
+
+**⚑ 3. The reported 69.8% mIoU does not reproduce. It is 65.2%.** Same 200 frames of seq 08, same committed `frnet_eval.py` (unchanged since 34cb667), same checkpoint. The 15 per-class IoUs sum to **977.7**:
+
+| divisor | value | what it is |
+|---|---|---|
+| 19 (all classes) | 51.46% | the withdrawn figure, from the `union > 0` bug |
+| **15 (classes present)** | **65.18%** | what the committed script prints |
+| 14 | 69.84% | the figure in the handover, the runbook and the slides |
+
+The missing fifteenth class is **`other-ground`: 150 ground-truth points over 200 frames, IoU 0.0%, present and therefore counted.** Point accuracy reproduces exactly at 90.3%, and the untouched loop path and `--fast-scatter` agree at **90.3% / 65.2% / 61.1%** — so this is an arithmetic error in the recorded figure, not a model, data or code difference. Three of fifteen per-class IoUs move by 0.1 pp between the two reduction paths (person, pole, fence) from the 2 ulp above; no headline number moves.
+
+Corrected in `scripts/frnet_eval.py` and `scripts/frnet_finetune.py`. **Still carrying 69.8% and not mine to edit:** `docs/handover-2026-09-02.md:23` and `:169`, `docs/demo-runbook.md:229`, `docs/perception-dashboard-summary.md:150`.
+
+**⚑ 4. The latency claim covers half the frame, and the whole frame has never been timed.** `scripts/timing_table.py:13` says the table is a lower bound because "`src/run/__main__.py` still has `scatter`/`fuse` stubbed against Aakash's grid, so there is no end-to-end loop to time yet." **Both reasons are now obsolete**: `src/run/engine.py:297–309` calls the real `scatter_sorted` and `fuse`, and the dataset is complete on disk. The plumbing for whole-frame timing already exists on both halves — `iter_pipeline(timer=...)` and `MapEngine(timer=...)`, which `engine.py:124–126` describes exactly — and `python -m vrgrid.run` wires a `Timer` into **neither**, so it has never been run.
+
+Driving the shipping code with one `Timer` shared across both halves, 200 frames of seq 08, quiet machine, stages flat and disjoint (no nesting, so no double-count):
+
+| stage | p50 ms | p99 ms | | stage | p50 ms | p99 ms |
+|---|---|---|---|---|---|---|
+| cleanup | 26.22 | 33.43 | | reflectivity | 3.49 | 4.64 |
+| range_image | 24.45 | 29.27 | | shift | 2.07 | 5.52 |
+| ground | 12.41 | 14.50 | | transform | 1.53 | 2.56 |
+| scatter | 7.06 | 8.20 | | load | 0.58 | 0.86 |
+| bin | 6.84 | 8.33 | | semantics | 0.45 | 0.68 |
+| fuse | 4.13 | 5.28 | | motion | 0.06 | 0.09 |
+| | | | | **TOTAL** | **89.18** | **100.43** |
+
+**The median meets 10 Hz with 10.8 ms to spare; the p99 is 0.43 ms over the 100 ms budget, and the max is 109.28 ms.** `src/gpu/timing.py`'s own `headroom()` docstring sets the standard this fails: *"A pipeline that clears 10 Hz on the median and misses it one frame in a hundred has dropped a frame of obstacles."* Two caveats on the number: `load` at 0.58 ms is page-cache-warm and would not exist on a live sensor at all, and the 80.78 / 97.72 in the handover is **not comparable** to this — it is the back half on a synthetic sweep, where the same back half on real seq 08 data costs 46.32 ms p50.
+
+**5. Six documents still say FRNet is non-functional.** `CLAUDE.md:66`, `data/README.md:29`, `docs/team-assignments.md:110`, `docs/known-limitations.md:803`, `docs/execution-plan.md:37` and `:233`, `docs/master-v4.md:280`. The port scores 90.3% point accuracy over 200 frames. c5d014f flagged exactly this list a day ago for their owners and it is unchanged.
+
+**Source:** `scripts/frnet_fast_scatter.py` (self-verifying: `python scripts/frnet_fast_scatter.py` prints the equivalence check and the benchmark), `scripts/frnet_finetune.py --fast-scatter`, `scripts/frnet_eval.py [--fast-scatter]`. 650 passed, 2 skipped; `ruff check .` clean; both CI-blocking tests pass.
+
+**So what:** The DL half is now a defensible position rather than an anecdote — three recipes measured on a held-out sequence, all reported, the pretrained checkpoint retained on evidence. Two numbers on slides need changing before anyone else reads them off: **65.2% mIoU, not 69.8%**, and the latency claim needs to say whether it is quoting the back half or the frame. The end-to-end p99 is the one that is genuinely uncomfortable, and it is uncomfortable by 0.43 ms — worth knowing before a judge asks rather than after.

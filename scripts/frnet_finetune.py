@@ -212,7 +212,8 @@ def main() -> int:
     reported = Path("checkpoints/frnet-semantickitti_seg.pth")
     if out.resolve() == reported.resolve():
         sys.exit(f"refusing to overwrite {reported} -- it is the REPORTED model "
-                 f"(90.3% point accuracy, 69.8% mIoU). Write somewhere else.")
+                 f"(90.3% point accuracy, 65.2% mIoU over the 15 classes present "
+                 f"in 200 frames of seq 08). Write somewhere else.")
 
     # ⚑ The guard the 2 Sep run had and the reason its -0.5 mIoU is believable:
     #   the scored sequence is asserted out of training rather than assumed out.
