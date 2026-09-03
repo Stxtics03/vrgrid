@@ -327,8 +327,14 @@ def test_boyer_moore_matches_the_textbook_until_the_counter_saturates():
 
 
 def test_saturation_is_what_bounds_the_guarantee():
-    """⚑ §10.2 says the majority guarantee "does not depend on where the
-    counter saturates". That is not true, and it was not true at 4/4 either.
+    """⚑ The majority guarantee DOES depend on where the counter saturates,
+    and it was not true at 4/4 either.
+
+    §10.2 said otherwise until the 1 Sep correction; `grid/fusion.py` said it
+    for three days longer, in the header paragraph justifying the 5|3 re-split
+    and again in `boyer_moore_update`'s own docstring. Both now carry the
+    condition. This test is what keeps them honest, so it names where the
+    sentence has already come back once.
 
     Boyer-Moore's proof assumes an unbounded counter. A saturating counter
     throws away exactly the evidence the proof relies on: once the counter is

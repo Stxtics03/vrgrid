@@ -8,9 +8,10 @@ non-associative, so two runs over identical input produce different maps and
 bugs move when you look at them. `make test-determinism` is CI-blocking for
 exactly this reason. See math §3.4.
 
-Class fusion is Boyer-Moore streaming majority in one byte (4-bit candidate,
-4-bit counter): match -> increment, mismatch -> decrement, zero -> adopt.
-Never average softmax vectors across frames.
+Class fusion is Boyer-Moore streaming majority in one byte (5-bit candidate,
+3-bit counter, re-split 1 Sep -- see below): match -> increment, mismatch ->
+decrement, zero -> adopt. The counter saturates, so this is a time constant
+and not the textbook guarantee. Never average softmax vectors across frames.
 
 --- what this file owns, and what it does not ----------------------------
 
@@ -85,12 +86,30 @@ from vrgrid.grid.schedule import load_thresholds
 #     `% 16` mapped `terrain` onto `car`, turning drivable ground into blocked
 #     cells; `clip` mapped everything above 15 onto `vegetation`.
 #
-# 5 | 3 holds all 20 with room to 31, and costs only the top of the counter's
-# range: it saturates at 7 rather than 15. Boyer-Moore's majority guarantee is
-# unaffected by where the counter saturates -- the invariant is that a true
-# majority can never be fully decremented away, which holds for any cap >= 1 --
-# so only the confidence readout gets coarser. The byte is still one byte, so
-# the frozen 12-byte cell struct does not move.
+# 5 | 3 holds all 20 with room to 31, and costs the top of the counter's range:
+# it saturates at 7 rather than 15.
+#
+# ⚑ That cost is NOT free, and this comment used to say it was. It read
+#   "Boyer-Moore's majority guarantee is unaffected by where the counter
+#   saturates ... so only the confidence readout gets coarser", which is false
+#   at 4|4 as well as at 5|3 -- §10.2 carries the correction (1 Sep) and this
+#   file did not. Boyer-Moore's proof assumes an UNBOUNDED counter. Once the
+#   counter is pinned at C, further sightings of the majority class are not
+#   recorded, so C + 1 contradicting observations unseat a class holding a
+#   genuine strict majority:
+#
+#       road x9 then car x8   ->  road is 9 of 17, and the cell reports car
+#
+#   What the byte provides is a TIME CONSTANT, not a theorem: it is exactly
+#   textbook Boyer-Moore on any sequence whose running excess stays within C,
+#   and a cell changes its mind after more than C net contradicting
+#   observations. C = 7 re-labels about twice as fast as C = 15, which for a
+#   rolling local map with dynamics in it is arguably the better default -- but
+#   it is a tuning claim, and the report must not say "guaranteed majority"
+#   without the condition attached. Pinned in
+#   `test_saturation_is_what_bounds_the_guarantee`.
+#
+# The byte is still one byte, so the frozen 12-byte cell struct does not move.
 CLASS_BITS = 5
 COUNTER_BITS = 8 - CLASS_BITS
 CLASS_MAX = (1 << CLASS_BITS) - 1      # 31, and the label set stops at 19
@@ -271,9 +290,16 @@ def boyer_moore_update(packed, observed):
         y == candidate    -> counter <- min(counter + 1, COUNTER_MAX)
         otherwise         -> counter <- counter - 1
 
-    Returns the new packed bytes; does not write. Guaranteed to hold the true
-    majority class whenever one exists, in constant memory, and the counter
-    doubles as a confidence readout.
+    Returns the new packed bytes; does not write. The counter doubles as a
+    confidence readout.
+
+    ⚑ NOT "guaranteed to hold the true majority whenever one exists", which is
+      what this line used to say. That is textbook Boyer-Moore, and the proof
+      needs an unbounded counter; `COUNTER_MAX` is 7. Beyond it the excess
+      stops being recorded, so `COUNTER_MAX + 1` contradicting observations
+      unseat a genuine strict majority -- `road` x9 then `car` x8 returns
+      `car`. Inside the cap it is exactly textbook. See the header and
+      math §10.2's 1 Sep correction for what is being traded.
 
     The candidate is 5 bits since 1 Sep, so the whole 0-19 label set fits and
     ids up to 31 are accepted. Anything above that is still rejected rather
@@ -508,9 +534,15 @@ def scatter(gm, points_m, class_id, is_ground, reflectivity=None,
 # It was declared here as well, as a stub with a Day-3 owner on it, and the two
 # survived side by side long enough for a second reader to find this one first
 # and conclude the ghost gate was unbuilt. The section is a range-image
-# comparison, so it belongs in the module that owns range-image kernels; what
-# is fusion's, and is below, is what a miss MEANS — `apply_miss` walks the
-# log-odds and `occupancy_state` (§10.1) turns them into a three-state answer.
+# comparison, so it belongs in the module that owns range-image kernels.
+#
+# What is fusion's is what a miss MEANS: `occupancy_state` (§10.1), above,
+# turns log-odds into a three-state answer. The walk that folds a see-through
+# mask into those log-odds is `visibility.apply_miss`, which sits beside the
+# kernel that produces the mask and reads its constants from
+# `configs/thresholds.yaml`. This comment used to say `apply_miss` was "below",
+# meaning in this file. It never has been -- a reader who went looking for it
+# here found nothing and had no reason to think it existed at all.
 #
 # Deleted rather than left raising: a NotImplementedError with a name on it
 # reads as work outstanding, and this was work already done.
