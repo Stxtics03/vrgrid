@@ -238,15 +238,28 @@ def test_commit_can_be_declined(thresholds):
     """Committing costs a moment at startup and is not always wanted -- a unit
     test allocating a hundred grids does not need them all faulted in.
 
-    Asserted as a RATIO between the two allocations rather than against an
-    absolute share of `total_bytes()`. What `allocate()` controls is whether it
-    touches the pages it asked for; whether an UNtouched page counts toward RSS
-    at all is the platform's business, and the absolute form quietly encoded
-    one platform's answer to that -- it passes on the ubuntu CI runner and
-    fails on the Windows machines two of the three of us develop on, so the
-    failure never appeared anywhere it would get fixed. The ratio asks the
-    question this file actually owns: does declining the commit cost
-    measurably less than taking it?
+    Asserted as the SAVING, in bytes, against the footprint the report quotes:
+    declining the commit must leave at least a quarter of `total_bytes()`
+    unfaulted. Two earlier forms of this both encoded one platform's memory
+    accounting and both failed on Windows, where two of the three of us
+    develop -- so the failure never appeared anywhere it would get fixed.
+
+      * an absolute share of `total_bytes()` -- fails because a lazy
+        allocation is not zero-resident here;
+      * `lazy.resident_delta < 0.5 * committed.resident_delta` -- fails for a
+        reason that has nothing to do with `allocate()`. Below the allocator's
+        mmap threshold numpy serves an array from the heap, and the heap is
+        resident the moment it is asked for. Measured on this build:
+        `np.zeros(100_000, u8)` moves RSS by its full 0.10 MB, `np.zeros(50M,
+        u8)` moves it by 0.01 MB. **14.00 MB of a 29.06 MB Allocation is in
+        arrays under 1 MB** -- 48% -- so the lazy path can never drop below
+        half however correctly the commit is declined. The ratio was
+        unsatisfiable on this platform by arithmetic, not by defect.
+
+    The saving form asks the question this file actually owns -- is the commit
+    responsible for a real share of the footprint? -- in the unit the claim is
+    made in, and it holds on a platform that faults nothing lazily as well as
+    on one that faults everything.
 
     Where the OS will not separate the two cases at all there is nothing here
     to assert, and saying so is more honest than either failing or quietly
@@ -262,7 +275,12 @@ def test_commit_can_be_declined(thresholds):
             f"this OS reports only {committed.resident_delta / 1e6:.2f} MB "
             f"resident for a committed {committed.total_bytes() / 1e6:.2f} MB "
             "allocation, so committed and lazy are not distinguishable here")
-    assert lazy.resident_delta < 0.5 * committed.resident_delta
+
+    saved = committed.resident_delta - lazy.resident_delta
+    assert saved > 0.25 * committed.total_bytes(), (
+        f"declining the commit saved {saved / 1e6:.2f} MB of a claimed "
+        f"{committed.total_bytes() / 1e6:.2f} MB; the commit is supposed to be "
+        "what faults those pages in")
 
 
 # --- the state a fresh cell is in --------------------------------------------
