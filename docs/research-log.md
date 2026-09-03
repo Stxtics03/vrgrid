@@ -136,6 +136,60 @@ Format:
 **So what:** Fulfills the Days 5–6 writing deliverable for Track γ. Ready for direct inclusion in the final technical report and submission slide deck.
 
 ---
+## 2026-09-03 — Aakash
+**Module:** D1 — Information-loss metrics (§9.2, §9.3), follow-up
+
+**Finding:** A second, independent trace of the §9.2 ring-scoring bug came back the same day the fix landed. Same mechanism, confirmed from the other direction, plus one concrete cell — a ring-2 slot scored at 9.5 m from the vehicle on data written when that ground was 25–50 m out, charging 350.7 cm of error to ring 2. Stale share on longer runs: 13–38% per ring at 40 frames, near half of ring 2 by 80 frames, scaling with distance driven. All consistent with what was measured here (19%/21% at 22 m, 20%/26% at 46 m) and with the fix already in `_ring_cells`.
+
+**⚑ Two corrections to yesterday's entry, one of them mine and wrong.**
+
+**1. The "hard forward edge near x = 54 m" was not the reason ring 3 shows 13 migrated cells, and there is no such edge.** The synthetic scene follows the vehicle: world forward reach is 51.4 m at frame 0, 71.5 m by frame 24, 101.5 m by frame 36. The real cause is the terrain itself — flat to x = 30 m and then a 6% ramp — and a rising surface closes the forward horizon. Forward returns past 50 m appear at frame 0 and never again, so ring 3's forward band is written exactly once. The conclusion is unchanged (ring 3's annulus is lateral and rear, where a straight drive leaves nothing behind) but the stated cause was wrong and is corrected in §9.2, `metrics.py` and PR #31.
+
+**2. "Migration" was read as cells moving between ring buffers.** They do not: the buffers are static and world-anchored and a cell never changes ring. What moves is the vehicle, and with it which ring is *responsible* for a place. Reworded everywhere it appears, because the misreading cost a reviewer a full re-derivation.
+
+**⚑ THE SIGN OF THE CORRECTION IS UNVERIFIED AND NO FIGURE FOR IT IS RECORDED.** The synthetic measurement has the fix *lowering* RMSE (ring 1 0.40 → 0.37, ring 2 0.37 → 0.32). **It could not be checked against real data here**: `VRGRID_DATA_ROOT` is unset, `data/` holds only its README, and no `M*` artefact exists for either sequence — which is what known-limitation 2 already says. Until it is reproduced, **no per-ring RMSE figure may be quoted as improved or worsened by this fix**. The mechanism, the population size and the schedule asymmetry are settled; the sign is not. ρ moves by up to 0.06 per ring here, which is real movement rather than none, but not enough to change what ρ says.
+
+*(⚑ Correction, same day, to the paragraph this entry originally carried here. It recorded the external seq 07/08 measurement as "RMSE understated by 3–12% across rings 1–3" and ρ moving 0.034, and I wrote both into `metrics.py`, §9.2 and `known-limitations.md` on that basis. **Both were withdrawn by their author within hours** — restated as "no consistent bias, −40% to +21% depending on ring, sequence and frame count" and up to −12.5% on ρ, with the traced 350.7 cm example retracted as a separate `M*` defect and restated as 169.5 cm. None of it is reproducible in this repo. Removed rather than swapped for the replacement: a withdrawn number quoted as if it stood is worse than no number, and the replacement comes from the same unreproducible source. **The lesson is mine, not theirs — I put an outside figure into four project files without being able to run it.** What went in should have been "an external measurement disagrees, direction unknown, unreproducible here", which is what all four now say.)*
+
+**⚑ One claim in the incoming report is checkably wrong, and it is the one its recommendation rests on.** "Every RMSE number in known-limitations.md right now is flattering us" — that file contained no RMSE numbers at all, and no §9.2 or §9.3 numbers. Its two items were the ghost-removal elevation limit and the plan-regret status. The underlying point was still right (the per-ring accuracy claim is load-bearing and was undisclosed there), so §9.2 is now limitation 3 — but written as "fixed, sign unverified" rather than as a standing bias, because that is what the evidence supports.
+
+**⚑ Separate finding, confirmed and acted on: ρ's denominator is estimated from very few cells.** `block_stats`'s `n` counts the 5 cm cells of `F(c)` that `M*` observed, capped at `k²`. Median coverage, 12-frame synthetic: **1.00 / 0.25 / 0.06 / 0.02** for rings 0–3 — ring 3's sub-cell terrain variability comes from roughly one reference cell in sixty-four. A spread estimated from two points is biased low and ρ divides by it, so ρ on the coarse rings is biased **high**, the conservative direction for a number we want near 1. `coarsening_ratio_per_ring` already drops `n_ref ≤ 1`; at `k = 8` that guard admits a spread from two cells of sixty-four. Disclosed rather than corrected, and **coverage is now a column in the per-ring table, printed next to ρ**, so the two cannot be read apart.
+
+**⚑ RETRACTED, and it was my error. I claimed two things did not exist without checking `main`.** I wrote that there is "no §2b in this project" and "no median ρ of 1.45", on the strength of grepping my own branch. **Both exist on `team/main`**, added 2 Sep while this branch was open: `known-limitations.md` §2b, "Accuracy across ALL eleven labelled sequences — the headline result", whose ring-1 line reads **`rho median 1.45 [1.26-1.59]`** over eleven sequences and which says in terms "Lead with ρ, not RMSE" and quotes "ρ = 1.45, range 1.26–1.59, n = 11" as the claim to make. The report I was correcting was reconciling against the right document; I was reading a stale tree and asserted a blanket negative from it. Withdrawn in full, and the PR comment carrying it is corrected.
+
+*The substantive consequence is the opposite of what I argued: ρ = 1.45 IS the headline, this fix does move the scored population, and ρ shifts by up to 0.06 per ring on the synthetic sequence. §2b's table therefore needs regenerating with the band filter before ρ is quoted to two decimals. Recorded in `known-limitations.md` §7.*
+
+**Source:** `src/eval/metrics.py` (`footprint_coverage_per_ring`, corrected module note), `src/eval/harness.py` (`Result.coverage`, `format_result`), `docs/sih-math.md` §9.2, `docs/known-limitations.md` item 3, `tests/test_metrics.py::test_coverage_says_how_little_of_a_coarse_footprint_M_star_saw`.
+
+**So what:** The fix stands and is already in PR #31; what changed today is what may be *said* about it. The report must not claim the correction improves per-ring RMSE until it is re-run on 07/08, and ρ must not be quoted without its coverage column. Building `M*` for 07/08 (known-limitation 2, item 1) is now blocking a second claim, not one.
+
+---
+## 2026-09-03 — Aakash
+**Module:** D1 — Information-loss metrics (§9.2, §9.3)
+
+**Finding:** §9.2 scored each ring against a reference holding observations that ring never received. `C_L` was read as "every cell in ring L's buffer", and that buffer is a square of half-width `R_L` — it physically covers the hole the finer rings serve. `ring_of` hands a place to the *finest* ring containing it, so ring L only ever receives returns from the annulus `[R_{L-1}, R_L)`. The vehicle drives, that annulus sweeps outward, and every cell it leaves behind keeps its last far-range value for as long as it stays in the window: nothing clears it (a toroidal shift clears only the edge coming into view, §2.4) and nothing reads it, because `query()` routes that place to a finer ring now. So the metric asked a height frozen at 60 m to match an M* that went on accumulating the close-range returns the cell never got.
+
+Stale share of each ring's scored population, 5/10/20/40 on the synthetic sequence: **19% of ring 1 and 21% of ring 2 after 22 m driven, 20% and 26% after 46 m.** Dropping them, before → after:
+
+| ring | RMSE_L cm | IoU | fill |
+|---|---|---|---|
+| 1 | 0.40 → **0.37** | 0.59 → **0.68** | 0.59 → **0.68** |
+| 2 | 0.37 → **0.32** | 0.39 → **0.72** | 0.39 → **0.72** |
+| 3 | 0.33 → 0.33 | 0.23 → **0.83** | 0.23 → **0.83** |
+
+Occupancy and fill move furthest because the hole is full of ground M* knows about and the ring never wrote — **ring 3's far-field fill rate was being reported as 0.23 when the ring fills 0.83 of what it actually answers for**, which is the §1.3 ring-sweep claim being understated by a factor of three and a half. `fill_rate_per_ring`'s own docstring already warned about "the hole covered by the finer ring" and thought `n_ref > 0` handled it; it does not, and cannot — the reference has plenty of returns under the hole, which is the whole problem.
+
+**⚑ WITHDRAWN on merge with `main`: "the confound is asymmetric across the schedules §8.2 compares".** This entry originally argued that a uniform baseline, having one ring, cannot carry the defect, so the money plot was charging the foveated schedules for stale memory and the uniform grids for none — synthetic worst-ring RMSE 5/10/20/40 0.40 → 0.37 and 5/10/50 0.46 → 0.37 against unmoved uniform rows. **`known-limitations.md` §6 ran precisely that comparison on seq 07 with the datum fixed and gets −0.26 cm and −0.41 cm: migration costs nothing measurable in height bias.** My synthetic runs predate §6's datum fix and its real-data experiment is the better evidence. The structural point stands; the money-plot claim does not, and §6 was already right to withdraw "the range bias is ring migration". What the defect does change is which cells are *scored* — ring 3's fill read 0.23 against 0.83 over the cells it answers for — which is a different metric and untouched by §6.
+
+**⚑ Ring 3 shows 13 migrated cells, not a fraction, and that is this scene rather than the effect.** The synthetic terrain has a hard forward edge near x = 54 m, so after the first frames nothing enters ring 3's forward band and its 50–100 m annulus is populated laterally and to the rear, where a straight-line drive migrates nothing. On a real sequence the far band is fed continuously for kilometres and ring 3 is the ring that carries most of this. **The synthetic numbers above are a floor on the effect, not an estimate of it.**
+
+**⚑ What is deliberately not fixed.** A cell the ring still serves is scored against every return in its footprint, including returns fired from outside the ring's band — ground behind the vehicle was driven over at 2 m before it fell back to 40 m, and M* kept all of it. Fixing that needs a range-stratified M*: (n, Σh, Σh²) per band per 5 cm cell, ~4× its memory and 4× its summed-area tables, on an array already at 205 MB for a 12-frame synthetic scene. Measured against a reference rebuilt from band-restricted returns, the difference is **at most 0.05 cm** (ring 1: 0.37 → 0.32, ring 2: 0.32 → 0.30, ring 3: 0.33 → 0.32) — under the 0.29 cm quantisation floor §9.3 already puts on these numbers. Second order to the migration confound, and the memory is not worth spending on it *on this sequence*; it wants re-measuring on real data, where the rear band has a kerb in it and this one has smooth analytic terrain.
+
+**Source:** `src/eval/metrics.py` (`_ring_cells`, `_cell_centres_m`), `docs/sih-math.md` §9.2 correction, `tests/test_metrics.py::test_a_ring_is_scored_only_where_it_still_answers`, `::test_the_scored_set_is_the_set_query_routes_to`, `::test_cell_centres_agree_with_the_frame_path`, `::test_a_single_ring_schedule_gives_up_nothing_to_the_band_filter`.
+
+**So what:** §8.2's money plot is comparable across schedules for the first time — the axis it varies is now the schedule and not how much stale memory each schedule happens to carry. Every per-ring number measured before today needs re-reading, and the far-field fill rate needs re-reading hardest. The predicate is `ring_of` on the cell centre, the same function `query()` routes with, so the scored set cannot drift from the set the map answers with; that identity is pinned against `slot_of` rather than asserted.
+
+---
 ## 2026-09-02 — Aakash
 **Module:** D1 — Plan regret (§8.1 eq. 23)
 

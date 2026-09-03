@@ -18,12 +18,14 @@ from vrgrid.eval.metrics import (
     coarsening_ratio_per_ring,
     dynamic_removal,
     fill_rate_per_ring,
+    footprint_coverage_per_ring,
     height_rmse_per_ring,
     memory_bytes,
     occupancy_iou_per_ring,
 )
 from vrgrid.eval.reference_map import build_from_scans
 from vrgrid.eval.synthetic import read_sequence, terrain_height_m, write_sequence
+from vrgrid.gpu.kernels import Z_MAX_CM
 from vrgrid.grid.quantise import quantise_variance_cm2
 from vrgrid.grid.query import slot_of
 from vrgrid.grid.schedule import load
@@ -102,6 +104,142 @@ def test_rmse_grows_with_the_error_written_in(scene):
     assert seen[0] < seen[1] < seen[2]
     assert seen[1] == pytest.approx(5.0, abs=0.6)
     assert seen[2] == pytest.approx(20.0, abs=0.6)
+
+
+def test_a_ring_is_scored_only_where_it_still_answers(scene):
+    """⚑ The migration confound. Ring L's buffer is a square of half-width
+    `R_L`, so it physically covers the hole the finer rings serve, and every
+    cell the vehicle migrates inward keeps its last far-range value there
+    forever -- nothing clears it, and `query()` no longer reads it.
+
+    Scoring those cells asks a value frozen at 60 m to match a reference that
+    kept accumulating the close-range returns the cell never received. So a
+    deliberately absurd height written into a migrated cell must not move
+    RMSE_L by so much as a rounding error, while the same height written into
+    a cell the ring still answers for must move it a lot. If the second
+    assertion ever fails the filter has stopped letting anything through and
+    the first one is passing for the wrong reason.
+    """
+    gm, reference, _ = scene
+    from vrgrid.eval.metrics import _cell_centres_m, _ring_cells
+    from vrgrid.grid.query import window_cells
+
+    ring = 2
+    ix, iy = window_cells(gm.buffers[ring])
+    cx, cy = _cell_centres_m(gm, ring, ix, iy)
+    served = set(_ring_cells(gm, ring)[0].tolist())
+    all_slots = np.arange(gm.buffers[ring].slots) + gm.buffers[ring].offset
+
+    inside = np.maximum(np.abs(cx), np.abs(cy)) < gm.schedule.rings[0].half_width_m
+    migrated = [s for s in all_slots[inside].tolist() if s not in served]
+    assert migrated, "no cell has migrated inward; the fixture drove too little"
+
+    before = height_rmse_per_ring(gm, reference)[ring]
+
+    # The fixture is module-scoped, so every write is put back -- obs_count and
+    # height_variance included, because `_compared` reads both.
+    #
+    # ⚑ The nonsense must sit INSIDE the vertical band. `_compared` drops cells
+    #   clamped at `Z_MIN_CM`/`Z_MAX_CM` (a clamped cell holds the band edge,
+    #   not a measurement), so a value outside it is excluded for that reason
+    #   instead and both assertions below would pass vacuously.
+    absurd = Z_MAX_CM - 1                             # ~6 m of nonsense, in band
+
+    def rmse_with_nonsense_in(cells):
+        cells = list(cells)
+        keep = (gm.soa["ground_height"][cells].copy(),
+                gm.soa["obs_count"][cells].copy(),
+                gm.soa["height_variance"][cells].copy())
+        gm.soa["ground_height"][cells] = absurd
+        gm.soa["obs_count"][cells] = np.maximum(gm.soa["obs_count"][cells], 5)
+        gm.soa["height_variance"][cells] = np.maximum(
+            gm.soa["height_variance"][cells], 1)
+        try:
+            return height_rmse_per_ring(gm, reference)[ring]
+        finally:
+            (gm.soa["ground_height"][cells], gm.soa["obs_count"][cells],
+             gm.soa["height_variance"][cells]) = keep
+
+    assert rmse_with_nonsense_in(migrated) == pytest.approx(before)
+    assert rmse_with_nonsense_in(sorted(served)[: len(migrated)]) > before * 10
+
+
+def test_the_scored_set_is_the_set_query_routes_to(scene):
+    """The band predicate has to be the map's own routing rule, not a second
+    opinion about it. `slot_of` is what `query()` uses; every cell scored for
+    ring L must be the cell `slot_of` hands back at that place, or the metric
+    is measuring memory the planner cannot reach."""
+    gm = scene[0]
+    rng = np.random.default_rng(0)
+    from vrgrid.eval.metrics import _cell_centres_m, _ring_cells
+
+    for ring in range(len(gm.schedule.rings)):
+        slots, i_lo, j_lo = _ring_cells(gm, ring)
+        if not slots.size:
+            continue
+        k = gm.schedule.k(ring)
+        pick = rng.choice(slots.size, size=min(200, slots.size), replace=False)
+        cx, cy = _cell_centres_m(gm, ring, i_lo[pick] // k, j_lo[pick] // k)
+        for slot, x_m, y_m in zip(slots[pick], cx, cy):
+            assert slot_of(gm, float(x_m), float(y_m)) == (ring, int(slot))
+
+
+def test_cell_centres_agree_with_the_frame_path(scene):
+    """Two spellings of a cell's position is how a metric ends up scoring the
+    cell next door. `gate._cell_centre` is the frame loop's O(1) version and
+    this is the vectorised one; they must agree exactly."""
+    gm = scene[0]
+    from vrgrid.eval.metrics import _cell_centres_m
+    from vrgrid.grid.gate import _cell_centre
+    from vrgrid.grid.query import window_cells
+
+    rng = np.random.default_rng(1)
+    for ring in range(len(gm.schedule.rings)):
+        buf = gm.buffers[ring]
+        ix, iy = window_cells(buf)
+        cx, cy = _cell_centres_m(gm, ring, ix, iy)
+        for local in rng.choice(buf.slots, size=50, replace=False):
+            assert (cx[local], cy[local]) == _cell_centre(
+                gm, ring, int(local) + buf.offset)
+
+
+def test_a_single_ring_schedule_gives_up_nothing_to_the_band_filter(scene, tmp_path):
+    """⚑ Why the confound was not merely noise: it was ASYMMETRIC across the
+    schedules §8.2 compares. A uniform baseline has one ring, `ring_of` always
+    answers 0, and no cell can ever migrate out from under it -- so the money
+    plot charged the foveated schedules for stale memory and the uniform grids
+    for none. The only cells a single-ring schedule loses here are the ones
+    that fall outside the map altogether."""
+    from vrgrid.eval.harness import uniform_schedule
+    from vrgrid.eval.metrics import _ring_cells
+
+    write_sequence(tmp_path, "99", n_frames=4)
+
+    def scans():
+        for pts, labels, pose in read_sequence(tmp_path, "99"):
+            moving = (labels >= 250) & (labels <= 259)
+            yield (pts[~moving], (labels[~moving] % 16).astype("uint8"),
+                   np.ones(int((~moving).sum()), dtype=bool), pose)
+
+    gm = build_gridmap(uniform_schedule(0.20, half_width_m=24.0))
+    buf = gm.buffers[0]
+    kept = np.isin(np.arange(buf.slots) + buf.offset, _ring_cells(gm, 0)[0])
+
+    # ⚑ Asserted as a positive, not as "everything dropped was out of reach".
+    #   Nothing IS dropped here -- that is the whole point -- so the negative
+    #   form ran over an empty array and passed without testing anything. It
+    #   did exactly that until 3 Sep.
+    assert kept.all(), (
+        f"a single-ring schedule lost {(~kept).sum():,} of {buf.slots:,} cells "
+        "to the band filter; it has no finer ring to lose them to")
+
+    # And the filter is not simply inert: the four-ring schedule DOES drop
+    # cells on the same code path, which is the asymmetry this test is about.
+    multi = build_gridmap(load(SCHEDULE))
+    run_sequence(multi, scans())
+    mbuf = multi.buffers[2]
+    mkept = np.isin(np.arange(mbuf.slots) + mbuf.offset, _ring_cells(multi, 2)[0])
+    assert not mkept.all(), "ring 2 dropped nothing; the filter is inert"
 
 
 def test_a_ring_nobody_drove_through_reports_nan_not_zero(scene):
@@ -234,6 +372,116 @@ def test_fill_rate_rises_with_frames_not_with_a_single_geometry(tmp_path):
     for ring in (1, 2):
         vals = [s[ring] for s in seen]
         assert vals[0] < vals[-1], f"ring {ring} fill did not grow with frames"
+
+
+def test_coverage_says_how_little_of_a_coarse_footprint_M_star_saw(scene):
+    """⚑ rho divides by a spread estimated from the reference cells M* actually
+    observed inside `F(c)`. At k = 8 that is up to 64 cells and is typically a
+    couple, so the denominator is thin exactly where the coarsening claim is
+    loudest. Coverage has to fall with ring index -- if it ever comes out flat,
+    `block_stats` is returning an observation count rather than a count of
+    observed cells and every spread in the table is being read wrong."""
+    gm, reference, _ = scene
+    cov = footprint_coverage_per_ring(gm, reference)
+
+    assert cov[0] == pytest.approx(1.0), "ring 0 is the base lattice; k = 1"
+    seen = [cov[r] for r in sorted(cov) if not np.isnan(cov[r])]
+    assert seen == sorted(seen, reverse=True), f"coverage did not fall: {cov}"
+    assert all(0.0 <= v <= 1.0 for v in seen), cov
+    assert cov[max(cov)] < 0.25, (
+        "the coarsest ring's footprint is nearly covered, so either the "
+        "sequence is far longer than this fixture or the block is wrong")
+
+
+def test_the_sign_of_the_band_filter_follows_the_terrain_not_the_code():
+    """⚑ Why two real-data measurements of this fix disagreed about its SIGN.
+
+    The band filter drops ring L's stale interior. Whether that raises or lowers
+    RMSE_L depends on which half sits on rougher ground -- the stale interior or
+    the live annulus -- and that is a property of the scene, not of the metric.
+
+    Three scenes, identical but for where the roughness contrast is placed
+    relative to ring 2's inner boundary. Both halves are always rough; only the
+    contrast moves, so neither RMSE can collapse to zero by construction. The
+    third is a control with no contrast at all.
+
+    Measured at 60,000 returns/frame, ring 2, and stable across 10/16/24/32
+    frames: rough-near -37.5 to -48.9%, rough-far +6.1 to +17.4%, control +0.2
+    to +0.9%. **The correction spans 55 percentage points on one codebase, one
+    schedule and one frame count, purely from where the roughness sits.**
+
+    ⚑ There is a SECOND driver and this test is deliberately sized to show it.
+      At the reduced density here the control comes out near -10%, not near
+      zero: the stale population was written at longer range from fewer
+      returns, so it is the worse estimate even on statistically identical
+      ground, and that pushes the correction negative independently of
+      roughness. Its size falls as return density rises, which is why the
+      60,000-point runs show a null control and this one does not.
+
+    So the assertions are the ORDERING and the SPREAD, which hold at both
+    densities, rather than any absolute figure -- the absolutes are exactly the
+    thing that is scene- and sensor-dependent, and asserting one would be
+    asserting the bug this test exists to explain.
+    """
+    from vrgrid.eval.metrics import _cell_centres_m
+    from vrgrid.gpu.kernels import Z_MIN_CM
+    from vrgrid.grid.lattice import ring_of
+    from vrgrid.grid.query import window_cells
+
+    n_frames, step_m, split_m, ring = 10, 2.0, 25.0, 2
+    final_x = (n_frames - 1) * step_m
+    scenes = {"rough_near": (0.15, 0.03), "rough_far": (0.03, 0.15),
+              "control": (0.15, 0.15)}
+
+    def scans(mode, rng):
+        near_amp, far_amp = scenes[mode]
+        for f in range(n_frames):
+            vx = f * step_m
+            r = rng.uniform(1.0, 55.0, 25_000)        # polar: density ~ 1/r
+            th = rng.uniform(-np.pi, np.pi, 25_000)
+            wx, wy = vx + r * np.cos(th), r * np.sin(th)
+            cheb = np.maximum(np.abs(wx - final_x), np.abs(wy))
+            amp = np.where(cheb < split_m, near_amp, far_amp)
+            wz = amp * np.sin(3.1 * wx) * np.cos(2.7 * wy)
+            pose = np.eye(4)
+            pose[0, 3] = vx
+            yield (np.column_stack([wx - vx, wy, wz]),
+                   np.full(25_000, 40, dtype=np.uint32),      # raw `road`
+                   np.ones(25_000, dtype=bool), pose)
+
+    def rmse(gm, ref, banded):
+        buf = gm.buffers[ring]
+        ix, iy = window_cells(buf)
+        slots = np.arange(buf.slots, dtype=np.int64) + buf.offset
+        k = gm.schedule.k(ring)
+        if banded:
+            m = ring_of(*_cell_centres_m(gm, ring, ix, iy), gm.schedule,
+                        gm.speed_ms) == ring
+            ix, iy, slots = ix[m], iy[m], slots[m]
+        n_ref, ref_mean, _ = ref.block_stats(ix * k, iy * k, k)
+        g = gm.soa["ground_height"][slots]
+        keep = ((n_ref > 0) & (gm.soa["obs_count"][slots] > 0)
+                & (gm.soa["height_variance"][slots] > 0)
+                & (g > Z_MIN_CM) & (g < Z_MAX_CM))
+        mine = g[keep].astype(np.float64) + getattr(gm, "z_datum_m", 0.0) * 100.0
+        return float(np.sqrt(np.mean((mine - ref_mean[keep]) ** 2)))
+
+    change = {}
+    for mode in scenes:
+        ref = build_from_scans(
+            (p, l, T) for p, l, _, T in scans(mode, np.random.default_rng(7)))
+        gm = build_gridmap(load(SCHEDULE))
+        run_sequence(gm, scans(mode, np.random.default_rng(7)))
+        before = rmse(gm, ref, banded=False)
+        change[mode] = (rmse(gm, ref, banded=True) - before) / before
+
+    # Monotone in where the roughness was put -- that is the mechanism.
+    assert change["rough_near"] < change["control"] < change["rough_far"], change
+
+    # And the swing is large: moving the contrast alone moves the correction by
+    # more than 15 points, which is why no single factor can post-hoc correct
+    # the pre-fix numbers and the metric had to be fixed instead.
+    assert change["rough_far"] - change["rough_near"] > 0.15, change
 
 
 # --- §9.4: dynamic removal ---------------------------------------------------

@@ -626,6 +626,96 @@ git clone --depth 1 https://github.com/url-kaist/patchwork-plusplus.git
 `ground.segment_ground` is now the geometric segmenter rather than the
 `ground_from_semantics` fallback, on this machine.
 
+## 7. §9.2 scored each ring over its whole square window — FIXED, and it is not §6's bias
+
+**What was wrong.** §9.2 eq. (26) does not say what `C_L` is, and
+`metrics._ring_cells` read it as every cell in ring L's buffer. That buffer is
+a square of half-width `R_L`, so it covers the region the finer rings serve,
+while only its annulus `[R_{L-1}, R_L)` is ever written. No cell moves between
+rings — what moves is the vehicle, and with it which ring answers for a place.
+The interior is never cleared (a toroidal shift clears only the edge coming
+into view, §2.4) and never read (`query()` routes those places to a finer
+ring), so it holds values written when that ground was far away.
+
+**Fixed.** `C_L` is now the cells ring L still *serves*, decided by `ring_of`
+on the cell centre — the same function `query()` routes with, pinned against
+`slot_of` rather than asserted. It lives in `_ring_cells`, so all §9.2/§9.3
+metrics inherit it.
+
+**⚑ This is NOT the range bias, and §6 is right to have withdrawn that.** §6's
+controlled experiment — one-ring uniform 20 cm against the four-ring
+schedule's ring 2, re-run with the datum fixed — gives **−0.26 cm and −0.41
+cm**. A single-ring schedule structurally cannot carry this defect, so that
+comparison is the direct test of it, and it says migration costs nothing
+measurable in height bias. An earlier version of this section claimed the
+confound distorted §8.2's money plot across schedules; **that claim is
+withdrawn**. It rested on synthetic runs made before §6's datum fix, and §6's
+real-data experiment is the better evidence.
+
+**What it does change, and §6 does not cover.** The defect is in *which cells
+are scored*, so it lands hardest on the population metrics rather than on
+height. On the 12-frame synthetic sequence, ring 3's fill rate read **0.23**
+against **0.83** over the cells it actually answers for — the §1.3 ring-sweep
+claim understated by a factor of three and a half, because the unwritten
+interior was counted as unfilled. IoU moves the same way. Those numbers are
+synthetic and want re-running on real sequences.
+
+**⚑ The sign question is answered — mechanistically, without real data.** Two
+measurements of this fix on 07/08 disagreed, first "understated 3–12%", then
+"no consistent bias, −40% to +21%". Neither was reproducible here, so the
+mechanism was tested directly instead: three synthetic scenes, identical but
+for where a roughness contrast sits relative to ring 2's inner boundary. Both
+halves always rough, only the contrast moved. Ring 2, 60,000 returns/frame,
+stable across 10/16/24/32 frames:
+
+| scene | RMSE before | after | change |
+|---|---|---|---|
+| **rough-near** — stale interior is the rough half | 0.95 | 0.49 | **−48.2 %** |
+| **rough-far** — live annulus is the rough half | 1.46 | 1.68 | **+15.1 %** |
+| control — no contrast | 1.66 | 1.67 | +0.6 % |
+
+**The correction spans ~55 percentage points on one codebase, one schedule and
+one frame count, purely from where the roughness sits.** So the "no consistent
+bias, −40% to +21%" report is not noise and not a defect — it is the predicted
+consequence of terrain contrast varying by ring and sequence, and the earlier
+"consistent 3–12%" was the reading that could not have been right.
+
+**The consequence is that no correction factor exists.** A bias with a fixed
+direction could have been divided out of the published numbers in prose; one
+set by the terrain under each ring cannot be. Fixing the metric was the only
+option, which is what this section records. Pinned in
+`test_the_sign_of_the_band_filter_follows_the_terrain_not_the_code`.
+
+⚑ **A second driver, smaller and disclosed:** the stale population was written
+at longer range from fewer returns, so it is the worse estimate even on
+identical ground, pushing the correction negative independently of roughness.
+It shrinks as return density rises — at 25,000 returns/frame the control reads
+≈ −10 %, at 60,000 it reads ≈ 0. **Prediction for the real-data A/B: each
+sequence's sign should track its roughness contrast across each ring's inner
+boundary, not a constant.** That is falsifiable and is the thing to check when
+07/08 land.
+
+**⚑ Open, and it touches §2b's headline.** ρ = 1.45 median (ring 1, n = 11) is
+the claim we lead with. This fix changes the scored population, and on the
+synthetic sequence ρ moves by up to **0.06 per ring**. **§2b's table should be
+regenerated with this fix before ρ is quoted to two decimals.** The finding
+survives in shape either way — a 0.06 shift does not move ρ out of its band —
+but the second decimal is not currently earned.
+
+**⚑ A separate caveat on ρ's denominator, found alongside.** `spread` is
+estimated from the 5 cm reference cells of `F(c)` that M\* observed. Median
+coverage on the 12-frame synthetic sequence is 1.00 / 0.25 / 0.06 / 0.02 for
+rings 0–3 — ring 3's sub-cell variability comes from roughly one reference cell
+in sixty-four. A spread estimated from two points is biased low and ρ divides
+by it, so ρ on the coarse rings is biased **high**: the conservative direction
+for a number we want near 1. `coarsening_ratio_per_ring` already drops
+`n_ref ≤ 1`; at `k = 8` that guard admits a spread from two cells of
+sixty-four. Disclosed rather than corrected, and coverage is now a `cov` column
+printed next to ρ so the two cannot be read apart. This compounds §2b's "ring 0
+has no ρ on any sequence" — between them, ρ is best evidenced at ring 1.
+
+---
+
 ## What is not on this list
 
 For the avoidance of doubt, the following are **settled**, not open questions:

@@ -685,6 +685,40 @@ RMSE_L = sqrt( (1/|C_L|) Σ_{c ∈ C_L} ( μ_c − h̄*(c) )² ),
          h̄*(c) = mean_{f ∈ F(c)} h*_f                               (26)
 ```
 
+> **⚑ Correction, 3 Sep — Aakash. `C_L` is not "ring L's cells", and reading it that way scored each ring against a reference holding observations it never received.** *The section never says what `C_L` is, and the implementation took the obvious reading: every cell in ring L's buffer. That buffer is a square of half-width `R_L`, so it physically covers the hole the finer rings serve, while `ring_of` hands each place to the FINEST ring containing it — so ring L only ever receives returns from the annulus `[R_{L-1}, R_L)`.*
+>
+> *The vehicle then drives and that annulus sweeps outward across the world. Every cell it leaves behind keeps its last far-range value for as long as it stays in the window: nothing clears it — a toroidal shift clears only the edge coming into view (§2.4) — and nothing reads it, because `query()` routes that place to a finer ring now. Scoring it asks a height frozen at 60 m to match an `M*` that went on accumulating the close-range returns the cell never got.*
+>
+> *Measured on the 12-frame synthetic sequence, 5/10/20/40 — stale share of each ring's scored population, and what dropping it does:*
+>
+> | ring | stale | RMSE_L cm | IoU | fill |
+> |---|---|---|---|---|
+> | 1 | 19% | 0.40 → **0.37** | 0.59 → **0.68** | 0.59 → **0.68** |
+> | 2 | 21% | 0.37 → **0.32** | 0.39 → **0.72** | 0.39 → **0.72** |
+> | 3 | 13 cells | 0.33 → 0.33 | 0.23 → **0.83** | 0.23 → **0.83** |
+>
+> *Occupancy and fill move furthest because the hole is full of ground `M*` knows about and the ring never wrote: ring 3's far-field fill rate was reported as 0.23 when the ring fills 0.83 of what it actually answers for. Ring 3's RMSE does not move because the synthetic terrain is flat to x = 30 m and then ramps at 6%, and a rising surface closes the forward horizon — forward returns past 50 m appear at frame 0 and never again, 13 cells in total. Its 50–100 m annulus is otherwise lateral and rear, where a straight-line drive leaves nothing behind. On a real sequence, where the far band is fed for kilometres, ring 3 is the ring that carries most of this.*
+>
+> ***No cell ever moves between rings.*** *The buffers are static and world-anchored and a cell never changes ring. What moves is the vehicle, and with it which ring is* responsible *for a given place; "migration" here always means that responsibility passing inward, never storage being relocated. The wording above was read the other way once, so it is worth stating.*
+>
+> ***⛑ WITHDRAWN: "the confound is asymmetric across the schedules §8.2 compares".*** *This note originally argued that because a uniform baseline has one ring and cannot carry the defect, the money plot was charging the foveated schedules for stale memory and the uniform grids for none — on synthetic worst-ring RMSE of 0.40 → 0.37 and 0.46 → 0.37 against uniform rows that did not move. **That is exactly the comparison `known-limitations.md` §6 ran on real data with the datum fixed** — one-ring uniform 20 cm against the four-ring schedule's ring 2 — and it gives* **−0.26 cm and −0.41 cm: migration costs nothing measurable in height bias.** *The synthetic runs behind the original claim predate §6's datum fix, and §6's experiment is the better evidence. The structural point stands (a single-ring schedule cannot carry this); the claim that it distorted the money plot does not.*
+>
+> ***What the defect does change is which cells are scored***, *so it lands on the population metrics rather than on height: ring 3's fill rate read 0.23 against 0.83 over the cells it actually answers for. That is a different metric from the one §6 measured and is not covered by it. And it touches the headline —* `known-limitations.md` *§2b leads with* **ρ = 1.45 median** *at ring 1 over eleven sequences, and ρ moves by up to 0.06 per ring here, so §2b's table wants regenerating with this filter before ρ is quoted to two decimals.*
+>
+> *So `C_L` is **the cells ring L still serves**, and the predicate is `ring_of` on the cell centre — the same function `query()` routes with, so the scored set cannot drift from the set the map answers with. The centre is the convention for a cell straddling a boundary; §2.4 already says that boundary wobbles by up to one coarsest cell as the window shifts, so no finer rule would mean anything.*
+>
+> ***⛑ The sign of the correction is not settled, and no figure for it is quoted here.*** *Every before → after number in this note is the synthetic sequence, where dropping the stale cells* lowers *RMSE — the stale value was written at grazing incidence on the 6% ramp and is worse than the live annulus.*
+>
+> *An external measurement against seq 07/08 was reported on 3 Sep and revised the same day: first as a consistent **3–12% understatement**, then withdrawn for **"no consistent bias, −40% to +21%"** depending on ring, sequence and frame count; its traced example moved from 350.7 cm (retracted as a separate `M*` defect) to 169.5 cm. Neither is reproducible here — no data root on this machine, no `M*` artefact for either sequence. The 3–12% was briefly written into this section and has been removed rather than swapped for its replacement, because a withdrawn number quoted as if it stood is worse than no number.*
+>
+> **So the direction on real data is unknown, and no report sentence may claim this correction improves — or worsens — our per-ring RMSE until it is re-measured on 07/08.** *What is settled is the mechanism, the population size, and the asymmetry across schedules.*
+>
+> ***An inconsistent sign argues for the fix, not against it.*** *A bias with a known direction can be corrected for in prose without touching the metric; one that swings with where a sequence's rough terrain falls relative to the stale region cannot be.*
+>
+> ***⛑ Separately: `spread` is estimated from very few cells on the coarse rings, and ρ divides by it.*** *`block_stats`'s `n` counts the 5 cm cells of `F(c)` that `M*` observed, capped at `k²`. Median coverage on the 12-frame synthetic sequence is 1.00 at ring 0, **0.25** at ring 1, **0.06** at ring 2 and **0.02** at ring 3 — ring 3's sub-cell terrain variability is estimated from roughly one reference cell in sixty-four. A spread estimated from two points is biased low and ρ divides by it, so ρ on the coarse rings is biased* high— *the conservative direction for a number we want near 1, which is why this is disclosed rather than corrected. `coarsening_ratio_per_ring` already drops `n_ref ≤ 1`; at `k = 8` that guard admits a spread computed from two cells of sixty-four. Coverage is now a column in the per-ring table, next to ρ, so the two cannot be read apart.*
+>
+> ***What this does not fix.*** *A cell the ring still serves is scored against every return in its footprint, including returns fired from outside the ring's band — the ground behind the vehicle was driven over at 2 m before it fell back to 40 m, and `M*` kept all of it. Fixing that needs a range-stratified `M*`: (n, Σh, Σh²) per band per 5 cm cell, ~4x the reference's memory and 4x its summed-area tables. Against a reference rebuilt from band-restricted returns the difference is at most 0.05 cm (ring 1: 0.37 → 0.32, ring 2: 0.32 → 0.30, ring 3: 0.33 → 0.32) — under the 0.29 cm quantisation floor §9.3 already puts on these numbers. Left deliberately, and it wants re-measuring on real data, where the rear band has a kerb in it and this sequence has smooth analytic terrain.*
+
 ### 9.3 ⚑ The coarsening-justification ratio
 
 The number that expresses the thesis. For coarse cell `c`, define information loss against the individual fine cells (not their mean):
