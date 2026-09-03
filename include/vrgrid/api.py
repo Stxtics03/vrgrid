@@ -6,6 +6,22 @@ this file is signatures only so that three people can build against real
 interfaces from hour 3 instead of imagined ones.
 
 Changing anything here requires all three devs to agree, in the same room.
+
+⚑ The functions below raise, and that is the design -- this file declares the
+  contract, it does not serve it. But each message carried a Day-1/Day-2 OWNER
+  where it should have carried a DESTINATION, so as the work landed they went
+  stale in the one direction that matters: every one of them now reads as
+  outstanding work on a contract that has been met for days. `grid/fusion.py`
+  has the same lesson written at the bottom of it, about a §10.4 stub that a
+  second reader found before the real implementation and concluded from it
+  that the ghost gate was unbuilt.
+
+  Each message now names where the contract is met. `export_gridmap` is the
+  one that is genuinely still open, and it is the only one that still reads
+  that way.
+
+  The frozen surface -- names, signatures, `CellQuery`, `QueryLOD`, `AABB` --
+  is untouched. Nothing a caller may rely on changes.
 """
 
 from dataclasses import dataclass
@@ -54,7 +70,7 @@ def scatter(points: np.ndarray, labels: np.ndarray, pose: np.ndarray) -> None:
     Fixed-point int32 accumulation in 1 cm units -- never float atomics, which
     are non-associative and destroy run-to-run determinism. See math §3.4.
     """
-    raise NotImplementedError("src/grid/ -- Aakash, Day 1")
+    raise NotImplementedError("implemented: vrgrid.grid.fusion.scatter")
 
 
 def fuse() -> None:
@@ -62,7 +78,7 @@ def fuse() -> None:
 
     Kalman update with a range-dependent measurement model. See math §3.
     """
-    raise NotImplementedError("src/grid/ -- Aakash, Day 1")
+    raise NotImplementedError("implemented: vrgrid.grid.fusion.fuse")
 
 
 def split(cell_index: int) -> None:
@@ -71,7 +87,7 @@ def split(cell_index: int) -> None:
     Children inherit mu_p with a strictly larger variance and the `derived`
     bit set. The bit is what makes merge(split(c)) == c exact. See math §5.
     """
-    raise NotImplementedError("src/grid/ -- Aakash, Day 2")
+    raise NotImplementedError("implemented: vrgrid.grid.splitmerge.split")
 
 
 def merge(child_indices) -> None:
@@ -82,7 +98,7 @@ def merge(child_indices) -> None:
     here -- it makes merged cells most confident exactly where they straddle a
     kerb. See math §4.
     """
-    raise NotImplementedError("src/grid/ -- Aakash, Day 2")
+    raise NotImplementedError("implemented: vrgrid.grid.splitmerge.merge")
 
 
 def query(x: float, y: float) -> CellQuery:
@@ -92,26 +108,29 @@ def query(x: float, y: float) -> CellQuery:
     either says so, with dynamic=True when the transient layer supplied it.
     One merge rule, defined here, so no consumer inherits the problem.
     """
-    raise NotImplementedError("src/grid/ -- Aakash, Day 1")
+    raise NotImplementedError("implemented: vrgrid.grid.query.query")
 
 
 # --- the rest of the output interface ----------------------------------------
 
 
 def is_traversable(x: float, y: float) -> bool:
-    raise NotImplementedError("src/grid/ -- Aakash")
+    raise NotImplementedError("implemented: vrgrid.grid.query.is_traversable")
 
 
 def query_conservative(region: AABB) -> QueryLOD:
     """Conservative pyramid query. Never reports SAFE for a block containing an
     untraversable cell -- proved in math §7.2, Theorem 3."""
-    raise NotImplementedError("src/grid/ -- Aakash, Day 4 if time")
+    raise NotImplementedError(
+        "implemented: vrgrid.gpu.pyramid.classify, over a pyramid built by "
+        "pyramid.build(). §7.3's predicate on its own is pyramid.theorem3_safe, "
+        "which covers bits 0, 2 and 5; classify() uses OR_mask for all six")
 
 
 def dynamic_objects() -> list:
     """Tracked objects with velocity. Persists ~1 s with constant-velocity
     prediction, so a pedestrian briefly hidden by a parked car does not vanish."""
-    raise NotImplementedError("src/perception/ -- JP")
+    raise NotImplementedError("implemented: vrgrid.grid.transient.TrackList")
 
 
 def export_gridmap():
