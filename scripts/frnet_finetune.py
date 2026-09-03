@@ -41,6 +41,7 @@ from pathlib import Path
 import numpy as np
 import torch
 import torch.nn.functional as F
+from torch import nn
 from vrgrid.perception import loader, semantics
 from vrgrid.perception.frnet import FRNet
 
@@ -125,12 +126,16 @@ def class_weights(targets: str, weight: float, device: str) -> torch.Tensor:
     return w
 
 
-def freeze(model: FRNet, scope: str, freeze_bn: bool) -> int:
-    """Freeze everything outside `scope`. Returns the trainable parameter count.
+def freeze(model: FRNet, scope: str, freeze_bn: bool) -> list[nn.Module]:
+    """Freeze everything outside `scope`. Returns the modules the caller must .eval().
 
-    Frozen modules are put in `.eval()` and kept there by the caller, because a
-    frozen BatchNorm still updates its running statistics in training mode --
-    the weights hold still while the function the module computes moves.
+    The trainable parameter count is printed, not returned -- the return value
+    is the frozen-module list, and the caller MUST put those in `.eval()` and
+    keep them there. A frozen BatchNorm left in training mode still updates its
+    running statistics: the weights hold still while the function the module
+    computes moves. The annotation said `-> int` and the docstring promised the
+    parameter count, so anyone coding to either would have dropped the list and
+    silently lost exactly the guarantee this file exists to make.
     """
     if scope == "all":
         trainable = list(model.parameters())
@@ -181,7 +186,27 @@ def main() -> int:
     ap.add_argument("--log-every", type=int, default=25)
     ap.add_argument("--holdout", default=HOLDOUT_SEQUENCE,
                     help="sequence kept out of training; frnet_eval.py scores it")
+    ap.add_argument("--fast-scatter", action="store_true",
+                    help="swap the frustum reductions for torch.scatter_reduce via "
+                         "scripts/frnet_fast_scatter.py -- 3.3 h becomes minutes. "
+                         "Verifies forward AND backward before patching; the frozen "
+                         "port in src/perception/frnet is not edited")
     args = ap.parse_args()
+
+    # ⚑ Not cosmetic. Python block-buffers stdout the moment it is piped rather
+    #   than attached to a terminal, and a run this long is always piped into a
+    #   log -- so without this the first progress line lands near the last, and
+    #   a multi-hour job is indistinguishable from a hung one for its whole
+    #   duration. Found the only way it gets found: watching a live run.
+    sys.stdout.reconfigure(line_buffering=True)
+
+    # Opt-in and verified: see the header of scripts/frnet_fast_scatter.py. The
+    # recipe recorded beside the weights says which reduction path produced them,
+    # because a checkpoint is not reproducible without that.
+    if args.fast_scatter:
+        sys.path.insert(0, str(Path(__file__).parent))
+        from frnet_fast_scatter import enable
+        enable(verify=True)
 
     out = Path(args.out)
     reported = Path("checkpoints/frnet-semantickitti_seg.pth")
@@ -264,8 +289,8 @@ def main() -> int:
         loss.backward()
         opt.step()
 
-        losses.append(float(loss))
-        last = float(loss)
+        last = loss.detach().item()
+        losses.append(last)
         if first is None:
             first = last
         if (step - step0 + 1) % args.log_every == 0:
@@ -290,6 +315,7 @@ def main() -> int:
             "weight_decay": args.weight_decay, "unfreeze": args.unfreeze,
             "freeze_bn": not args.no_freeze_bn, "weight_classes": args.weight_classes,
             "weight": args.weight, "seed": args.seed,
+            "fast_scatter": args.fast_scatter,
             "train_sequences": train_seqs, "holdout": args.holdout,
             "loss_first": first, "loss_last": last,
         },

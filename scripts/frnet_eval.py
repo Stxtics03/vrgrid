@@ -47,11 +47,20 @@ def main():
                     help="SemanticKITTI's official validation sequence")
     ap.add_argument("--frames", type=int, default=200)
     ap.add_argument("--checkpoint", default="checkpoints/frnet-semantickitti_seg.pth")
+    ap.add_argument("--fast-scatter", action="store_true",
+                    help="swap the frustum reductions for torch.scatter_reduce via "
+                         "scripts/frnet_fast_scatter.py -- ~35 min becomes ~1 min. "
+                         "Verifies equivalence before patching; JP's port is not edited")
     args = ap.parse_args()
 
     import torch
     from vrgrid.perception import loader, semantics
     from vrgrid.perception.frnet import FRNet
+
+    if args.fast_scatter:
+        sys.path.insert(0, str(Path(__file__).parent))
+        from frnet_fast_scatter import enable
+        enable(verify=True)
 
     ckpt = Path(args.checkpoint)
     if not ckpt.exists():
@@ -104,6 +113,11 @@ def main():
     iou[seen] = inter[seen] / union[seen]
 
     print(f"\nsequence {args.seq}, {frames} frames, {total:,} labelled points")
+    # Held in a name rather than inlined: a backslash escape inside an f-string
+    # is a syntax error before Python 3.12 and this project targets >=3.10.
+    reductions = ("torch.scatter_reduce (--fast-scatter)" if args.fast_scatter
+                  else "the port's own loops")
+    print(f"  reductions                {reductions}")
     print(f"  point accuracy            {correct / total:>6.1%}")
     print(f"  mIoU over {int(seen.sum()):>2} present classes  {iou[seen].mean():>6.1%}"
           f"   (paper: 73.3% over all 4,071 frames)")
