@@ -362,3 +362,41 @@ Whole frame, from `scripts/timing_table.py --alloc`: **8.15 → 1.31 MB/frame**,
 **Source:** `src/grid/lattice.py`, `src/grid/fusion.py`, `tests/test_bin_points.py` (32 tests), `tests/test_engine.py::test_the_two_grid_allocations_stay_fixed`.
 
 **So what:** "No allocation inside the frame loop" is a hard invariant in CLAUDE.md and a sentence in the report; it was false by 15.15 MB a frame and is now true to within ~1 MB of per-call bookkeeping. `bin_points` is pinned bit-identical to `ring_of` + `i_ring` + `RingBuffer.flat_slot` over both frozen schedules and four speeds — including `5/10/50`, whose ratios are 2 and 5 and which is the only thing that catches a power-of-two assumption. The new declared footprint is 3.75 MB of binning scratch, replacing scratch the frame loop already held.
+
+---
+
+## 2026-09-03 — Shrestha
+**Module:** D2 — GPU / timing, and the DL half
+
+**Finding:** Two things, and the second is JP's to decide on.
+
+**1. The fine-tune had no script, and the run behind the reported table was gone.** The −0.5 mIoU result is on a slide and in `handover-2026-09-02.md`, and Gate 6 says every number on a slide comes from a script in `scripts/`. That one did not. The 2 Sep run was done from a scratch file that no longer exists anywhere on disk, and `checkpoints/frnet-finetuned-terrain.pth` holds a bare `state_dict` — no optimiser, no step count, no record of the recipe. **A rejected experiment still has to be reproducible**; a negative result nobody can re-derive is not a defence position, it is an anecdote. `scripts/frnet_finetune.py` now carries the documented recipe as its defaults and writes the optimiser state, step count and full recipe beside the weights, so the next run can actually continue rather than restart.
+
+Two things it fixes that the original recipe plausibly got wrong. **Freezing weights is not freezing a module:** `model.train()` puts every BatchNorm in the network into training mode, so a "frozen" backbone still drifts its running mean and variance on every forward pass — the weights hold still and the function the module computes does not. Frozen modules are held in `.eval()`, with `--no-freeze-bn` to reproduce the other behaviour rather than hide it. And **`range_interpolation` appends synthetic returns** to fill isolated range-image holes; they trail each batch item's real points and are labelled ignore, so the network sees the same densified cloud it is evaluated on without the loss inventing ground truth for points nobody measured.
+
+**⚑ 2. FRNet's forward pass is 10.5 s per frame, and ~90% of it is a Python loop.** Measured on this machine, CUDA, one seq 00 frame of 121,018 points:
+
+| stage | cost |
+|---|---|
+| disk load | 0.7 ms |
+| `range_interpolation` | 60.5 ms |
+| `frustum_region_group` | 0.4 ms |
+| `voxel_encoder` | **4,678.5 ms** |
+| full forward | **10,535.1 ms** |
+
+`frustum_encoder.scatter_max` and `scatter_mean` are `for i in range(dim_size)` loops that build a full-length boolean mask per output slot. `dim_size` is the number of *occupied* frustum pixels — roughly 25,000 — so each call is ~25,000 iterations over a 124,000-row tensor. There are **seven such calls per forward**: `scatter_mean` and `scatter_max` in the encoder, and five `scatter_max` through `frnet_backbone.point2frustum` (once before the stage loop, once per each of the four stages).
+
+`torch.scatter_reduce_` does the same reduction natively. Substituted at the same shapes (124,000 × 256 into 25,000 slots, CPU, so the ratio is loop-vs-native rather than a GPU figure):
+
+| | loop | `scatter_reduce_` | speedup | max abs diff |
+|---|---|---|---|---|
+| `scatter_max` | 37,452 ms | 34.3 ms | **1093×** | **0.000e+00** |
+| `scatter_mean` | 34,452 ms | 10.7 ms | **3229×** | **0.000e+00** |
+
+Bit-identical, including the empty-slot convention both directions: `amax` with an `-inf` init and `include_self=True` leaves empty slots at `-inf`, and `mean` with a zero init and `include_self=False` leaves them at 0, which is what the loop does by skipping `if mask.any()`.
+
+**⚑ And `scatter_max`'s second return value is wrong, harmlessly, for now.** `argmax[i] = idxs` stores the index *within the masked subset* — 0..count−1 — where `torch_scatter.scatter_max` returns the index into the full input. All three call sites discard it (`voxel_feats, _ = ...`), which is why the port scores 98.3% with this in it and why the file's header can say the reductions are "audited by result". A future caller that wants the argmax gets a silently wrong answer, and `scatter_reduce_` does not provide one at all — so whoever makes this change should delete the return value rather than port it.
+
+**Source:** `scripts/frnet_finetune.py`; measurements against `src/perception/frnet/{frustum_encoder,frnet_backbone}.py`, unchanged.
+
+**So what:** The file is JP's and is deliberately frozen as a reference port (`extend-exclude` in `pyproject.toml`, "not ours to modernise"), so this is **left for him to decide on, not done.** What it costs meanwhile: a 600-step fine-tune runs 3.3 hours instead of an estimated three minutes, and `scripts/frnet_eval.py --frames 200` — which is the script behind the reported 90.3% / 69.8% and which anyone re-checking those numbers has to run — takes about 35 minutes. Nothing is wrong with the port's *answers*; the 98.3% point accuracy and the three divergence fixes stand untouched. This is purely the cost of re-deriving them. If the freeze is meant to protect the numbers rather than the source text, a bit-identical reduction is the one change that cannot move them.
