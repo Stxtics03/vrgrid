@@ -93,6 +93,47 @@ def test_ingest_keeps_the_top_of_the_obstacle_not_its_mean(gm):
     assert gm.transient["flags"][slot] & FLAG_DYNAMIC
 
 
+def test_both_layers_measure_height_from_the_same_datum(gm):
+    """`query()` returns the persistent and the transient height through ONE
+    field, so they have to be on one vertical origin.
+
+    The persistent layer stores `world_z - z_datum` (`engine.step`,
+    `harness.run_sequence`). `ingest` quantised the VEHICLE-frame z instead,
+    which is `world_z - ego_z` -- the same point, a different origin, and the
+    gap is `frac(ego_z)`, up to a metre. It moved every time the band stepped,
+    so a pedestrian's reported height drifted against the road they stood on
+    while the vehicle climbed.
+
+    Nothing raises when the two disagree; the transient cell simply reports a
+    height that is wrong relative to everything around it.
+    """
+    ego_z, world_z = 3.4, 4.60          # datum floors to 3.0, so frac is 0.40
+    gm.z_datum_m = 3.0
+
+    ingest(gm, np.array([[5.0, 0.0, world_z - ego_z]]), None, np.ones(1, bool),
+           points_world_m=np.array([[5.0, 0.0, world_z]]))
+
+    _, slot = slot_of(gm, 5.0, 0.0)
+    stored_cm = int(gm.transient["ground_height"][slot])
+    assert stored_cm == round((world_z - gm.z_datum_m) * 100.0)
+    assert query(gm, 5.0, 0.0).ground_height == pytest.approx(world_z - gm.z_datum_m)
+
+    # and the vehicle-frame reading is the wrong answer it used to give
+    assert stored_cm != round((world_z - ego_z) * 100.0)
+
+
+def test_a_stationary_map_is_unchanged_by_the_datum_rule(gm):
+    """With no world points and no datum the two are the same array and the
+    same origin, so every existing caller -- and every test above -- is
+    bit-identical. Stated as an assertion so the compatibility claim in
+    `ingest`'s docstring is not just a claim."""
+    assert gm.z_datum_m == 0.0
+    pts = np.array([[5.0, 0.0, 0.0], [5.0, 0.0, 0.8], [5.0, 0.0, 1.7]])
+    ingest(gm, pts, None, np.ones(3, dtype=bool))
+    _, slot = slot_of(gm, 5.0, 0.0)
+    assert gm.transient["ground_height"][slot] == 170
+
+
 def test_ingest_does_not_depend_on_point_order(gm):
     """§3.4's argument applied to a different array: an unordered scatter makes
     the map depend on the order points arrived in, and two runs then differ."""

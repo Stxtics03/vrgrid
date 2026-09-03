@@ -96,6 +96,21 @@ def ingest(gm, points_m, class_id, moving_mask, points_world_m=None) -> int:
     neither; the planner needs the top of the obstacle, and a transient cell
     exists precisely to say "something is standing here".
 
+    ⚑ THREE frames, not two, and the third is vertical. Height is taken from
+      the WORLD z, re-based to `gm.z_datum_m`, which is what the persistent
+      layer stores (`engine.step` -> `quantise_height(world[:, 2], z_datum)`;
+      `harness.run_sequence` -> `world[:, 2] - gm.z_datum_m`). This used to
+      quantise the VEHICLE-frame z instead, so the two layers were on
+      different vertical origins and `query()` returned both through the same
+      `CellQuery.ground_height` field with nothing to say which was which.
+      The gap is `frac(ego_z)` -- up to a metre, and it moved every time the
+      band stepped. Measured: ego_z 3.4, datum 3.0, a return at world z 4.60
+      came back as 1.20 m where every static cell around it was on 1.60 m.
+
+      With no `points_world_m` the world points ARE the vehicle points and
+      `z_datum_m` is 0.0, so the stationary case every unit test uses is
+      unchanged, bit for bit.
+
     Returns the number of points written.
     """
     from vrgrid.gpu.kernels import quantise_height
@@ -121,7 +136,7 @@ def ingest(gm, points_m, class_id, moving_mask, points_world_m=None) -> int:
     if not np.any(keep):
         return 0
     slots = slots[keep]
-    z_cm = quantise_height(pts[keep, 2])
+    z_cm = quantise_height(world[keep, 2], getattr(gm, "z_datum_m", 0.0))
 
     # Maximum per cell, deterministically: sort by (slot, height) and take the
     # last of each run. np.maximum.at would also work and is slower; either
