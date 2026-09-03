@@ -16,6 +16,7 @@
 #   ghosts-on     seq 00, 0-60     ghost removal ON -- the same frames, trails gone
 #   traffic       seq 07, 650-700  dense moving traffic, colour by motion
 #   reflectivity  seq 00, 4420-60  lane paint, colour by reflectivity
+#   features      seq 00, 0-40     curbs, potholes and per-cell confidence (math 7.4/7.5)
 #   dense3d       seq 00, 0-60     our grid beside a uniform 5 cm dense voxel grid
 set -euo pipefail
 
@@ -45,11 +46,12 @@ scene_args() {
     ghosts-on)    echo "--seq 00 --frames 60 --color-by motion" ;;
     traffic)      echo "--seq 07 --start-frame 650 --frames 50 --color-by motion" ;;
     reflectivity) echo "--seq 00 --start-frame 4420 --frames 40 --color-by reflectivity" ;;
+    features)     echo "--seq 00 --frames 40 --color-by class --features" ;;
     dense3d)      echo "DENSE3D" ;;
     *)            return 1 ;;
   esac
 }
-SCENES="foveation ghosts-off ghosts-on traffic reflectivity dense3d"
+SCENES="foveation ghosts-off ghosts-on traffic reflectivity features dense3d"
 
 run_scene() {   # $1 scene, $2 = "--save <path>" or "" for a spawned viewer
   local args; args="$(scene_args "$1")" || die "unknown scene: $1  (try: $SCENES)"

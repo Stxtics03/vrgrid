@@ -154,9 +154,17 @@ it first costs nothing and buys everything.
 ### ⑤ Optional, if they are engaged and time is there
 
 ```bash
+./scripts/demo.sh features      # curbs, potholes, per-cell confidence
 ./scripts/demo.sh traffic       # seq 07, dense moving traffic
 ./scripts/demo.sh reflectivity  # seq 00, lane paint
 ```
+
+`features` is new as of 3 September — it draws the curb/pothole layer (§7.4) and
+per-cell confidence (§7.5), which until now existed in the code and rendered
+nowhere. It is the answer to *"what does the map actually know?"*. Two guards
+when you show it: confidence is **a margin, not a probability**
+(`known-limitations` §4), and the curb/pothole counts are a demonstration with
+no ground truth to score against — see below.
 
 ---
 
@@ -167,7 +175,15 @@ this demo can be lost. From `docs/handover-2026-09-02.md`:
 
 **The plan-regret result is not proven — do not present it as the headline.**
 The README's framing ("proves the compression is free by showing it does not
-change the plan") is ahead of the data. `docs/figures/regret.csv` says:
+change the plan") is ahead of the data.
+
+⚠️ **Regenerate these numbers before you present.** The table below is read from
+a `docs/figures/regret.csv` written 2026-09-02 18:46 — *nine hours before* the
+§9.2 eval merge landed on `main`. That merge changed `reference_map`, `metrics`
+and `plan_regret`, so the figures may have moved. Rebuild with
+`.venv/bin/python scripts/regret_plot.py --seq 08` and check the rows against
+what is printed here; the shape of the argument below holds either way, but the
+digits are Aakash's lane and his to confirm.
 
 | schedule | MB | regret |
 |---|---|---|
@@ -176,6 +192,8 @@ change the plan") is ahead of the data. `docs/figures/regret.csv` says:
 | uniform 10 cm | 78.50 | **0.5553** |
 | uniform 20 cm | 30.50 | 0.6455 |
 | uniform 40 cm | 18.50 | 0.7613 |
+
+*(as of 2026-09-02, pre-§9.2-merge — see the warning above)*
 
 What is defensible: *our two schedules produce the same plan despite a 5.4 MB
 difference, and we beat a uniform 20 cm map of comparable size.* What is not:
@@ -190,11 +208,21 @@ evaluation is comparable at a fixed window and not across windows, and that
 spread, no pattern. SemanticKITTI has no curb or pothole ground truth, so there
 is nothing to score against. Say that before you are asked — playbook Q5.
 
-**Ring 0 has no coarsening ratio on any sequence.** The metric excludes
-footprints holding a single reference return, and at 5 cm essentially all of
-them do. Ring 0 has RMSE (0.91–5.25 cm) and no ρ. It is the metric's
-construction, not a bug, but it is the biggest hole in the accuracy story —
-know it before someone finds it.
+**Ring 0 has no coarsening ratio ρ on any sequence — and know the *current*
+reason, because it was re-diagnosed on 3 September and the older explanation is
+false.** It is not that ring-0 footprints hold a single reference *return*.
+`block_stats` counts observed **cells**, and a ring-0 footprint is `k = 1` —
+exactly one cell — so `n_ref` can never exceed 1 and the `n_ref > 1` guard in
+`coarsening_ratio_per_ring` drops ring 0 **by arithmetic, on every sequence**.
+The data is there: M\* holds more than one return in **92.8 / 97.0 / 97.4 %** of
+the ring-0 cells §9.2 scores on 00 / 07 / 08.
+
+Closing it would score ring 0 at **ρ 1.01–1.24, the best of any ring** — so this
+is a fixable gap with a measured cost, deliberately deferred to Day 7, not a
+permanent limitation. Say it that way. It is deferred because `block_stats` is
+shared: the fix moves ring 1 by −21.5 % on 07, invalidates every cached M\*
+`.npz`, and forces the eleven-sequence table and the "ρ median 1.45" headline to
+be regenerated. Full diagnosis in `docs/known-limitations.md` §2b.
 
 **Semantics come from the `.label` files, not from a network.** Nothing is
 retrained and no inference runs for labels. FRNet is reported alongside the map
@@ -211,7 +239,7 @@ plainly — it is a strength, not an admission.
 | `FileNotFoundError: GT poses not found: data/poses/00.txt` | `VRGRID_DATA_ROOT` one level too high | `export VRGRID_DATA_ROOT=$PWD/data/dataset`, or just use `demo.sh` |
 | Viewer never appears | no display / remote session | bake instead and play the `.rrd`; `DISPLAY` is `:0.0` on this box |
 | `PatchWorkpp` banner then a long pause | normal — Patchwork++ init | it is ~4 s for 20 frames; baked scenes skip it |
-| `patchwork++ NO` in `check` | `pypatchworkpp` not installed | ground silently falls back to the semantic proxy, which **includes terrain and admits embankments**. Do not demo ground on that. Rebuild from the git clone, not PyPI — see handover JP item 3 |
+| `[!] ground: SEMANTIC-CLASS FALLBACK` printed | `pypatchworkpp` not installed | as of 3 Sep the fallback is **loud** rather than silent. The proxy **includes terrain and admits embankments** — do not demo the ground layer on it. Rebuild from the git clone, not PyPI (`pip install ./patchwork-plusplus/python`) — handover JP item 3 |
 | Ghost scene shows nothing moving | wrong frames | seq 00 needs frames ~0–60; single best frame is 10 (motorcyclist + pedestrian) |
 | `0 occupied cells` printed | `--show-ghosts` counter artifact | expected, harmless, keep it off screen (see ③) |
 | Scene is slow live | 160 frames ≈ 35 s | play the baked file |
