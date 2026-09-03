@@ -30,6 +30,8 @@ they track the vehicle. Points are world-frame and accumulate on the timeline.
 import numpy as np
 import rerun as rr
 from vrgrid.cell import OCC_FREE, OCC_UNKNOWN
+from vrgrid.grid.confidence import drivable_confidence
+from vrgrid.grid.features import detect
 
 from ._config import (
     blind_cone_radius_m,
@@ -81,6 +83,40 @@ def _height_ramp(z: np.ndarray, lo: float = -3.0, hi: float = 15.0) -> np.ndarra
 #             slots are left undrawn, they are not information
 _FREE_RGBA = (110, 125, 140, 70)      # slate, ~27% opacity -- recedes behind occupied
 _UNKNOWN_RGBA = (150, 90, 160, 90)    # muted violet, matches the blind-cone "unknown" hue family
+
+# --- §7.4 features and §7.5 confidence -------------------------------------
+#
+# Three more read-only layers over fields `MapEngine.step` already fills. They
+# are OFF by default and OFF the per-frame path, and that is a measurement
+# rather than caution: `features.detect` is a neighbourhood pass over all
+# 910,000 window slots and costs **1,137 ms p50** on this machine, eleven times
+# the whole 100 ms frame budget (`drivable_confidence` over four rings is a
+# further 89 ms). Logging them every frame would make the viewer unusable and
+# would quietly triple the cost of every `--save` recording, so `--features`
+# recomputes them every `FEATURE_INTERVAL` frames and once more at the end.
+# What is drawn is therefore the map as of the last recompute, which is why
+# the final call after the loop exists: the last frame is the one a still gets
+# taken from.
+FEATURE_INTERVAL = 20
+
+_CURB_RGBA = (230, 159, 0, 235)       # Okabe-Ito orange -- a positive step, drawn standing up
+_POTHOLE_RGBA = (213, 94, 0, 245)     # Okabe-Ito vermillion -- a negative one, drawn sunken
+
+# Confidence is a scalar field, so it needs a ramp rather than a flat colour,
+# and the ramp is ordered in LIGHTNESS (dark = no confidence -> light = full)
+# so it survives all three CVD types without relying on hue. Deliberately not
+# red-to-green, which is the one ramp a deuteranope cannot read at all.
+_CONFIDENCE_STOPS = np.array(
+    [[38, 54, 92], [0, 114, 178], [86, 180, 233], [240, 228, 66]], dtype=np.float32
+)
+
+
+def _confidence_ramp(c: np.ndarray) -> np.ndarray:
+    """(N, 3) uint8 from a drivable-confidence in [0, 1]. §7.5."""
+    t = np.clip(np.asarray(c, np.float32), 0.0, 1.0) * 3.0
+    i = np.clip(t.astype(np.int64), 0, 2)
+    f = (t - i)[:, None]
+    return (_CONFIDENCE_STOPS[i] * (1.0 - f) + _CONFIDENCE_STOPS[i + 1] * f).astype(np.uint8)
 
 
 def legend_markdown(palette: str) -> str:
@@ -151,7 +187,7 @@ def get_display_points(frame, ghost_removal: bool, color_by: str = "class",
 class PipelineView:
     def __init__(self, schedule, spawn: bool = False, save_path: str | None = None,
                  color_by: str = "class", ghost_removal: bool = True,
-                 palette: str = "semantickitti", engine=None):
+                 palette: str = "semantickitti", engine=None, features: bool = False):
         self.color_by = color_by
         self.ghost_removal = ghost_removal
         self.palette = palette
@@ -161,6 +197,10 @@ class PipelineView:
         # 2.5D surface -- see `_log_occupied`.
         self.engine = engine
         self._last_occupied_n = 0   # updated by _log_occupied, read by _log_memory
+        # §7.4 curbs / potholes and §7.5 confidence. Off by default because
+        # `features.detect` costs 1,137 ms -- see FEATURE_INTERVAL.
+        self.features = bool(features) and engine is not None
+        self._frames_logged = 0
         rr.init("vrgrid_pipeline", spawn=spawn)
         if save_path:
             rr.save(save_path)
@@ -177,7 +217,22 @@ class PipelineView:
                 "  `world/map/free`      flat translucent slate tiles -- looked, clear\n"
                 "  `world/map/unknown`   observed-but-still-unknown cells + the blind "
                 "cone; never-observed cells are not drawn.\n"
-                "Unknown is not free -- they are separate entities on purpose.",
+                "Unknown is not free -- they are separate entities on purpose.\n\n"
+                "With `--features` (math §7.4, §7.5):\n"
+                "  `world/map/curbs`      orange boxes standing at the measured rise\n"
+                "  `world/map/potholes`   vermillion boxes sunk to the measured depth\n"
+                "  `world/map/confidence` flat tiles above the surface, dark = no "
+                "confidence in drivability, light = full.\n"
+                "These recompute every 20 frames, not every frame: the detector is a "
+                "full-window pass and costs ~1.1 s.\n\n"
+                "⚑ KNOWN BUG, ring 3 confidence: every ring-3 tile reads a FALSE "
+                "0.000. Beyond ~50 m SemanticKITTI has no labels (100% of returns "
+                "in the 50-100 m band on seq 00), and `run/engine.py` maps "
+                "unlabelled to class 0 = `car`, which is not drivable. So ring 3 "
+                "is dark because it is UNLABELLED, not because it is hazardous. "
+                "Live-map path only -- the published per-ring / rho tables use "
+                "`eval/harness.py`, which maps unlabelled to CLASS_UNLABELLED and "
+                "is correct.",
                 media_type=rr.MediaType.MARKDOWN,
             ),
             static=True,
@@ -306,6 +361,150 @@ class PipelineView:
                        colors=[_UNKNOWN_RGBA], fill_mode="solid"),
         )
 
+    def _ring_slices(self):
+        """`[(slice, side), ...]` per ring -- the shape `features.detect` and
+        `confidence.summarise` both take. Built from the engine's allocation so
+        it cannot drift from the storage layout."""
+        return [(slice(r.offset, r.offset + r.slots), r.side)
+                for r in self.engine.handle.rings]
+
+    def _flat(self, level: int, slot: np.ndarray) -> np.ndarray:
+        """`Curbs.slot` / `Potholes.slot` are indices WITHIN a ring window --
+        the dataclasses say so, and merging rings without this offset silently
+        aliases ring 0's slot 5 onto ring 3's. Lift them to flat SoA slots."""
+        return slot.astype(np.int64) + self.engine.handle.rings[level].offset
+
+    def _log_curbs(self, curbs):
+        """§7.4 curb edges, drawn STANDING UP at their measured rise.
+
+        A curb is a step, so the box is drawn from the cell's surface up by
+        `height_cm` rather than as a flat marker: the thing the problem
+        statement says a 2D grid loses is exactly this height, and drawing it
+        at its real magnitude is the difference between a detection and a
+        measurement. Colour is flat -- height is already carried by the shape.
+        """
+        cent, half = [], []
+        for level, c in enumerate(curbs):
+            if not len(c):
+                continue
+            x, y, z = self._centres_world(self._flat(level, c.slot))
+            h = np.maximum(c.height_cm.astype(np.float32), 1.0) / 100.0  # cm -> m
+            cent.append(np.stack([x, y, z + h / 2.0], axis=1))
+            half.append(np.stack([np.full_like(h, c.cell_m / 2.0),
+                                  np.full_like(h, c.cell_m / 2.0), h / 2.0], axis=1))
+        if not cent:
+            rr.log("world/map/curbs", rr.Clear(recursive=True))
+            return
+        rr.log("world/map/curbs",
+               rr.Boxes3D(centers=np.concatenate(cent).astype(np.float32),
+                          half_sizes=np.concatenate(half).astype(np.float32),
+                          colors=[_CURB_RGBA], fill_mode="solid"))
+
+    def _log_potholes(self, holes):
+        """§7.4 potholes, drawn SUNK to their measured depth below the rim.
+
+        The mirror of `_log_curbs` and for the same reason: a negative obstacle
+        is the other half of the sentence a 2D grid cannot answer, and a marker
+        floating at the surface would show the detection while hiding the one
+        number that says whether it matters.
+        """
+        cent, half = [], []
+        for level, h in enumerate(holes):
+            if not len(h):
+                continue
+            x, y, z = self._centres_world(self._flat(level, h.slot))
+            d = np.maximum(h.depth_cm.astype(np.float32), 1.0) / 100.0   # cm -> m
+            cent.append(np.stack([x, y, z - d / 2.0], axis=1))
+            half.append(np.stack([np.full_like(d, h.cell_m / 2.0),
+                                  np.full_like(d, h.cell_m / 2.0), d / 2.0], axis=1))
+        if not cent:
+            rr.log("world/map/potholes", rr.Clear(recursive=True))
+            return
+        rr.log("world/map/potholes",
+               rr.Boxes3D(centers=np.concatenate(cent).astype(np.float32),
+                          half_sizes=np.concatenate(half).astype(np.float32),
+                          colors=[_POTHOLE_RGBA], fill_mode="solid"))
+
+    def _log_confidence(self):
+        """§7.5 per-cell confidence in the DRIVABILITY verdict, over observed
+        cells, as flat tiles floating 15 cm above the surface.
+
+        Floated deliberately: this is a scalar field over the same cells
+        `_log_free` and `_log_occupied` already draw, and at the surface it
+        would z-fight with both. Read it WITH the occupancy layers, never
+        instead of them -- `drivable_confidence`'s own docstring makes the
+        point that a cell can be traversable under §7.1 and still carry 0.1,
+        which is the case the bitfield alone cannot express.
+
+        ⚑ RING 3 CURRENTLY READS A FALSE 0.000, AND IT IS NOT THIS LAYER.
+          Every ring-3 tile reports zero confidence with `binding` =
+          "not-drivable", and the honest reason is a bug upstream, not a
+          vegetation verge:
+
+            * SemanticKITTI's annotation stops at roughly 50 m. Measured on
+              seq 00 frames 0-59, **100.0%** of returns in the 50-100 m band
+              (104,758 of 104,758) carry no label -- `semantic_labels` gives
+              them -1. Ring 2 is 8.3% unlabelled, rings 0-1 under 1%.
+            * `run/engine.py` maps `semantic < 0` to class **0**, and learning
+              id 0 is `car`. So every ring-3 cell stores "car", `car` is not in
+              `drivable_classes`, and the class gate zeroes the cell outright.
+            * `eval/harness.py`'s `learning_ids()` does the same conversion
+              CORRECTLY -- `-1 -> CLASS_UNLABELLED (31)`, which is in no
+              drivable set and so fails safe as *unknown* rather than as a
+              parked car. The two paths disagree about one conversion.
+
+          Scope: this is the LIVE MapEngine path only (this dashboard,
+          `vrgrid.run`, `timing_table`, `ghost_removal_figure`). The published
+          §2b per-ring and rho tables go through `harness.run_sequence` and are
+          NOT affected.
+
+          Magnitude, so nobody over-reads the fix: bypassing the class gate,
+          ring 3's worst-of-four margin is mean **0.008**, median 0.000, above
+          zero on 3.6% of tiles -- `surface` is exactly zero on 91.8% of them
+          and `geometry` on 60.5%. Corrected, ring 3 stays dark. What changes
+          is that it would be dark for a true reason and `binding` would say
+          `surface` / `geometry` instead of falsely saying "not-drivable" --
+          low confidence honestly labelled unknown, rather than a phantom car.
+
+          `run/engine.py` is not this lane, so this is documented here and
+          flagged rather than fixed. A dark ring-3 tile in a recording made
+          before that fix means "unlabelled beyond 50 m", not "hazard".
+        """
+        cent, cols, half = [], [], []
+        for level, (sl, side) in enumerate(self._ring_slices()):
+            cell_m = self.engine.sched.rings[level].cell_m
+            conf = drivable_confidence(self.engine.handle.grid, sl, side, cell_m,
+                                       self.engine.thresholds)
+            seen = np.flatnonzero(self.engine.handle.grid["obs_count"][sl] >= 1)
+            if not seen.size:
+                continue
+            x, y, z = self._centres_world(seen + self.engine.handle.rings[level].offset)
+            cent.append(np.stack([x, y, z + 0.15], axis=1))
+            cols.append(_confidence_ramp(conf[seen]))
+            half.append(np.stack([np.full(seen.size, cell_m / 2.0),
+                                  np.full(seen.size, cell_m / 2.0),
+                                  np.full(seen.size, 0.01)], axis=1))
+        if not cent:
+            rr.log("world/map/confidence", rr.Clear(recursive=True))
+            return
+        rr.log("world/map/confidence",
+               rr.Boxes3D(centers=np.concatenate(cent).astype(np.float32),
+                          half_sizes=np.concatenate(half).astype(np.float32),
+                          colors=np.concatenate(cols), fill_mode="solid"))
+
+    def log_features(self):
+        """Recompute and draw the §7.4 / §7.5 layers. ~1.2 s -- see
+        FEATURE_INTERVAL. Public so a caller can force one final pass after the
+        loop, which is the state a still gets taken from."""
+        if not self.features:
+            return
+        rings = self._ring_slices()
+        curbs, holes = detect(self.engine.handle.grid, self.engine.sched, rings,
+                              self.engine.thresholds, buffers=self.engine.buffers)
+        self._log_curbs(curbs)
+        self._log_potholes(holes)
+        self._log_confidence()
+
     def _log_memory(self):
         """Per-frame live memory overlay: the real occupied-cell storage now
         (`occupied count * CELL_BYTES`), the dense-3D baseline derived from the
@@ -330,6 +529,11 @@ class PipelineView:
             self._log_free()
             self._log_unknown()
             self._log_memory()
+            # Not every frame: `features.detect` is 1,137 ms. The caller runs
+            # one more pass after the loop so the final state is complete.
+            if self.features and self._frames_logged % FEATURE_INTERVAL == 0:
+                self.log_features()
+        self._frames_logged += 1
 
         # The removed set, on its own entity -- this is what the demo toggles.
         ghosts = frame.points_world[frame.moving].astype(np.float32)
