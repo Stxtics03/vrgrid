@@ -142,21 +142,40 @@ a second hardcoded copy.
 
 ---
 
-## 3. Why FRNet was dropped (semantics are ground truth)
+## 3. FRNet — the port works; the map still uses ground truth, by choice
 
-The plan was to run FRNet for semantic segmentation. The only standalone
-implementation available **does not reproduce the trained network** — wrong
-backbone activation (LeakyReLU where the paper uses HSwish), wrong FOV
-parameters, missing the RangeInterpolation head — and collapses to **~15 %
-point accuracy** on every frame. Running FRNet correctly needs its full
-`mmengine` / `mmcv` / `mmdet` / `mmdet3d` stack, which was out of scope for the
-timeline.
+**Status changed on 2 September.** The standalone port was non-functional for
+five days at ~15 % point accuracy, and this section used to say so. It now
+reproduces the pretrained checkpoint: **98.3 %** point accuracy on seq 00
+frame 43, **69.8 %** mIoU over 200 frames of seq 08 against the paper's
+**73.3 %** (`scripts/frnet_eval.py`). Fine-tuning was tried and **rejected**,
+−0.5 mIoU (`docs/handover-2026-09-02.md`).
 
-**Decision (logged in `docs/research-log.md`):** use the ground-truth
-SemanticKITTI `.label` files directly for both the 19-class semantic label and
-the `moving-*` motion flag. Zero training, zero inference. The broken port is
-kept under `src/perception/frnet/`, flagged non-functional at the top of every
-file, with its entry points raising rather than returning garbage.
+### The three divergences, and the two the original header got wrong
+
+| # | what the old header said | what was actually true |
+|---|---|---|
+| 1 | "backbone activation is `nn.LeakyReLU` here; the checkpoint was trained with HSwish" | **Correct.** 7 sites in `frnet_backbone.py`. mmcv's HSwish is `x·relu6(x+3)/6`, which is exactly torch's `nn.Hardswish`. |
+| 2 | "FOV is fed as `fov_up=2.0` / `fov_down=-24.8`; training used 3.0 / −25.0" | **Wrong place.** `frnet.py` always defaulted to the correct 3.0 / −25.0. `perception/semantics.py` was overriding them with the HDL-64E's *physical* vertical FOV out of `configs/frnet.yaml`. Different quantities — the checkpoint learned a **fixed** spherical projection, so points must land in the grid the weights were trained on whatever sensor produced them. |
+| 3 | "the test-time RangeInterpolation densification (H=64, W=2048) is missing" | **Understated.** It was missing, but it is a *test-pipeline transform to be reproduced verbatim*, not a resolution setting — and it projects with the divergence-2 FOV, so the two were coupled. Upstream's `proj_mask = (proj_idx > 0)` off-by-one (point index 0 reads invalid against a −1 sentinel) is **reproduced deliberately**: the paper's 73.3 % was measured with it, and "fixing" it makes our numbers incomparable. |
+
+Two further corrections to the same header: it recorded "413/413 tensors, no
+shape mismatch", where the checkpoint actually loads **421 tensors, 0 missing
+and 8 unexpected** — all `auxiliary_head.*`, training-only heads correctly
+unused at inference. And it listed the manual `scatter_max` / `scatter_mean` in
+`frustum_encoder.py` as a suspected fourth cause; they were not one, and that
+file is unchanged.
+
+### The map still reads `.label` files — and that is now a decision, not a fallback
+
+Both the 19-class semantic label and the `moving-*` motion flag come straight
+from SemanticKITTI's raw files. Zero training, zero inference on the map path.
+The reason is no longer "the port is broken" but that ground-truth labels
+**isolate the mapping contribution from segmentation error**, which is what §9's
+evaluation is for. The model is reported **alongside** the map, never swapped
+into it, so no mapping number in this project depends on it.
+`semantics.get_frnet` / `segment*` still raise for exactly that reason — the
+message says "disabled", not "broken".
 
 **This is disclosed plainly, not hidden.** It is also the *right* call for the
 evaluation: the project's contribution is the variable-resolution mapping
@@ -283,7 +302,7 @@ src/perception/
   ground.py        Patchwork++ wire-in + loud fallback (§6)  [JP]
   reflectivity.py  eq (31) + the KITTI firmware-compensated path  [JP]
   instances.py     range-image connected-components clustering    [JP]
-  frnet/           non-functional port, kept + flagged       [JP]
+  frnet/           standalone port, WORKING (not wired in)   [JP]
 dashboard/
   __main__.py      `python -m vrgrid.dash` entry point       [JP]
   pipeline_view.py the real per-frame Rerun view             [JP]

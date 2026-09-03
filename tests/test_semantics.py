@@ -1,7 +1,8 @@
 """Semantic label mapping. [JP]
 
 Semantic class comes from the SemanticKITTI .label files, not from inference
-(the FRNet port is non-functional -- see src/perception/frnet/). These tests
+(the FRNet port works as of 2 Sep; the map does not use it, by choice -- see
+src/perception/semantics.py). These tests
 pin the raw-id -> 19-class map and the moving-* flag.
 """
 

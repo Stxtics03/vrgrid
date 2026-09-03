@@ -8,9 +8,15 @@
 model:
   name: "FRNet"
   num_classes: 20           # 19 semantic (0-18) + 1 ignore (19)
-  # FRNet is disabled (the standalone port is non-functional -- see
-  # src/perception/semantics.py). This path is only read if someone re-enables
-  # FRNetInference; override it with the VRGRID_FRNET_CHECKPOINT env var.
+  # The port WORKS (2 Sep, 98.3% point accuracy). FRNetInference is disabled
+  # anyway, by choice: the map takes semantics from the .label files so the
+  # mapping contribution stays isolated from segmentation quality. This path is
+  # what scripts/frnet_eval.py loads, and what FRNetInference would load if
+  # someone re-enabled it; override with the VRGRID_FRNET_CHECKPOINT env var.
+  #
+  # fov_up_deg / fov_down_deg below are the SENSOR's physical field of view.
+  # They are NOT the checkpoint's projection -- feeding them to the model was
+  # divergence 2 of 3. See perception/semantics.py FRNET_TRAIN_FOV_*.
   checkpoint: "checkpoints/frnet-semantickitti_seg.pth"
   # Range image / frustum projection parameters (HDL-64E on KITTI)
   input_height: 64

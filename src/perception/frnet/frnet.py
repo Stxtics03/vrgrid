@@ -33,7 +33,7 @@
 #   reported ALONGSIDE that, not swapped into it.
 # =============================================================================
 
-"""Full FRNet model — standalone inference, no mmcv/mmdet3d deps. NON-FUNCTIONAL."""
+"""Full FRNet model — standalone inference, no mmcv/mmdet3d deps."""
 
 import torch
 import torch.nn as nn
