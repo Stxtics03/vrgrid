@@ -52,24 +52,9 @@ As range increases, the physical spacing between consecutive LiDAR returns incre
 
 VRgrid instead uses **nested resolution rings**:
 
-```text
-             ┌────────────── 100 m ──────────────┐
-             │                                    │
-             │       40 cm resolution             │
-             │      ┌───────────────┐             │
-             │      │   50 m        │             │
-             │      │  20 cm        │             │
-             │      │  ┌─────────┐  │             │
-             │      │  │ 25 m    │  │             │
-             │      │  │ 10 cm   │  │             │
-             │      │  │ ┌─────┐ │  │             │
-             │      │  │ │10 m │ │  │             │
-             │      │  │ │ 5cm │ │  │             │
-             │      │  │ └─────┘ │  │             │
-             │      │  └─────────┘  │             │
-             │      └───────────────┘             │
-             └────────────────────────────────────┘
-```
+
+<img width="446" height="378" alt="image" src="https://github.com/user-attachments/assets/13fc47fc-a7d6-4cd9-b69c-c25e53491713" />
+
 
 ### VRgrid resolution schedule
 
